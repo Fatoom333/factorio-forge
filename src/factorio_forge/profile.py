@@ -87,6 +87,23 @@ def slugify(name: str) -> str:
     return slug.lower() or "profile"
 
 
+@dataclass(frozen=True)
+class Substitution:
+    """A mod used at a version other than the one the save recorded."""
+
+    name: str
+    wanted: tuple[int, int, int]
+    used: tuple[int, int, int]
+
+    def __str__(self) -> str:
+        wanted = "{}.{}.{}".format(*self.wanted)
+        used = "{}.{}.{}".format(*self.used)
+        return f"{self.name} {wanted} -> {used}"
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "wanted": list(self.wanted), "used": list(self.used)}
+
+
 @dataclass
 class ModLinkReport:
     """Outcome of assembling a profile's mod folder."""
@@ -94,12 +111,14 @@ class ModLinkReport:
     linked: list[str] = field(default_factory=list)
     copied: list[str] = field(default_factory=list)
     repacked: list[str] = field(default_factory=list)
+    substituted: list[Substitution] = field(default_factory=list)
     missing: list[ModRef] = field(default_factory=list)
+    outdated: list[Substitution] = field(default_factory=list)
     official: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return not self.missing
+        return not self.missing and not self.outdated
 
     def summary(self) -> str:
         parts = [f"{len(self.linked)} linked"]
@@ -107,8 +126,12 @@ class ModLinkReport:
             parts.append(f"{len(self.copied)} copied")
         if self.repacked:
             parts.append(f"{len(self.repacked)} repacked")
+        if self.substituted:
+            parts.append(f"{len(self.substituted)} newer")
         if self.official:
             parts.append(f"{len(self.official)} official")
+        if self.outdated:
+            parts.append(f"{len(self.outdated)} TOO OLD")
         if self.missing:
             parts.append(f"{len(self.missing)} MISSING")
         return ", ".join(parts)
@@ -117,6 +140,30 @@ class ModLinkReport:
 # Directories some archiving tools add at the root of a zip. Factorio ignores
 # them, but a loader that expects exactly one folder at the root does not.
 JUNK_TOP_LEVEL = frozenset({"__MACOSX"})
+
+# Mod archives are named `<name>_<version>.zip`, and mod names may themselves
+# contain underscores (AAI_Language_Pack_0.1.0.zip), so the split is on the last
+# underscore that is followed by something version-shaped.
+_ARCHIVE_NAME = re.compile(r"^(?P<name>.+)_(?P<version>\d+\.\d+\.\d+)$")
+
+
+def parse_archive_name(path: Path) -> tuple[str, tuple[int, int, int]] | None:
+    """Split a mod archive filename into its mod name and version."""
+    match = _ARCHIVE_NAME.match(path.stem)
+    if not match:
+        return None
+    major, minor, patch = (int(p) for p in match.group("version").split("."))
+    return match.group("name"), (major, minor, patch)
+
+
+def available_versions(mods_dir: Path, mod_name: str) -> list[tuple[int, int, int]]:
+    """Every version of one mod present in a mod folder, newest first."""
+    found = []
+    for archive in mods_dir.glob(f"{mod_name}_*.zip"):
+        parsed = parse_archive_name(archive)
+        if parsed and parsed[0] == mod_name:
+            found.append(parsed[1])
+    return sorted(found, reverse=True)
 
 
 def _top_level_names(archive: zipfile.ZipFile) -> set[str]:
@@ -171,6 +218,9 @@ class Profile:
     # What the last extraction produced. Recorded because extraction is not
     # reproducible -- see `data_fingerprint()` and docs/draftsman-notes.md.
     data_fingerprint: dict | None = None
+    # Mods used at a version the save did not record, because the player has
+    # since updated them. See docs/profiles.md.
+    mod_substitutions: list[dict] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # locations
@@ -225,6 +275,7 @@ class Profile:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "data_fingerprint": self.data_fingerprint,
+            "mod_substitutions": self.mod_substitutions,
             "mods": [
                 {"name": m.name, "version": list(m.version)}
                 for m in sorted(self.mods, key=lambda m: m.name.lower())
@@ -245,6 +296,7 @@ class Profile:
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
             data_fingerprint=data.get("data_fingerprint"),
+            mod_substitutions=data.get("mod_substitutions", []),
         )
 
     def write(self) -> Path:
@@ -340,10 +392,25 @@ class Profile:
 
             archive = source / f"{mod.name}_{mod.version_string}.zip"
             if not archive.is_file():
-                # The exact version is gone; a different one would silently
-                # change recipes, so treat it as missing rather than guess.
-                report.missing.append(mod)
-                continue
+                # Mirror what the game does when the installed mods have moved
+                # on since the save was played.
+                versions = available_versions(source, mod.name)
+                if not versions:
+                    report.missing.append(mod)
+                    continue
+                newest = versions[0]
+                if newest < mod.version:
+                    # Only older copies are installed. Factorio refuses a save
+                    # whose mods are newer than what is present, because data
+                    # migrations only run forwards, and so do we.
+                    report.outdated.append(
+                        Substitution(mod.name, mod.version, newest)
+                    )
+                    continue
+                # A newer copy is what the game would load, applying migrations.
+                # Recorded rather than silent: it can change recipes.
+                report.substituted.append(Substitution(mod.name, mod.version, newest))
+                archive = source / "{}_{}.{}.{}.zip".format(mod.name, *newest)
 
             target = self.mods_dir / archive.name
             if target.exists():
@@ -365,6 +432,10 @@ class Profile:
 
         self._write_mod_list()
         self._copy_mod_settings(source)
+        # Keep substitutions with the profile: data extracted against a mod the
+        # save never saw should be traceable long after this call.
+        self.mod_substitutions = [s.to_dict() for s in report.substituted]
+        self.write()
         return report
 
     def _write_mod_list(self) -> None:

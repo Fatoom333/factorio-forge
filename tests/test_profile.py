@@ -19,7 +19,9 @@ from factorio_forge.profile import (
     OFFICIAL_MODS,
     Profile,
     ProfileError,
+    available_versions,
     needs_repacking,
+    parse_archive_name,
     repack_without_junk,
     slugify,
 )
@@ -194,26 +196,105 @@ class TestArchiveRepacking:
         assert not needs_repacking(broken)
 
 
-class TestModLinking:
-    def test_missing_exact_version_is_reported_not_substituted(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+class TestArchiveNames:
+    @pytest.mark.parametrize(
+        "filename, name, version",
+        [
+            ("Krastorio2_2.0.19.zip", "Krastorio2", (2, 0, 19)),
+            ("AAI_Language_Pack_0.1.0.zip", "AAI_Language_Pack", (0, 1, 0)),
+            ("belt-balancer-3_1.2.10.zip", "belt-balancer-3", (1, 2, 10)),
+        ],
+    )
+    def test_underscores_in_mod_names_survive(
+        self, filename: str, name: str, version: tuple[int, int, int]
     ) -> None:
-        """A different version of a mod changes recipes, so it is never
-        silently accepted in place of the one the save recorded."""
+        assert parse_archive_name(Path(filename)) == (name, version)
+
+    def test_something_that_is_not_a_mod_archive(self) -> None:
+        assert parse_archive_name(Path("mod-list.json")) is None
+        assert parse_archive_name(Path("Krastorio2.zip")) is None
+
+    def test_versions_come_back_newest_first(self, tmp_path: Path) -> None:
+        for version in ("1.2.3", "1.10.0", "1.3.0"):
+            (tmp_path / f"helmod_{version}.zip").touch()
+        (tmp_path / "other_9.9.9.zip").touch()
+        assert available_versions(tmp_path, "helmod") == [(1, 10, 0), (1, 3, 0), (1, 2, 3)]
+
+
+class TestModVersionPolicy:
+    """The ladder mirrors what Factorio itself does with a save whose mods have
+    moved on: exact wins, newer is loaded and migrated, older is refused."""
+
+    def prepare(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        installed: list[str],
+        wanted: tuple[int, int, int] = (2, 0, 19),
+    ):
         mods = tmp_path / "mods"
         mods.mkdir()
-        # The player has a newer version than the save wants.
-        with zipfile.ZipFile(mods / "Krastorio2_2.0.20.zip", "w") as zf:
-            zf.writestr("Krastorio2_2.0.20/info.json", '{"name": "Krastorio2"}')
+        for version in installed:
+            with zipfile.ZipFile(mods / f"Krastorio2_{version}.zip", "w") as zf:
+                zf.writestr(f"Krastorio2_{version}/info.json", '{"name": "Krastorio2"}')
         monkeypatch.setattr(paths, "mods_dir", lambda: mods)
 
-        profile = Profile.from_save(make_save())
+        profile = Profile.from_save(
+            make_save(mods=[ModRef("base", (2, 0, 77)), ModRef("Krastorio2", wanted)])
+        )
         profile.write()
-        report = profile.prepare_mods()
+        return profile, profile.prepare_mods()
 
+    def test_exact_version_is_used_as_is(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        profile, report = self.prepare(monkeypatch, tmp_path, ["2.0.19"])
+        assert report.ok
+        assert report.linked == ["Krastorio2"]
+        assert report.substituted == []
+        assert (profile.mods_dir / "Krastorio2_2.0.19.zip").is_file()
+
+    def test_newer_version_is_used_and_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        profile, report = self.prepare(monkeypatch, tmp_path, ["2.0.25"])
+        assert report.ok
+        assert [str(s) for s in report.substituted] == ["Krastorio2 2.0.19 -> 2.0.25"]
+        assert (profile.mods_dir / "Krastorio2_2.0.25.zip").is_file()
+
+    def test_newest_is_chosen_when_several_are_newer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        profile, report = self.prepare(monkeypatch, tmp_path, ["2.0.20", "2.0.25", "2.0.22"])
+        assert [s.used for s in report.substituted] == [(2, 0, 25)]
+
+    def test_only_older_installed_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Migrations run forwards only, so the game will not load this either."""
+        _, report = self.prepare(monkeypatch, tmp_path, ["2.0.10", "2.0.15"])
+        assert not report.ok
+        assert [str(s) for s in report.outdated] == ["Krastorio2 2.0.19 -> 2.0.15"]
+        assert report.substituted == []
+
+    def test_absent_mod_is_missing_not_substituted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _, report = self.prepare(monkeypatch, tmp_path, [])
         assert not report.ok
         assert [m.name for m in report.missing] == ["Krastorio2"]
-        assert report.official == ["base"]
+
+    def test_substitutions_are_persisted_to_the_profile(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        profile, _ = self.prepare(monkeypatch, tmp_path, ["2.0.25"])
+        reloaded = Profile.load(profile.name)
+        assert reloaded.mod_substitutions == [
+            {"name": "Krastorio2", "wanted": [2, 0, 19], "used": [2, 0, 25]}
+        ]
+
+
+class TestModLinking:
 
     def test_present_mod_is_linked_and_official_ones_are_not(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
