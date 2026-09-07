@@ -5,9 +5,11 @@ mod set and the way *you* build.
 
 [Русская версия](README.ru.md)
 
-> **Status: early development.** The path layer and project skeleton exist; the
-> profile system, companion mod, renderer and generators are being built. Nothing
-> here is usable yet.
+> **Status: early development.** Reading saves, building profiles and extracting
+> game data all work: every distinct mod set in a real save folder of a hundred
+> saves builds. What is not written yet is the part that produces blueprints —
+> the renderer, the companion mod and the generators. Nothing here is usable for
+> its stated purpose yet.
 
 ## What it is
 
@@ -22,15 +24,18 @@ blueprints you already use — and generating inside that profile's conventions.
 
 ## How it works
 
+- **The mod set of a save** is read from the header of the save file itself, with
+  no need to launch the game. Nothing beyond that header is parsed: the rest is
+  Factorio's internal format and not worth fighting.
 - **Blueprint strings, entity data and collision boxes** come from
   [`factorio-draftsman`](https://github.com/redruin1/factorio-draftsman), which
   runs Factorio's real Lua data lifecycle over your installed mods. Mod
   interactions are resolved by the game's own rules rather than guessed.
-- **Your base and its research state** come from a small companion mod that
-  exports them from inside the game. Save files are not parsed directly — their
-  format is internal and version-specific, so the game itself acts as the parser.
+- **Your base and its research state** will come from a small companion mod that
+  exports them from inside the game, where the game itself acts as the parser.
+  *(Not written yet.)*
 - **Your building style** is measured from reference blueprints rather than
-  asked for in a questionnaire.
+  asked for in a questionnaire. *(Not written yet.)*
 
 ## Requirements
 
@@ -40,24 +45,44 @@ blueprints you already use — and generating inside that profile's conventions.
 ## Setup
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/Fatoom333/factorio-forge
 cd factorio-forge
 python -m venv .venv
-.venv/Scripts/activate      # Windows
-source .venv/bin/activate   # Linux / macOS
+```
+
+Activate the environment — `.venv\Scripts\activate` on Windows (`Activate.ps1`
+from PowerShell), `source .venv/bin/activate` on Linux and macOS — then:
+
+```bash
 pip install -e ".[dev]"
 ```
+
+> **Note.** This installs `factorio-draftsman` from
+> [a fork](https://github.com/Fatoom333/factorio-draftsman/tree/3.3.1-forge)
+> rather than from PyPI. No released version can extract game data for the mod
+> sets this project targets; the fork is upstream 3.3.1 plus five fixes and
+> nothing else, all reported upstream. See
+> [docs/draftsman-notes.md](docs/draftsman-notes.md) for what each one is and
+> [FORK.md](https://github.com/Fatoom333/factorio-draftsman/blob/3.3.1-forge/FORK.md)
+> for the diffs. When they are released this goes back to a plain dependency.
 
 Then check that the game was found:
 
 ```bash
-python -m factorio_forge.paths
+factorio-forge paths
 ```
 
 Every path is detected automatically, primarily by reading the paths Factorio
 itself recorded in its last log — which works for Steam libraries on any drive,
 standalone installs and all three platforms. Nothing needs configuring unless
 detection fails.
+
+## Documentation
+
+- [Profiles](docs/profiles.md) — what a profile is, how mod sets are resolved,
+  and why extraction happens once
+- [Notes on factorio-draftsman](docs/draftsman-notes.md) — what we rely on, what
+  was verified by hand, and why the dependency points at a fork
 
 ## Where things are stored
 

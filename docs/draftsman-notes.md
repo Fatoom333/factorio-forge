@@ -55,14 +55,19 @@ and the library validates which directions each entity type accepts. Placing a
 belt diagonally raises a `DirectionWarning` listing the permitted set. That is
 placement-rule validation we would otherwise have had to write.
 
-**Version targeting works and actually converts.** `to_string(version=...)`
-accepts `(1, 0)`, `(2, 0)` and `(2, 1)`; exporting to `(1, 0)` rewrites
-direction values into the old 8-value scheme. Registered converter versions are
-visible in `draftsman/serialization.py`.
+**Version targeting works and actually converts, for the versions that are
+registered.** `to_string(version=...)` rewrites the output for the target: an
+export to `(1, 0)` puts direction values back into the old 8-value scheme.
 
-Note that Factorio 2.1 has **not been released** — it exists only as a public
-test branch. Our target is 2.0 stable, and `(2, 1)` support is forward-looking
-groundwork that should not be relied upon until the version actually ships.
+Which versions exist depends on the line. On 3.3.1, which is what we use,
+`draftsman_converters.versions` holds `(1, 0)` and `(2, 0)`; `(2, 1)` was added
+in 4.0.0. **An unregistered target does not raise** — passing `(2, 1)` on 3.3.1
+returns a string as though it had worked. So the value has to be checked against
+`draftsman/serialization.py` rather than assumed from the fact that the call
+succeeded.
+
+None of this is pressing, because Factorio 2.1 has **not been released** — it
+exists only as a public test branch, and our target is 2.0 stable.
 
 ## Environment layout, and the constraint it puts on profiles
 

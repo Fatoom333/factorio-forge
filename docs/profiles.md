@@ -15,7 +15,9 @@ resolves to, and eventually the building style measured from its blueprints.
 ```
 <forge home>/profiles/<name>/
     profile.json     the save it came from, game version, mod set, provenance
-    mods/            an isolated mod folder for this set alone
+    mods/            an isolated mod folder for this set alone: hard-linked
+                     archives, a generated mod-list.json, and a copy of
+                     mod-settings.dat
     data/            game data extracted for this set, and no other
     blueprints/      reference blueprints, the source of the base's style
     notes.md         accumulated preferences, in the player's own words
@@ -107,10 +109,28 @@ Each extraction records counts and a digest of every prototype name into
 `data_fingerprint`. That is not a correctness check; it answers "is this still
 the data my blueprint was built against?", which is the question that matters.
 
+### A known gap: startup mod settings
+
+Startup settings feed into the data lifecycle and therefore change recipes — how
+long an underground pipe may run, whether a mod's loaders exist at all. A save
+carries its own settings in its header, but that section is not parsed yet, so
+the profile copies the player's current global `mod-settings.dat` instead.
+
+For a player who has not changed those settings since playing the save this is
+exactly right, and it is why extraction works at all. But if the settings have
+moved on, or differ between saves, the extracted data is subtly wrong in a way
+nothing currently detects. Worth fixing by reading the settings out of the save
+header, alongside the mod list that is already read from it.
+
 ## Sharing a profile
 
 A profile is self-contained and holds no absolute paths, so its folder can be
 zipped and given to someone else — a way to pass around a building style rather
-than a blueprint. The extracted game data inside it is derived from the
-recipient's own game and mods on their machine, and is not something to
-redistribute; strip `data/` before sharing.
+than a single blueprint.
+
+Two things should come out first. `data/` is game data extracted from the
+sender's own installation and mods, which is not ours to redistribute and would
+be wrong for the recipient anyway; they regenerate it from their own copy of the
+game. `mods/` holds hard links to mod archives, which is likewise someone else's
+work to distribute. What is worth sharing is `profile.json`, `blueprints/` and
+`notes.md`.
