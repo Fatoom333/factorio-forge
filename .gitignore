@@ -1,0 +1,34 @@
+# Local data must never enter the repository. Profiles, extracted game data and
+# resolved machine paths live under the forge home (outside any checkout by
+# default); these rules are a second line of defence in case someone points
+# FACTORIO_FORGE_HOME at the working tree.
+profiles/
+cache/
+config.json
+config.local.json
+*.dump
+script-output/
+
+# Extracted Factorio and mod data is generated per machine, never committed:
+# it depends on the installed game version and the enabled mod set, and it is
+# not ours to redistribute.
+data/game/
+*.data-raw.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

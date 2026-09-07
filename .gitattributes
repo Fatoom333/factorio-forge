@@ -1,0 +1,10 @@
+# Normalise line endings so the repository is identical regardless of the
+# platform a contributor works on.
+* text=auto eol=lf
+
+# Lua for the companion mod is read by Factorio on every platform.
+*.lua text eol=lf
+
+*.png binary
+*.zip binary
+*.pkl binary

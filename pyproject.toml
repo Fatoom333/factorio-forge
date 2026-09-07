@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factorio-forge"
+version = "0.1.0"
+description = "Generate Factorio blueprints from a description, tailored to your own save and building style."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["factorio", "blueprint", "generator", "factory"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Games/Entertainment",
+]
+
+dependencies = [
+    # Blueprint string codec, entity prototypes, collision boxes and the
+    # `draftsman update` data lifecycle that resolves an installed mod set.
+    #
+    # 4.x is required, not merely preferred: it separates construction from
+    # import (`Blueprint.from_string`), which 3.x did differently, and it adds
+    # a forward-looking 2.1 export target. Our actual target is 2.0 stable;
+    # 2.1 is still only a public test branch.
+    "factorio-draftsman>=4.0.0,<5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+factorio-forge = "factorio_forge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
