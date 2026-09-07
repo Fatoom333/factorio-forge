@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -256,11 +257,46 @@ def _entity_details(entity) -> dict:
     return details
 
 
+def snap_cell(blueprint, bounds: Bounds) -> tuple[float, float, float, float] | None:
+    """The grid cell a blueprint declares, in blueprint tile coordinates.
+
+    Returns ``(left, top, width, height)``, or None when no grid is declared.
+    The cell is placed so the blueprint's top-left corner sits `offset` inside
+    it, which is what `position-relative-to-grid` describes.
+    """
+    snap = getattr(blueprint, "snapping_grid_size", None)
+    if not snap or not (snap.x and snap.y):
+        return None
+    offset = getattr(blueprint, "position_relative_to_grid", None)
+    offset_x = float(offset.x) if offset is not None else 0.0
+    offset_y = float(offset.y) if offset is not None else 0.0
+    return (
+        bounds.left - offset_x,
+        bounds.top - offset_y,
+        float(snap.x),
+        float(snap.y),
+    )
+
+
 def render_svg(blueprint) -> str:
     """The blueprint as a standalone SVG element."""
     entities = list(blueprint.entities)
     tiles = list(blueprint.tiles)
     bounds = measure(entities, tiles)
+
+    # A declared grid cell is usually larger than what is in it — a city block
+    # is mostly the space it reserves. Drawing only the entities would put the
+    # cell boundary off the edge of the picture, which is precisely the thing
+    # worth seeing, so the view is widened to hold it.
+    cell = snap_cell(blueprint, bounds)
+    if cell is not None:
+        cell_left, cell_top, cell_w, cell_h = cell
+        bounds = Bounds(
+            min(bounds.left, math.floor(cell_left)),
+            min(bounds.top, math.floor(cell_top)),
+            max(bounds.right, math.ceil(cell_left + cell_w)),
+            max(bounds.bottom, math.ceil(cell_top + cell_h)),
+        )
 
     width = bounds.width * CELL + MARGIN * 2
     height = bounds.height * CELL + MARGIN * 2
@@ -314,6 +350,22 @@ def render_svg(blueprint) -> str:
             f'<text class="ruler" x="{MARGIN - 8}" y="{y + 4:.1f}" text-anchor="end">'
             f"{bounds.top + i}</text>"
         )
+
+    # The declared grid cell, tiled across whatever the picture covers, so a
+    # blueprint bigger than its own cell shows the overlap as crossed lines.
+    if cell is not None:
+        cell_left, cell_top, cell_w, cell_h = cell
+        row = cell_top
+        while row < bounds.bottom:
+            column = cell_left
+            while column < bounds.right:
+                cx, cy = px(column, row)
+                parts.append(
+                    f'<rect class="snap" x="{cx:.1f}" y="{cy:.1f}" '
+                    f'width="{cell_w * CELL:.1f}" height="{cell_h * CELL:.1f}"/>'
+                )
+                column += cell_w
+            row += cell_h
 
     # Entities, drawn at their real footprint.
     for index, entity in enumerate(entities):
@@ -420,6 +472,8 @@ button {
 button:hover { border-color: var(--grid-heavy); }
 .grid { stroke: var(--grid); stroke-width: 1; }
 .grid.heavy { stroke: var(--grid-heavy); }
+.snap { fill: none; stroke: #e0574f; stroke-width: 2; stroke-dasharray: 7 5; opacity: .8; }
+.warn { color: #c2562e; }
 .tile { fill: var(--ground); }
 .ruler { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .label { fill: #10121a; font-size: 10px; font-weight: 600; opacity: .8; }
@@ -469,6 +523,99 @@ if (copy) {
 """
 
 
+def _snapping_card(blueprint, bounds: Bounds) -> str:
+    """Grid snapping, which is what makes city blocks tile instead of drift.
+
+    A blueprint can declare a cell it occupies. With absolute snapping the cell
+    is pinned to world coordinates, so every copy lands on the same lattice;
+    without it the cell only fixes the blueprint's own size. Getting this wrong
+    is invisible in a picture of the entities alone, and shows up in game as
+    blocks that will not line up.
+    """
+    snap = getattr(blueprint, "snapping_grid_size", None)
+    if not snap or not (snap.x and snap.y):
+        return ""
+
+    absolute = bool(getattr(blueprint, "absolute_snapping", False))
+    offset = getattr(blueprint, "position_relative_to_grid", None)
+    rows = [
+        ("grid", f"{snap.x:g} × {snap.y:g} tiles"),
+        ("snapping", "absolute — pinned to world coordinates" if absolute else "relative"),
+    ]
+    if absolute and offset is not None and (offset.x or offset.y):
+        rows.append(("offset in grid", f"{offset.x:g}, {offset.y:g}"))
+    if getattr(blueprint, "double_grid_aligned", False):
+        rows.append(("alignment", "double grid (rails)"))
+
+    note = ""
+    if bounds.width > snap.x or bounds.height > snap.y:
+        note = (
+            '<p class="warn" style="margin:8px 0 0">The contents are larger than '
+            "the declared cell, so copies will overlap.</p>"
+        )
+
+    body = "\n".join(f"<dt>{k}</dt><dd>{html.escape(v)}</dd>" for k, v in rows)
+    return f'<div class="card"><h2>grid snapping</h2><dl>{body}</dl>{note}</div>'
+
+
+def _field(parameter, *names):
+    """Read a parameter field however it happens to be represented.
+
+    Assigning a list of dicts leaves them as dicts; parsing a blueprint string
+    yields attrs objects instead. Both reach here, and the game's own spelling
+    hyphenates where Python underscores, so every accepted name is tried.
+    """
+    for name in names:
+        if isinstance(parameter, dict):
+            if name in parameter:
+                return parameter[name]
+        else:
+            value = getattr(parameter, name, None)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _parameters_card(blueprint) -> str:
+    """Parameters, in the order the game will ask for them.
+
+    Order is significant: a parameter's formula can only refer to ones declared
+    before it, and that order is what the player is prompted in. Showing the
+    list as a numbered sequence rather than a set is the point.
+    """
+    parameters = list(getattr(blueprint, "parameters", None) or [])
+    if not parameters:
+        return ""
+
+    rows = []
+    for index, parameter in enumerate(parameters):
+        name = _field(parameter, "name") or f"parameter-{index}"
+        kind = _field(parameter, "type") or ""
+        if kind == "id":
+            value = str(_field(parameter, "id") or "(any)")
+            ingredient_of = _field(parameter, "ingredient_of", "ingredient-of")
+            if ingredient_of:
+                value += f" — ingredient of {ingredient_of}"
+        else:
+            value = str(_field(parameter, "number") or "")
+            formula = _field(parameter, "formula")
+            if formula:
+                value = f"= {formula}"
+            variable = _field(parameter, "variable")
+            if variable:
+                value += f"  ({variable})"
+        rows.append(
+            f'<div><span class="count" style="margin:0 8px 0 0">{index}</span>'
+            f"{html.escape(str(name))}"
+            f'<span class="count">{html.escape(value)}</span></div>'
+        )
+
+    return (
+        '<div class="card"><h2>parameters, in order</h2>'
+        f'<div class="legend">{"".join(rows)}</div></div>'
+    )
+
+
 def render_html(blueprint, title: str | None = None, blueprint_string: str | None = None) -> str:
     """A complete, self-contained page showing the blueprint."""
     entities = list(blueprint.entities)
@@ -496,6 +643,9 @@ def render_html(blueprint, title: str | None = None, blueprint_string: str | Non
     if tile_count:
         facts.append(("tiles", str(tile_count)))
     facts_html = "\n".join(f"<dt>{k}</dt><dd>{html.escape(v)}</dd>" for k, v in facts)
+
+    snapping_card = _snapping_card(blueprint, bounds)
+    parameters_card = _parameters_card(blueprint)
 
     if blueprint_string is None:
         try:
@@ -526,6 +676,8 @@ def render_html(blueprint, title: str | None = None, blueprint_string: str | Non
   <div class="canvas">{render_svg(blueprint)}</div>
   <div class="side">
     <div class="card"><h2>about</h2><dl>{facts_html}</dl></div>
+    {snapping_card}
+    {parameters_card}
     <div class="card"><h2>legend</h2><div class="legend">{legend}</div></div>
     {string_card}
   </div>

@@ -190,6 +190,105 @@ class TestDetails:
         assert "input priority" not in info["details"]
 
 
+class TestSnapping:
+    """Grid snapping is what makes city blocks tile rather than drift, and it is
+    invisible in a picture of the entities alone."""
+
+    def blueprint_with_grid(self, grid=(24, 24), offset=(2, 2), absolute=True) -> Blueprint:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.snapping_grid_size = grid
+        bp.absolute_snapping = absolute
+        bp.position_relative_to_grid = offset
+        return bp
+
+    def test_no_grid_declared_means_nothing_drawn(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        assert render.snap_cell(bp, render.measure(bp.entities)) is None
+        assert 'class="snap"' not in render.render_svg(bp)
+
+    def test_cell_is_placed_by_the_declared_offset(self) -> None:
+        bp = self.blueprint_with_grid(grid=(24, 24), offset=(2, 3))
+        bounds = render.measure(bp.entities)
+        assert render.snap_cell(bp, bounds) == (bounds.left - 2, bounds.top - 3, 24, 24)
+
+    def test_the_view_widens_to_hold_the_cell(self) -> None:
+        """Otherwise the boundary falls outside the picture, which is the whole
+        thing worth looking at."""
+        bp = self.blueprint_with_grid(grid=(24, 24), offset=(2, 2))
+        svg = parse_svg(bp)
+        rect = svg.find(f".//{SVG_NS}rect[@class='snap']")
+        assert rect is not None
+        assert float(rect.get("width")) == 24 * render.CELL
+
+    def test_cells_tile_across_a_blueprint_larger_than_one(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append("transport-belt", tile_position=(20, 20))
+        bp.snapping_grid_size = (8, 8)
+        bp.absolute_snapping = True
+        svg = parse_svg(bp)
+        assert len(svg.findall(f".//{SVG_NS}rect[@class='snap']")) > 1
+
+    def test_the_panel_states_absolute_versus_relative(self) -> None:
+        absolute = render.render_html(self.blueprint_with_grid(absolute=True))
+        relative = render.render_html(self.blueprint_with_grid(absolute=False))
+        assert "absolute" in absolute
+        assert "grid snapping" in relative
+
+    def test_contents_larger_than_the_cell_are_called_out(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append("transport-belt", tile_position=(30, 0))
+        bp.snapping_grid_size = (8, 8)
+        page = render.render_html(bp)
+        assert "larger than" in page and "overlap" in page
+
+    def test_snapping_survives_a_round_trip(self) -> None:
+        bp = self.blueprint_with_grid()
+        back = Blueprint.from_string(bp.to_string())
+        assert back.snapping_grid_size.x == 24
+        assert back.absolute_snapping is True
+        assert back.position_relative_to_grid.x == 2
+
+
+class TestParameters:
+    """Parameter order is significant: a formula may only refer to parameters
+    declared before it, and the list order is the order the player is asked."""
+
+    def parameterised(self) -> Blueprint:
+        bp = Blueprint()
+        bp.entities.append("constant-combinator", tile_position=(0, 0))
+        bp.parameters = [
+            {"type": "id", "name": "Recipe", "id": "electronic-circuit"},
+            {"type": "number", "name": "Machines", "number": "3"},
+            {"type": "number", "name": "Belt", "number": "6",
+             "formula": "p1 * 2", "dependent": True},
+        ]
+        return bp
+
+    def test_no_parameters_means_no_panel(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("constant-combinator", tile_position=(0, 0))
+        assert "parameters, in order" not in render.render_html(bp)
+
+    def test_parameters_are_listed_in_declaration_order(self) -> None:
+        page = render.render_html(self.parameterised())
+        assert "parameters, in order" in page
+        positions = [page.index(name) for name in ("Recipe", "Machines", "Belt")]
+        assert positions == sorted(positions)
+
+    def test_a_formula_is_shown_rather_than_its_current_value(self) -> None:
+        page = render.render_html(self.parameterised())
+        assert "= p1 * 2" in page
+
+    def test_parameters_survive_a_round_trip(self) -> None:
+        bp = self.parameterised()
+        back = Blueprint.from_string(bp.to_string())
+        assert [p.name for p in back.parameters] == ["Recipe", "Machines", "Belt"]
+
+
 class TestPage:
     def test_is_self_contained(self) -> None:
         """Nothing to fetch: the file has to work offline and inside a sandbox."""

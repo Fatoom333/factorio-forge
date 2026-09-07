@@ -61,6 +61,46 @@ not run.
 
 Tiles — concrete and the like — are drawn underneath as ground.
 
+## Grid snapping
+
+A blueprint can declare the grid cell it occupies, and whether that cell is
+pinned to world coordinates. This is what makes city blocks tile instead of
+drift, and it is completely invisible in a picture of the entities alone.
+
+The declared cell is drawn as a dashed outline, and **the view widens to hold
+it**. That matters more than it sounds: a block is mostly the space it reserves,
+so the cell is usually larger than what is in it, and drawing only the entities
+would put the boundary off the edge of the picture — precisely the thing worth
+looking at. A blueprint larger than its own cell gets the cell tiled across it,
+so the overlap is visible, and the panel says so in words.
+
+The panel also reports whether snapping is absolute or relative, the offset
+within the cell, and whether the blueprint is double-grid aligned as rails
+require.
+
+One caveat: the cell is drawn on the reading that `position-relative-to-grid`
+offsets the blueprint's top-left corner within the cell. The numbers in the
+panel are read straight from the blueprint and are certainly right; the
+*placement* of the outline rests on that reading, and is worth confirming
+against a real city-block blueprint from a game.
+
+## Parameters
+
+Factorio 2.0 blueprints can declare parameters, filled in when the blueprint is
+pasted. They are listed **in order and numbered**, because the order is not
+decoration: a parameter's formula may only refer to parameters declared before
+it, and the list order is the order the player is asked. A set would lose that;
+a numbered sequence does not.
+
+An id parameter shows what it currently holds and, where it derives from a
+recipe, which parameter it is an ingredient of. A number parameter shows its
+formula rather than its current value, since the formula is the interesting
+part.
+
+Parameters can arrive either as plain dictionaries, if something assigned them,
+or as objects, if the blueprint came from a string; both are read, and the
+game's hyphenated spellings are accepted alongside the Python ones.
+
 **There are no sprites.** Shipping the game's art would mean redistributing
 Wube's work, and it would not help: while building a generator, what matters is
 footprint, orientation and type, and those read better as flat colour than as
