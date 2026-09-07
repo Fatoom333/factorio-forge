@@ -87,18 +87,47 @@ against a profile's mod folder, copy the resulting data files into the profile,
 and swap them back in when that profile is activated. It is a small amount of
 file shuffling and it keeps the profiles genuinely independent.
 
-## Freshness caveat
+## Why the dependency points at a fork
 
-Version 4.0.0 was published on 2026-09-07 — the same day it was adopted here.
-It is a major release, so undiscovered regressions are plausible.
+No released version can build game data for the mod sets this project exists to
+serve, so the dependency is temporarily a fork of upstream 3.3.1 carrying two
+fixes. Three separate defects are involved.
 
-More importantly, it bundles `factorio-data` 2.1.17, which comes from
-Factorio's **public test branch**, not a released version. The stable game is
-2.0.x. So the library's default bundled dataset is ahead of any released game
-and may contain entities, recipes and fields that do not exist in a normal
-install.
+**4.0.0 cannot run `update` at all.** It loads
+`compatibility/defines/<major>.<minor>.lua`, and the published wheel does not
+contain that directory, so every run dies on a missing file regardless of game
+version or mods. Reported as upstream issue #227. This rules out the 4.x line,
+which is also why the fork branches from the `3.3.1` tag rather than `main`.
 
-This is mostly harmless for us, because a profile regenerates its data from the
-player's own installation rather than using the bundle — but it means the
-bundled dataset must never be treated as ground truth, and anything unfamiliar
-in it should be checked against the actual game before being relied upon.
+**`require` does not return the cached module.** `compatibility/interface.lua`
+clears `package.loaded` after every call, so requiring the same file twice
+returns two different values. Mods routinely have one file require a shared
+table and add to it while another requires the same table and uses what was
+added; the second file gets a fresh copy and the additions are gone. The
+clearing exists for a real reason — `package.loaded` is keyed by the name as
+written, so one mod's `utils` would satisfy another mod's `require("utils")` —
+but it also destroys caching within a mod. Keying a cache on the resolved path,
+which `require` already computes, satisfies both.
+
+**A Space Age prototype is read without checking it exists.** `get_items`
+extracts `space-platform-starter-pack` whenever the game version is 2.0 or
+newer, but that prototype belongs to the expansion and is absent without it, so
+extraction fails for every mod set that does not include Space Age.
+`get_signals` in the same file already tests for presence; the fix makes
+`get_items` consistent with it.
+
+Both patched defects are reported upstream with reproductions and diffs. When
+they are released, the dependency goes back to a plain version specifier and the
+fork is abandoned — nothing in this project depends on the fork existing beyond
+that.
+
+## The bundled dataset is not ground truth
+
+Draftsman ships a copy of `factorio-data`, and on the 4.x line that copy tracks
+2.1.x — which comes from Factorio's **public test branch**, not a released
+version. The stable game is 2.0.x.
+
+This matters little in practice, because every profile regenerates its data from
+the player's own installation rather than using the bundle. But the bundle
+should never be treated as authoritative, and anything unfamiliar in it wants
+checking against the actual game first.

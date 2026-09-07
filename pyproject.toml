@@ -20,16 +20,21 @@ dependencies = [
     # Blueprint string codec, entity prototypes, collision boxes and the
     # `draftsman update` data lifecycle that resolves an installed mod set.
     #
-    # Pinned below 4.0 deliberately. 4.0.0 cannot extract data from a game
-    # installation at all: it looks for `compatibility/defines/<major>.<minor>.lua`
-    # but the published wheel ships only the older flat `compatibility/defines.lua`,
-    # so every `update` run dies on a missing file. 3.3.1 works, and its bundled
-    # data tracks Factorio 2.0.77, which is the current stable game.
+    # This points at a fork, temporarily, because no released version can build
+    # game data for the mod sets we care about:
     #
-    # Revisit when 4.x ships that directory. The API we use (`Blueprint.from_string`,
-    # `update_draftsman_data`) is identical across both, so moving up should be a
-    # version bump and nothing more.
-    "factorio-draftsman>=3.3.1,<4",
+    #   * 4.0.0 cannot run `update` at all -- it loads
+    #     `compatibility/defines/<major>.<minor>.lua`, which the published wheel
+    #     does not contain (upstream issue #227).
+    #   * 3.3.1 runs, but `require` returns a fresh copy of a module on every
+    #     call, which breaks any mod whose files share a table -- a common
+    #     layout -- and it reads a Space Age prototype without checking whether
+    #     the expansion is loaded, which fails for every mod set without it.
+    #
+    # The fork is upstream 3.3.1 plus those last two fixes and nothing else;
+    # both are reported upstream. See its FORK.md. Once they are released this
+    # goes back to a plain version specifier.
+    "factorio-draftsman @ git+https://github.com/Fatoom333/factorio-draftsman@3.3.1-forge",
 ]
 
 [project.optional-dependencies]
