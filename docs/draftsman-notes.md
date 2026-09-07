@@ -1,8 +1,11 @@
 # Notes on factorio-draftsman
 
 What we rely on from the library, and what was verified by hand rather than
-assumed. Everything below was checked against **draftsman 4.0.0** on
-**Factorio 2.0.77**.
+assumed. Everything below was checked on **Factorio 2.0.77**, against
+**draftsman 3.3.1** and the fork of it described below, except where 4.0.0 is
+named explicitly.
+
+[Русская версия](draftsman-notes.ru.md)
 
 ## Why we depend on it at all
 
@@ -90,8 +93,8 @@ file shuffling and it keeps the profiles genuinely independent.
 ## Why the dependency points at a fork
 
 No released version can build game data for the mod sets this project exists to
-serve, so the dependency is temporarily a fork of upstream 3.3.1 carrying two
-fixes. Three separate defects are involved.
+serve, so the dependency is temporarily a fork of upstream 3.3.1 carrying three
+fixes. Four separate defects are involved.
 
 **4.0.0 cannot run `update` at all.** It loads
 `compatibility/defines/<major>.<minor>.lua`, and the published wheel does not
@@ -116,10 +119,76 @@ extraction fails for every mod set that does not include Space Age.
 `get_signals` in the same file already tests for presence; the fix makes
 `get_items` consistent with it.
 
-Both patched defects are reported upstream with reproductions and diffs. When
-they are released, the dependency goes back to a plain version specifier and the
-fork is abandoned — nothing in this project depends on the fork existing beyond
-that.
+**`feature_flags` never reached mods.** The global was built by formatting a
+Python boolean into Lua source, which yields `True` or `False`; Lua's literals
+are lowercase, so both were read as undefined globals and every flag came out
+`nil` whatever the DLC state. The visible symptom was that `--no-dlc` changed
+nothing — it had in fact never worked, having arrived in the same commit as the
+formatting mistake. The real cost is quieter: a mod gating content on
+`feature_flags.quality` silently contributed the wrong variant, with no error
+anywhere. Mods comparing a flag against `false` were affected too, since
+`nil == false` is false.
+
+All three patched defects are reported upstream with reproductions and diffs.
+When they are released, the dependency goes back to a plain version specifier
+and the fork is abandoned — nothing in this project depends on the fork existing
+beyond that.
+
+## Extraction is not reproducible, and that is expected
+
+Running the same extraction twice over an identical mod set can produce
+slightly different data. This was measured, not guessed:
+
+| Profile | Repeats | Recipe counts |
+| --- | --- | --- |
+| vanilla + Space Age, no other mods | 3 | 658, 657, 658 |
+| Krastorio 2, 28 mods | 6 | 1851, 1851, 1833, 1851, 1833, 1833 |
+
+The varying names are always generated ones — barrel recycling recipes in the
+vanilla case, Dectorio vegetation and its Krastorio crushing counterparts in the
+modded one. The stable core is identical every time.
+
+Note the first row: it contains no third-party mods at all, so this is not some
+mod misbehaving.
+
+### Why
+
+Factorio's own data stage extends a table while iterating it. From
+`quality/data-updates.lua`:
+
+```lua
+for name, recipe in pairs(data.raw.recipe) do
+  recycling.generate_recycling_recipe(recipe)   -- adds to data.raw.recipe
+end
+```
+
+The Lua manual leaves this undefined: you may not assign to a non-existent field
+of a table during traversal. Whether a newly added recipe is reached by the loop
+still running depends on where it lands internally.
+
+In the real game that lands the same way every time, so nothing is ever noticed.
+Under the stock Lua that the extraction runs on, string hashing is seeded per
+process — six subprocesses produced six different iteration orders for the same
+twelve keys — so the same undefined behaviour resolves differently each run.
+
+Upstream tracks the general form of this as issue #214, "Draftsman should use
+Factorio's Lua 5.2 instead of regular Lua 5.2".
+
+### What we do about it
+
+Nothing clever, deliberately. Chasing byte-identical extraction would mean
+rebuilding the Lua underneath with a fixed hash seed, and even that would only
+buy *reproducibility*, not agreement with the game — matching the game exactly
+would require matching its table internals too.
+
+Instead, a profile is extracted **once** and its data kept. Nothing re-extracts
+on its own, so within a profile the data a blueprint was generated against stays
+put. `Profile.measure_data()` records counts and a digest of every prototype
+name at extraction time, stored as `data_fingerprint` in `profile.json`, so that
+if the data is ever regenerated the change is visible rather than silent.
+
+The fingerprint is not a correctness check. It answers "is this still the data I
+had?", which is the question that actually matters here.
 
 ## The bundled dataset is not ground truth
 

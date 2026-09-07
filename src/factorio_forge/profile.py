@@ -27,6 +27,7 @@ of a given version is immutable.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -80,7 +81,9 @@ def slugify(name: str) -> str:
     to work as a folder name on three platforms, so anything outside a
     conservative set becomes a hyphen.
     """
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name)
+    # A hyphen is allowed through, so " - " would otherwise become "---".
+    slug = re.sub(r"-{2,}", "-", slug).strip("-.")
     return slug.lower() or "profile"
 
 
@@ -165,6 +168,9 @@ class Profile:
     source_save: str | None = None
     created_at: str = ""
     updated_at: str = ""
+    # What the last extraction produced. Recorded because extraction is not
+    # reproducible -- see `data_fingerprint()` and docs/draftsman-notes.md.
+    data_fingerprint: dict | None = None
 
     # ------------------------------------------------------------------
     # locations
@@ -218,6 +224,7 @@ class Profile:
             "fingerprint": self.fingerprint,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "data_fingerprint": self.data_fingerprint,
             "mods": [
                 {"name": m.name, "version": list(m.version)}
                 for m in sorted(self.mods, key=lambda m: m.name.lower())
@@ -237,6 +244,7 @@ class Profile:
             source_save=data.get("source_save"),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            data_fingerprint=data.get("data_fingerprint"),
         )
 
     def write(self) -> Path:
@@ -438,6 +446,8 @@ class Profile:
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode == 0:
             self._store_extracted_data()
+            self.data_fingerprint = self.measure_data()
+            self.write()
         return result
 
     def _store_extracted_data(self) -> None:
@@ -445,6 +455,66 @@ class Profile:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         for pickle in self._draftsman_data_dir().glob("*.pkl"):
             shutil.copy2(pickle, self.data_dir / pickle.name)
+
+    # ------------------------------------------------------------------
+    # extraction fingerprint
+    # ------------------------------------------------------------------
+
+    def measure_data(self) -> dict:
+        """Summarise what is currently in Draftsman's data directory.
+
+        Extraction is not reproducible: Factorio's own data stage extends
+        `data.raw.recipe` while iterating it, which Lua leaves undefined, and
+        the stock Lua underneath seeds its string hashing per process. So two
+        runs over an identical mod set can yield slightly different prototype
+        sets — a handful of generated recycling recipes, in practice.
+
+        A profile is therefore extracted once and kept, and this records what
+        that one extraction produced. It is not a correctness check; it exists
+        so that a later re-extraction visibly differs instead of quietly
+        replacing the data a blueprint was built against.
+        """
+        program = (
+            "import json, sys\n"
+            "out = {}\n"
+            "for mod in ('entities', 'recipes', 'items', 'fluids', 'tiles'):\n"
+            "    try:\n"
+            "        m = __import__('draftsman.data.' + mod, fromlist=['raw'])\n"
+            "        out[mod] = sorted(m.raw)\n"
+            "    except Exception:\n"
+            "        out[mod] = []\n"
+            "json.dump(out, sys.stdout)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", program], capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise ProfileError(f"could not read extracted data: {result.stderr[-300:]}")
+
+        names = json.loads(result.stdout)
+        digest = hashlib.sha256()
+        summary: dict = {
+            "measured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "counts": {},
+        }
+        for category in sorted(names):
+            summary["counts"][category] = len(names[category])
+            digest.update(category.encode("utf-8"))
+            for name in names[category]:
+                digest.update(b"\0")
+                digest.update(name.encode("utf-8"))
+        summary["digest"] = digest.hexdigest()[:16]
+        return summary
+
+    def data_matches_fingerprint(self) -> bool | None:
+        """Whether the data on disk still matches what was recorded.
+
+        Returns None when there is nothing recorded to compare against.
+        """
+        if not self.data_fingerprint:
+            return None
+        self.activate()
+        return self.measure_data()["digest"] == self.data_fingerprint.get("digest")
 
     def activate(self) -> None:
         """Put this profile's game data in front of Draftsman.
