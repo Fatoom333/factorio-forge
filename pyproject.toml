@@ -20,11 +20,16 @@ dependencies = [
     # Blueprint string codec, entity prototypes, collision boxes and the
     # `draftsman update` data lifecycle that resolves an installed mod set.
     #
-    # 4.x is required, not merely preferred: it separates construction from
-    # import (`Blueprint.from_string`), which 3.x did differently, and it adds
-    # a forward-looking 2.1 export target. Our actual target is 2.0 stable;
-    # 2.1 is still only a public test branch.
-    "factorio-draftsman>=4.0.0,<5",
+    # Pinned below 4.0 deliberately. 4.0.0 cannot extract data from a game
+    # installation at all: it looks for `compatibility/defines/<major>.<minor>.lua`
+    # but the published wheel ships only the older flat `compatibility/defines.lua`,
+    # so every `update` run dies on a missing file. 3.3.1 works, and its bundled
+    # data tracks Factorio 2.0.77, which is the current stable game.
+    #
+    # Revisit when 4.x ships that directory. The API we use (`Blueprint.from_string`,
+    # `update_draftsman_data`) is identical across both, so moving up should be a
+    # version bump and nothing more.
+    "factorio-draftsman>=3.3.1,<4",
 ]
 
 [project.optional-dependencies]
