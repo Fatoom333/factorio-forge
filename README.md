@@ -5,11 +5,11 @@ mod set and the way *you* build.
 
 [Русская версия](README.ru.md)
 
-> **Status: early development.** Reading saves, building profiles and extracting
-> game data all work: every distinct mod set in a real save folder of a hundred
-> saves builds. What is not written yet is the part that produces blueprints —
-> the renderer, the companion mod and the generators. Nothing here is usable for
-> its stated purpose yet.
+> **Status: early development.** Reading saves, building profiles, extracting
+> game data and drawing a blueprint all work — every distinct mod set in a real
+> save folder of a hundred saves builds, and any blueprint string can be
+> rendered. What is not written yet is the part that *produces* blueprints: the
+> companion mod, style measurement and the generators.
 
 ## What it is
 
@@ -77,10 +77,25 @@ itself recorded in its last log — which works for Steam libraries on any drive
 standalone installs and all three platforms. Nothing needs configuring unless
 detection fails.
 
+## Drawing a blueprint
+
+Anything that is already a blueprint string can be looked at:
+
+```bash
+factorio-forge render "0eNqlk...=" -o layout.html
+```
+
+Entities are drawn at their real footprint, coloured by family and marked with
+their direction; hovering shows recipes, priorities and the rest. The page is a
+single self-contained file with nothing to fetch. See
+[docs/rendering.md](docs/rendering.md).
+
 ## Documentation
 
 - [Profiles](docs/profiles.md) — what a profile is, how mod sets are resolved,
   and why extraction happens once
+- [Rendering](docs/rendering.md) — how a blueprint is drawn, and what is
+  deliberately left out
 - [Notes on factorio-draftsman](docs/draftsman-notes.md) — what we rely on, what
   was verified by hand, and why the dependency points at a fork
 

@@ -1,0 +1,231 @@
+"""Tests for drawing a blueprint.
+
+A picture is easy to get subtly wrong in ways that still look plausible, so
+these check the things that would mislead rather than the things that would
+look ugly: that a footprint is drawn at the size the entity claims, that a
+direction survives into the drawing, and that the page depends on nothing it
+would have to fetch.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import warnings
+from pathlib import Path
+from xml.etree import ElementTree
+
+import pytest
+
+from draftsman.blueprintable import Blueprint
+from draftsman.constants import Direction
+
+from factorio_forge import render
+
+SVG_NS = "{http://www.w3.org/2000/svg}"
+
+
+@pytest.fixture(autouse=True)
+def quiet():
+    """Draftsman warns about plenty that does not concern these tests."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        yield
+
+
+def small_blueprint() -> Blueprint:
+    bp = Blueprint()
+    bp.label = "test"
+    bp.entities.append("transport-belt", tile_position=(0, 0), direction=Direction.EAST)
+    bp.entities.append("assembling-machine-2", tile_position=(2, 0))
+    bp.entities.append("medium-electric-pole", tile_position=(6, 0))
+    return bp
+
+
+def parse_svg(blueprint) -> ElementTree.Element:
+    return ElementTree.fromstring(render.render_svg(blueprint))
+
+
+class TestMeasure:
+    def test_covers_every_entity_including_its_footprint(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append("assembling-machine-2", tile_position=(5, 5))  # 3x3
+        bounds = render.measure(bp.entities)
+        assert (bounds.left, bounds.top) == (0, 0)
+        assert (bounds.right, bounds.bottom) == (8, 8)
+        assert (bounds.width, bounds.height) == (8, 8)
+
+    def test_negative_coordinates(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(-4, -3))
+        bounds = render.measure(bp.entities)
+        assert (bounds.left, bounds.top) == (-4, -3)
+        assert (bounds.width, bounds.height) == (1, 1)
+
+    def test_tiles_count_towards_the_bounds(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.tiles.append("concrete", position=(9, 9))
+        bounds = render.measure(bp.entities, bp.tiles)
+        assert (bounds.right, bounds.bottom) == (10, 10)
+
+    def test_an_empty_blueprint_does_not_collapse(self) -> None:
+        bounds = render.measure([], [])
+        assert bounds.width == 1 and bounds.height == 1
+
+    def test_readable_description(self) -> None:
+        assert str(render.Bounds(0, 0, 16, 9)) == "16×9 tiles"
+
+
+class TestFamilies:
+    @pytest.mark.parametrize(
+        "name, family",
+        [
+            ("transport-belt", "transport"),
+            ("underground-belt", "transport"),
+            ("splitter", "transport"),
+            ("inserter", "inserter"),
+            ("assembling-machine-2", "production"),
+            ("electric-mining-drill", "production"),
+            ("steel-chest", "storage"),
+            ("pipe-to-ground", "fluid"),
+            ("medium-electric-pole", "power"),
+            ("decider-combinator", "circuit"),
+            ("small-lamp", "circuit"),
+            ("straight-rail", "rail"),
+            ("stone-wall", "military"),
+        ],
+    )
+    def test_entities_land_in_the_expected_family(self, name: str, family: str) -> None:
+        bp = Blueprint()
+        bp.entities.append(name, tile_position=(0, 0))
+        assert render.family_of(bp.entities[0]) == family
+
+    def test_every_family_has_a_colour_and_a_label(self) -> None:
+        for family in set(render.FAMILY_OF_TYPE.values()) | {"other"}:
+            assert family in render.FAMILY_COLOUR
+            assert family in render.FAMILY_LABEL
+
+    def test_unknown_types_fall_back_rather_than_raising(self) -> None:
+        class Alien:
+            type = "something-a-mod-invented"
+
+        assert render.family_of(Alien()) == "other"
+
+
+class TestDrawing:
+    def test_one_group_per_entity(self) -> None:
+        svg = parse_svg(small_blueprint())
+        assert len(svg.findall(f".//{SVG_NS}g[@class='entity']")) == 3
+
+    def test_footprints_are_drawn_at_the_size_the_entity_reports(self) -> None:
+        """The point of the picture is to show what overlaps what."""
+        svg = parse_svg(small_blueprint())
+        for group in svg.findall(f".//{SVG_NS}g[@class='entity']"):
+            info = json.loads(group.get("data-info"))
+            rect = group.find(f"{SVG_NS}rect")
+            width = (float(rect.get("width")) + 2) / render.CELL
+            height = (float(rect.get("height")) + 2) / render.CELL
+            assert info["size"] == f"{width:g}×{height:g}"
+
+    def test_a_rotated_entity_changes_shape(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("splitter", tile_position=(0, 0), direction=Direction.NORTH)
+        bp.entities.append("splitter", tile_position=(0, 4), direction=Direction.EAST)
+        north, east = bp.entities[0], bp.entities[1]
+        assert (north.tile_width, north.tile_height) == (2, 1)
+        assert (east.tile_width, east.tile_height) == (1, 2)
+
+    def test_direction_becomes_a_rotated_arrow(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0), direction=Direction.SOUTH)
+        svg = parse_svg(bp)
+        arrow = svg.find(f".//{SVG_NS}polygon[@class='dir']")
+        assert arrow is not None
+        # South is 8 sixteenths of a turn: half a rotation.
+        assert "rotate(180)" in arrow.get("transform")
+
+    def test_entities_without_a_direction_get_no_arrow(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("medium-electric-pole", tile_position=(0, 0))
+        svg = parse_svg(bp)
+        assert svg.find(f".//{SVG_NS}polygon[@class='dir']") is None
+
+    def test_tiles_are_drawn_under_the_grid(self) -> None:
+        bp = Blueprint()
+        bp.tiles.append("concrete", position=(0, 0))
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        svg = parse_svg(bp)
+        children = list(svg)
+        first_tile = next(i for i, e in enumerate(children) if e.get("class") == "tile")
+        first_entity = next(i for i, e in enumerate(children) if e.get("class") == "entity")
+        assert first_tile < first_entity
+
+    def test_every_entity_carries_a_native_tooltip(self) -> None:
+        """So the drawing still explains itself without scripts."""
+        svg = parse_svg(small_blueprint())
+        for group in svg.findall(f".//{SVG_NS}g[@class='entity']"):
+            title = group.find(f"{SVG_NS}title")
+            assert title is not None and title.text
+
+
+class TestDetails:
+    def test_recipe_and_priorities_reach_the_drawing(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("assembling-machine-2", tile_position=(0, 0),
+                           recipe="electronic-circuit")
+        bp.entities.append("splitter", tile_position=(0, 4), input_priority="left")
+        svg = parse_svg(bp)
+        details = [json.loads(g.get("data-info"))["details"]
+                   for g in svg.findall(f".//{SVG_NS}g[@class='entity']")]
+        assert {"recipe": "electronic-circuit"} in details
+        assert {"input priority": "left"} in details
+
+    def test_defaults_are_not_shown_as_though_they_were_set(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("splitter", tile_position=(0, 0))
+        svg = parse_svg(bp)
+        info = json.loads(svg.find(f".//{SVG_NS}g[@class='entity']").get("data-info"))
+        assert "input priority" not in info["details"]
+
+
+class TestPage:
+    def test_is_self_contained(self) -> None:
+        """Nothing to fetch: the file has to work offline and inside a sandbox."""
+        page = render.render_html(small_blueprint())
+        referenced = re.findall(r'(?:src|href)="(?!#)([^"]+)"', page)
+        assert referenced == []
+
+    def test_uses_the_label_as_the_title(self) -> None:
+        page = render.render_html(small_blueprint())
+        assert "<title>test</title>" in page
+
+    def test_an_explicit_title_wins(self) -> None:
+        page = render.render_html(small_blueprint(), title="Smelter block")
+        assert "<title>Smelter block</title>" in page
+
+    def test_carries_the_blueprint_string(self) -> None:
+        bp = small_blueprint()
+        page = render.render_html(bp)
+        assert bp.to_string() in page
+
+    def test_html_in_a_label_cannot_break_out(self) -> None:
+        bp = small_blueprint()
+        bp.label = '<script>alert("x")</script>'
+        page = render.render_html(bp)
+        assert "<script>alert" not in page
+        assert "&lt;script&gt;" in page
+
+    def test_legend_counts_what_is_present(self) -> None:
+        page = render.render_html(small_blueprint())
+        assert "production" in page and "power &amp; heat" in page or "power" in page
+
+    def test_writes_a_file_and_reports_where(self, tmp_path: Path) -> None:
+        target = render.write_html(small_blueprint(), tmp_path / "out" / "bp.html")
+        assert target.is_file()
+        assert target.read_text(encoding="utf-8").startswith("<!doctype html>")
+
+    def test_an_empty_blueprint_still_renders(self) -> None:
+        page = render.render_html(Blueprint())
+        assert "<svg" in page
