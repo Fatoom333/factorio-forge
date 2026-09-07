@@ -93,8 +93,14 @@ file shuffling and it keeps the profiles genuinely independent.
 ## Why the dependency points at a fork
 
 No released version can build game data for the mod sets this project exists to
-serve, so the dependency is temporarily a fork of upstream 3.3.1 carrying three
-fixes. Four separate defects are involved.
+serve, so the dependency is temporarily a fork of upstream 3.3.1 carrying five
+fixes. Six separate defects are involved.
+
+Four of them share a shape worth naming, because it predicts where the next one
+will be: the code trusts prototype data to take one particular form when
+Factorio accepts several, or to reference something that is not guaranteed to
+exist. Vanilla data always satisfies those assumptions, so nothing shows up
+until a mod does something equally legal and different.
 
 **4.0.0 cannot run `update` at all.** It loads
 `compatibility/defines/<major>.<minor>.lua`, and the published wheel does not
@@ -129,10 +135,25 @@ formatting mistake. The real cost is quieter: a mod gating content on
 anywhere. Mods comparing a flag against `false` were affected too, since
 `nil == false` is false.
 
-All three patched defects are reported upstream with reproductions and diffs.
-When they are released, the dependency goes back to a plain version specifier
-and the fork is abandoned — nothing in this project depends on the fork existing
-beyond that.
+**A bounding box written both ways at once was unreadable.** Factorio accepts a
+corner positionally, as `{-1, -1}`, or by name, as `{x = -1, y = -1}`, and the
+box itself either as a pair or as `{left_top = ..., right_bottom = ...}`. A
+prototype may supply a corner both ways at once, and since a Lua table is
+converted to a list only when every key is an integer, such a corner arrives as
+a mapping and cannot be indexed positionally. Vanilla `spidertron` is written
+plainly and loads; `warptorio-warpspider` is not and took the whole extraction
+down. Reading a corner now goes through one helper that accepts every form.
+
+**An entity mined into an unknown item took everything down.** Entities are
+sorted by the item they become when mined, and that item was read straight out
+of the item table. Nothing guarantees it survived extraction — a mod can name
+one that is hidden, or that another mod removed. The fallback branch below it
+already tested membership; the first path now does too.
+
+The first three patched defects are reported upstream with reproductions and
+diffs; the last two are not yet written up. When they are released, the
+dependency goes back to a plain version specifier and the fork is abandoned —
+nothing in this project depends on the fork existing beyond that.
 
 ## Extraction is not reproducible, and that is expected
 
