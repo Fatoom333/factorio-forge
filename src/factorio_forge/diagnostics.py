@@ -139,6 +139,21 @@ _RULES: list[_Rule] = [
         ),
     ),
     _rule(
+        "collision-box-shape",
+        r"entities\.py.*\n.*collision_box\[0\]|KeyError: 0\b(?![\s\S]{0,200}?feature)",
+        lambda _: (
+            "A mod defines an entity's collision box in a form the extractor "
+            "cannot read.",
+            "Factorio accepts a corner written positionally, as {-1, -1}, or by "
+            "name, as {x = -1, y = -1}. A mod that supplies both at once leaves "
+            "the extractor with a table it treats as neither, and reading the "
+            "first coordinate fails.",
+            "The mod itself is fine and the game loads it. Either exclude it "
+            "from the profile, or use a build of the extraction library that "
+            "reads a corner by name as well as by position.",
+        ),
+    ),
+    _rule(
         "missing-mod",
         r"MissingModError: Unrecognized mod name '([^']+)'",
         lambda m: (

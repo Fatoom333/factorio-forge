@@ -49,6 +49,16 @@ MISSING_MOD = """\
 draftsman.error.MissingModError: Unrecognized mod name 'Krastorio2'
 """
 
+COLLISION_BOX = """\
+Traceback (most recent call last):
+  File ".../draftsman/environment/update.py", line 1265, in extract_entities
+    add_entities("spider-vehicle")  # Blueprintable in 2.0
+  File ".../draftsman/data/entities.py", line 225, in add_entity
+    collision_box[0][0],
+    ~~~~~~~~~~~~~~~~^^^
+KeyError: 0
+"""
+
 
 class TestRecognisedFailures:
     def test_mod_packaged_with_junk_folder(self) -> None:
@@ -79,6 +89,12 @@ class TestRecognisedFailures:
         assert result.category == "missing-mod"
         assert "Krastorio2" in result.summary
 
+    def test_collision_box_written_both_ways(self) -> None:
+        result = diagnostics.diagnose(COLLISION_BOX)
+        assert result.category == "collision-box-shape"
+        assert "collision box" in result.summary
+        assert "x = -1" in result.detail
+
     def test_every_recognised_case_offers_a_remedy(self) -> None:
         for sample in (
             MOD_ARCHIVE_LAYOUT,
@@ -86,6 +102,7 @@ class TestRecognisedFailures:
             WRONG_GAME_PATH,
             MOD_ENCODING,
             MISSING_MOD,
+            COLLISION_BOX,
         ):
             result = diagnostics.diagnose(sample)
             assert result.recognised
