@@ -289,6 +289,119 @@ class TestParameters:
         assert [p.name for p in back.parameters] == ["Recipe", "Machines", "Belt"]
 
 
+class TestEntityDetails:
+    """Whatever an entity has been configured to do should be readable off the
+    picture, because that configuration is most of what a blueprint is."""
+
+    def test_item_filters(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("stack-inserter", tile_position=(0, 0), use_filters=True)
+        bp.entities[0].set_item_filter(0, "iron-plate")
+        assert render._entity_details(bp.entities[0])["filters"] == "iron-plate"
+
+    def test_a_blacklist_says_so(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("stack-inserter", tile_position=(0, 0), use_filters=True)
+        bp.entities[0].set_item_filter(0, "coal")
+        bp.entities[0].filter_mode = "blacklist"
+        assert render._entity_details(bp.entities[0])["filters"].startswith("blacklist:")
+
+    def test_constant_combinator_signals_with_counts(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("constant-combinator", tile_position=(0, 0))
+        bp.entities[0].add_section()
+        bp.entities[0].set_signal(0, "iron-plate", 42)
+        assert render._entity_details(bp.entities[0])["signals"] == "iron-plate×42"
+
+    def test_splitter_priorities_are_shown_and_defaults_are_not(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("splitter", tile_position=(0, 0), output_priority="left")
+        bp.entities.append("splitter", tile_position=(0, 4))
+        assert render._entity_details(bp.entities[0])["output priority"] == "left"
+        assert "output priority" not in render._entity_details(bp.entities[1])
+
+    def test_underground_belt_says_which_end_it_is(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("underground-belt", tile_position=(0, 0), io_type="output")
+        assert render._entity_details(bp.entities[0])["type"] == "output"
+
+    def test_a_circuit_condition_reads_as_a_sentence(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("stack-inserter", tile_position=(0, 0))
+        bp.entities[0].circuit_condition.first_signal = "iron-plate"
+        bp.entities[0].circuit_condition.comparator = "<"
+        bp.entities[0].circuit_condition.constant = 100
+        assert render._entity_details(bp.entities[0])["enabled when"] == "iron-plate < 100"
+
+    def test_nothing_configured_means_nothing_claimed(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        assert render._entity_details(bp.entities[0]) == {}
+
+
+class TestParameterReferences:
+    """A parameter is only useful where it is wired in, and which entities those
+    are cannot be told from the parameter list alone."""
+
+    def parameterised(self) -> Blueprint:
+        bp = Blueprint()
+        bp.entities.append("stack-inserter", tile_position=(0, 0), use_filters=True)
+        bp.entities[0].set_item_filter(0, "parameter-0")
+        bp.entities.append("constant-combinator", tile_position=(3, 0))
+        bp.entities[1].add_section()
+        bp.entities[1].set_signal(0, "parameter-1", 5)
+        bp.entities.append("transport-belt", tile_position=(6, 0))
+        bp.parameters = [
+            {"type": "id", "name": "Product", "id": "electronic-circuit"},
+            {"type": "number", "name": "Count", "number": "5"},
+            {"type": "number", "name": "Spare", "number": "1"},
+        ]
+        return bp
+
+    def test_references_are_found_in_filters_and_signals(self) -> None:
+        bp = self.parameterised()
+        assert render.parameters_used_by(render._entity_details(bp.entities[0])) == ["parameter-0"]
+        assert render.parameters_used_by(render._entity_details(bp.entities[1])) == ["parameter-1"]
+
+    def test_an_entity_without_references_reports_none(self) -> None:
+        bp = self.parameterised()
+        assert render.parameters_used_by(render._entity_details(bp.entities[2])) == []
+
+    def test_referring_entities_are_marked_in_the_drawing(self) -> None:
+        svg = parse_svg(self.parameterised())
+        marked = svg.findall(f".//{SVG_NS}g[@class='entity parameterised']")
+        assert len(marked) == 2
+        assert svg.find(f".//{SVG_NS}rect[@class='param-ring']") is not None
+
+    def test_the_panel_counts_where_each_parameter_lands(self) -> None:
+        page = render.render_html(self.parameterised())
+        assert "1 entity" in page
+
+    def test_a_parameter_nothing_refers_to_is_called_out(self) -> None:
+        """Almost always a mistake, and silent without counting."""
+        page = render.render_html(self.parameterised())
+        assert "unused" in page
+
+    def test_a_plain_blueprint_gets_no_parameter_marks(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        svg = render.render_svg(bp)
+        assert "param-ring" not in svg
+        assert "parameterised" not in svg
+
+
+class TestZoom:
+    def test_the_drawing_records_its_own_starting_view(self) -> None:
+        """Panning and zooming move the viewBox, so 'fit' needs the original."""
+        svg = parse_svg(small_blueprint())
+        assert svg.get("data-base") == svg.get("viewBox")
+
+    def test_controls_are_present(self) -> None:
+        page = render.render_html(small_blueprint())
+        for control in ('id="zoomin"', 'id="zoomout"', 'id="zoomreset"', 'id="zoomlevel"'):
+            assert control in page
+
+
 class TestPage:
     def test_is_self_contained(self) -> None:
         """Nothing to fetch: the file has to work offline and inside a sandbox."""

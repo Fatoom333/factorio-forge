@@ -53,11 +53,17 @@ circuits, rails, military — grouped by what someone looks for when reading a
 layout rather than by the game's own prototype taxonomy. A pump and a pipe
 belong together here; the game considers them unrelated.
 
-Hovering an entity shows its name, size, position and whatever else it carries:
-a recipe, a splitter's priorities, whether an underground belt is the entrance
-or the exit, a chest's limit bar. Every entity also has a plain SVG `<title>`,
-so the drawing still explains itself if the file is opened somewhere scripts do
-not run.
+Hovering an entity shows its name, size, position and everything it has been
+configured to do: a recipe, a splitter's priority side, whether an underground
+belt is the entrance or the exit, an inserter's item filters and whether they
+are a whitelist or a blacklist, the signals and counts in a combinator or a
+requester chest, a decider's conditions, an arithmetic operation and its output,
+the circuit condition that enables it, a chest's limit bar. Configuration is
+most of what a blueprint actually is, so leaving it out would make the picture
+pretty and useless.
+
+Every entity also has a plain SVG `<title>`, so the drawing still explains
+itself if the file is opened somewhere scripts do not run.
 
 Tiles — concrete and the like — are drawn underneath as ground.
 
@@ -101,6 +107,36 @@ Parameters can arrive either as plain dictionaries, if something assigned them,
 or as objects, if the blueprint came from a string; both are read, and the
 game's hyphenated spellings are accepted alongside the Python ones.
 
+### Where each parameter actually lands
+
+A parameter list tells you what will be asked for. It does not tell you which
+entities the answers reach, and that is usually what you want to check.
+
+So the entities that refer to a parameter — in an inserter's filter, a
+combinator's signal, anywhere the name `parameter-N` appears in a setting — are
+ringed in the drawing, and the panel says how many entities each parameter
+reaches. A parameter nothing refers to is reported as **unused**, which is
+almost always a mistake and is otherwise completely silent.
+
+A checkbox dims everything that is not parameterised, which turns a dense
+blueprint into a map of just the parts that vary.
+
+## Zoom and pan
+
+The drawing zooms with the mouse wheel, pans by dragging, and there are buttons
+including a *fit* that returns to the whole blueprint. Zooming moves the SVG
+viewBox rather than scaling an image, so the drawing stays sharp at every
+magnification instead of turning into blocks.
+
+Browser zoom works too, and for the same reason: this is vector output, so
+Ctrl+scroll enlarges it losslessly.
+
+What does not exist is any level-of-detail handling. A city block a hundred
+tiles across is drawn as a 2600-pixel image, every entity at full detail,
+whether or not you are looking at all of it. That is fine to pan around and
+wasteful to hold in memory, and if blueprints get much larger than a block it
+will want addressing.
+
 **There are no sprites.** Shipping the game's art would mean redistributing
 Wube's work, and it would not help: while building a generator, what matters is
 footprint, orientation and type, and those read better as flat colour than as
@@ -125,8 +161,5 @@ grey box in it — the grey box at least says something is there.
 
 ## Scale
 
-Cell size is fixed at 26 pixels per tile. A city block of a hundred tiles a side
-is therefore a 2600-pixel image, which a browser pans happily but which is past
-the point where a single flat drawing is the right way to look at something.
-Large layouts will want zooming, or drawing a region at a time; neither exists
-yet.
+A tile is drawn at 26 pixels before any zooming. That is the natural size, not a
+limit — see above.

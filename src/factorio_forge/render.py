@@ -19,6 +19,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -234,9 +235,76 @@ def _arrow(cx: float, cy: float, direction: int, size: float) -> str:
     )
 
 
-def _entity_details(entity) -> dict:
-    """What to show when someone hovers an entity."""
+PARAMETER = re.compile(r"parameter-\d+")
+
+
+def _signal_name(value) -> str | None:
+    """The name out of a signal, however it is represented."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("name")
+    return getattr(value, "name", None)
+
+
+def _describe_condition(condition) -> str | None:
+    """A circuit condition as something readable: 'iron-plate < 100'."""
+    if condition is None:
+        return None
+    first = _signal_name(getattr(condition, "first_signal", None))
+    if first is None:
+        return None
+    comparator = getattr(condition, "comparator", "") or ""
+    second = _signal_name(getattr(condition, "second_signal", None))
+    right = second if second is not None else getattr(condition, "constant", 0)
+    return f"{first} {comparator} {right}"
+
+
+def _describe_filters(entity) -> str | None:
+    """Item filters, as on a filter inserter."""
+    filters = getattr(entity, "filters", None) or []
+    names = [n for n in (_signal_name(f) for f in filters) if n]
+    if not names:
+        return None
+    mode = getattr(entity, "filter_mode", "whitelist")
+    prefix = "" if mode == "whitelist" else f"{mode}: "
+    return prefix + ", ".join(names)
+
+
+def _describe_sections(entity) -> str | None:
+    """Logistic or combinator sections, as on a constant combinator."""
+    sections = getattr(entity, "sections", None) or []
+    pieces: list[str] = []
+    for section in sections:
+        filters = getattr(section, "filters", None) or {}
+        entries = filters.values() if isinstance(filters, dict) else filters
+        for entry in entries:
+            name = _signal_name(entry)
+            if not name:
+                continue
+            count = getattr(entry, "count", None)
+            pieces.append(f"{name}×{count}" if count is not None else name)
+    return ", ".join(pieces) if pieces else None
+
+
+def _describe_decider(entity) -> str | None:
+    conditions = getattr(entity, "conditions", None) or []
+    described = [d for d in (_describe_condition(c) for c in conditions) if d]
+    return " and ".join(described) if described else None
+
+
+def _entity_details(entity) -> dict[str, str]:
+    """Everything worth knowing about an entity, as label to text.
+
+    This is where a parameterised blueprint becomes legible: a parameter shows
+    up as `parameter-0` sitting in a filter, a combinator signal or a recipe,
+    and unless those are read out there is no way to tell from the picture
+    which entities the parameters actually reach.
+    """
     details: dict[str, str] = {}
+
     for attribute, label in (
         ("recipe", "recipe"),
         ("io_type", "type"),
@@ -247,14 +315,47 @@ def _entity_details(entity) -> dict:
         ("bar", "bar"),
         ("station", "station"),
         ("orientation", "orientation"),
+        ("operation", "operation"),
     ):
         value = getattr(entity, attribute, None)
-        if value not in (None, "none", ""):
+        if value not in (None, "none", "", []):
             details[label] = str(value)
+
+    for describe, label in (
+        (_describe_filters, "filters"),
+        (_describe_sections, "signals"),
+        (_describe_decider, "when"),
+    ):
+        described = describe(entity)
+        if described:
+            details[label] = described
+
+    enabled = _describe_condition(getattr(entity, "circuit_condition", None))
+    if enabled:
+        details["enabled when"] = enabled
+
+    output = _signal_name(getattr(entity, "output_signal", None))
+    if output:
+        details["output"] = output
+
     quality = getattr(entity, "quality", None)
     if quality and quality != "normal":
         details["quality"] = str(quality)
+    recipe_quality = getattr(entity, "recipe_quality", None)
+    if recipe_quality and recipe_quality != "normal" and "recipe" in details:
+        details["recipe"] += f" ({recipe_quality})"
+
     return details
+
+
+def parameters_used_by(details: dict[str, str]) -> list[str]:
+    """Which blueprint parameters an entity's settings refer to."""
+    found: list[str] = []
+    for value in details.values():
+        for match in PARAMETER.findall(value):
+            if match not in found:
+                found.append(match)
+    return sorted(found)
 
 
 def snap_cell(blueprint, bounds: Bounds) -> tuple[float, float, float, float] | None:
@@ -308,7 +409,8 @@ def render_svg(blueprint) -> str:
         )
 
     parts: list[str] = [
-        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+        f'<svg id="canvas" viewBox="0 0 {width} {height}" '
+        f'data-base="0 0 {width} {height}" width="{width}" height="{height}" '
         f'xmlns="http://www.w3.org/2000/svg" role="img" '
         f'aria-label="Blueprint, {len(entities)} entities, {bounds}">'
     ]
@@ -376,6 +478,8 @@ def render_svg(blueprint) -> str:
         h = entity.tile_height * CELL
         details = _entity_details(entity)
 
+        uses = parameters_used_by(details)
+
         tooltip = json.dumps(
             {
                 "name": entity.name,
@@ -384,17 +488,28 @@ def render_svg(blueprint) -> str:
                 "size": f"{entity.tile_width}×{entity.tile_height}",
                 "family": FAMILY_LABEL[family],
                 "details": details,
+                "parameters": uses,
             },
             ensure_ascii=False,
         )
 
+        classes = "entity parameterised" if uses else "entity"
+        data_params = f' data-params="{html.escape(" ".join(uses), quote=True)}"' if uses else ""
         parts.append(
-            f'<g class="entity" data-i="{index}" data-info=\'{html.escape(tooltip, quote=True)}\'>'
+            f'<g class="{classes}" data-i="{index}"{data_params} '
+            f"data-info='{html.escape(tooltip, quote=True)}'>"
         )
         parts.append(
             f'<rect x="{x + 1:.1f}" y="{y + 1:.1f}" width="{w - 2}" height="{h - 2}" '
             f'rx="3" fill="{colour}" class="body"/>'
         )
+        if uses:
+            # A parameterised entity is the point of a parameterised blueprint,
+            # so it gets a mark that survives being one tile across.
+            parts.append(
+                f'<rect class="param-ring" x="{x + 1:.1f}" y="{y + 1:.1f}" '
+                f'width="{w - 2}" height="{h - 2}" rx="3"/>'
+            )
 
         direction = getattr(entity, "direction", None)
         if direction is not None:
@@ -473,6 +588,14 @@ button:hover { border-color: var(--grid-heavy); }
 .grid { stroke: var(--grid); stroke-width: 1; }
 .grid.heavy { stroke: var(--grid-heavy); }
 .snap { fill: none; stroke: #e0574f; stroke-width: 2; stroke-dasharray: 7 5; opacity: .8; }
+.param-ring { fill: none; stroke: #f0c040; stroke-width: 2.5; }
+.entity.parameterised .body { stroke: #7a5c00; }
+.dim .entity:not(.parameterised) { opacity: .22; }
+#canvas { touch-action: none; cursor: grab; }
+#canvas.panning { cursor: grabbing; }
+.zoom { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.zoom span { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
+label.toggle { display: flex; gap: 6px; align-items: center; cursor: pointer; margin-top: 10px; }
 .warn { color: #c2562e; }
 .tile { fill: var(--ground); }
 .ruler { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
@@ -520,6 +643,72 @@ if (copy) {
     setTimeout(() => { copy.textContent = 'copy blueprint string'; }, 1200);
   });
 }
+
+// Pan and zoom by moving the viewBox, so the drawing stays vector-sharp at
+// every scale rather than being a bitmap someone is magnifying.
+const svg = document.getElementById('canvas');
+if (svg) {
+  const base = svg.dataset.base.split(' ').map(Number);
+  let view = base.slice();
+  const readout = document.getElementById('zoomlevel');
+
+  const apply = () => {
+    svg.setAttribute('viewBox', view.join(' '));
+    if (readout) readout.textContent = Math.round(base[2] / view[2] * 100) + '%';
+  };
+  const reset = () => { view = base.slice(); apply(); };
+
+  svg.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const factor = event.deltaY < 0 ? 0.85 : 1 / 0.85;
+    const rect = svg.getBoundingClientRect();
+    // Keep the point under the cursor where it is.
+    const fx = (event.clientX - rect.left) / rect.width;
+    const fy = (event.clientY - rect.top) / rect.height;
+    const px = view[0] + view[2] * fx, py = view[1] + view[3] * fy;
+    const w = Math.min(base[2] * 8, Math.max(base[2] / 40, view[2] * factor));
+    const h = w * base[3] / base[2];
+    view = [px - w * fx, py - h * fy, w, h];
+    apply();
+  }, { passive: false });
+
+  let dragging = null;
+  svg.addEventListener('pointerdown', (event) => {
+    dragging = { x: event.clientX, y: event.clientY, view: view.slice() };
+    svg.setPointerCapture(event.pointerId);
+    svg.classList.add('panning');
+  });
+  svg.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    const rect = svg.getBoundingClientRect();
+    const dx = (event.clientX - dragging.x) / rect.width * dragging.view[2];
+    const dy = (event.clientY - dragging.y) / rect.height * dragging.view[3];
+    view = [dragging.view[0] - dx, dragging.view[1] - dy, dragging.view[2], dragging.view[3]];
+    apply();
+  });
+  const stop = () => { dragging = null; svg.classList.remove('panning'); };
+  svg.addEventListener('pointerup', stop);
+  svg.addEventListener('pointercancel', stop);
+
+  document.getElementById('zoomin')?.addEventListener('click', () => {
+    const w = Math.max(base[2] / 40, view[2] * 0.7);
+    view = [view[0] + (view[2] - w) / 2, view[1] + (view[3] - w * base[3] / base[2]) / 2,
+            w, w * base[3] / base[2]];
+    apply();
+  });
+  document.getElementById('zoomout')?.addEventListener('click', () => {
+    const w = Math.min(base[2] * 8, view[2] / 0.7);
+    view = [view[0] + (view[2] - w) / 2, view[1] + (view[3] - w * base[3] / base[2]) / 2,
+            w, w * base[3] / base[2]];
+    apply();
+  });
+  document.getElementById('zoomreset')?.addEventListener('click', reset);
+  apply();
+}
+
+document.getElementById('dim')?.addEventListener('change', (event) => {
+  document.querySelector('.canvas').classList.toggle('dim', event.target.checked);
+});
 """
 
 
@@ -587,9 +776,23 @@ def _parameters_card(blueprint) -> str:
     if not parameters:
         return ""
 
+    # How many entities each parameter actually reaches. A parameter nothing
+    # refers to is usually a mistake, and is invisible without counting.
+    usage: dict[str, int] = {}
+    for entity in blueprint.entities:
+        for used in parameters_used_by(_entity_details(entity)):
+            usage[used] = usage.get(used, 0) + 1
+
     rows = []
     for index, parameter in enumerate(parameters):
         name = _field(parameter, "name") or f"parameter-{index}"
+        signal = f"parameter-{index}"
+        count = usage.get(signal, 0)
+        where = (
+            f'{count} entit{"y" if count == 1 else "ies"}'
+            if count
+            else "<span class=\"warn\">unused</span>"
+        )
         kind = _field(parameter, "type") or ""
         if kind == "id":
             value = str(_field(parameter, "id") or "(any)")
@@ -608,11 +811,14 @@ def _parameters_card(blueprint) -> str:
             f'<div><span class="count" style="margin:0 8px 0 0">{index}</span>'
             f"{html.escape(str(name))}"
             f'<span class="count">{html.escape(value)}</span></div>'
+            f'<div style="margin:-2px 0 4px 24px;font-size:12px;color:var(--muted)">{where}</div>'
         )
 
     return (
         '<div class="card"><h2>parameters, in order</h2>'
-        f'<div class="legend">{"".join(rows)}</div></div>'
+        f'<div class="legend">{"".join(rows)}</div>'
+        '<label class="toggle"><input type="checkbox" id="dim"> '
+        "highlight only parameterised entities</label></div>"
     )
 
 
@@ -673,7 +879,15 @@ def render_html(blueprint, title: str | None = None, blueprint_string: str | Non
 <h1>{html.escape(label)}</h1>
 <p class="sub">{len(entities)} entities · {bounds} · drawn by factorio-forge</p>
 <div class="wrap">
-  <div class="canvas">{render_svg(blueprint)}</div>
+  <div class="canvas">
+    <div class="zoom">
+      <button id="zoomout" title="zoom out">−</button>
+      <button id="zoomin" title="zoom in">+</button>
+      <button id="zoomreset">fit</button>
+      <span id="zoomlevel">100%</span>
+    </div>
+    {render_svg(blueprint)}
+  </div>
   <div class="side">
     <div class="card"><h2>about</h2><dl>{facts_html}</dl></div>
     {snapping_card}
