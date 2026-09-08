@@ -461,3 +461,20 @@ class TestInserterReach:
         pickup, drop = inspection.inserter_reach(bp.entities[0])
         assert pickup == (5.5, 4.5)
         assert round(drop[1], 1) == 6.7
+
+
+class TestParameterPlaceholders:
+    """A free variable for a parameterised blueprint looks exactly like a mistake."""
+
+    def test_a_constant_combinator_holding_a_value_is_only_noted(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(constant_combinator(), tile_position=(0, 0))
+        bp.entities[0].set_signal(0, "signal-V", 1)
+        found = [f for f in inspection.inspect(bp).findings if f.code == "combinator-unwired"]
+        assert found and found[0].severity is Severity.NOTE
+
+    def test_an_arithmetic_combinator_with_no_wires_is_still_a_problem(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(arithmetic_combinator(), tile_position=(0, 0))
+        found = [f for f in inspection.inspect(bp).findings if f.code == "combinator-unwired"]
+        assert found and found[0].severity is Severity.PROBLEM

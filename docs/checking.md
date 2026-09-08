@@ -74,6 +74,13 @@ to *worth a look* instead of suppressed.
 
 ## What is checked
 
+One idiom looks exactly like a mistake and is not. A blueprint meant to be
+parameterised needs a free variable to exist before it can be turned into a
+parameter, and the way to make one is a constant combinator holding a value
+that appears nowhere else, wired to nothing. That is noted rather than
+complained about; a constant combinator holding nothing at all is still
+reported, by its own check.
+
 Two entities are reported as overlapping only when the game itself would
 refuse them: their collision masks must share a layer, and their real collision
 boxes must intersect. Sharing a tile is neither necessary nor sufficient — a

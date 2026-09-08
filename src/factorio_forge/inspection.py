@@ -488,9 +488,23 @@ def combinator_types() -> set[str]:
     return {kind for kind in getattr(data, "of_type", {}) if kind.endswith("-combinator")}
 
 
+def _holds_signals(entity) -> bool:
+    sections = getattr(entity, "sections", None) or []
+    return any(getattr(section, "filters", None) for section in sections)
+
+
 @check
 def combinators_without_wires(layout: Layout) -> Iterator[Finding]:
-    """A combinator no wire reaches computes into the void."""
+    """A combinator no wire reaches computes into the void.
+
+    Except for one idiom that looks exactly like the mistake and is not. A
+    blueprint meant to be parameterised needs a free variable to exist
+    somewhere before it can be turned into a parameter, and the way to make one
+    is a constant combinator holding a value that appears nowhere else, wired
+    to nothing. Calling that a problem would be calling a deliberate placeholder
+    a defect, so a constant combinator that holds signals is noted rather than
+    complained about; one holding nothing is reported by its own check.
+    """
     kinds = combinator_types()
     for entity in layout.entities:
         kind = getattr(entity, "type", "")
@@ -499,6 +513,19 @@ def combinators_without_wires(layout: Layout) -> Iterator[Finding]:
         if layout.has_wire(entity):
             continue
         x, y = layout.tile_of(entity)
+
+        if kind == "constant-combinator" and _holds_signals(entity):
+            yield Finding(
+                Severity.NOTE,
+                "combinator-unwired",
+                f"{entity.name} holds signals and has no wires",
+                "Nothing reads it. That is how a free variable is made for a "
+                "parameterised blueprint, so it may well be deliberate.",
+                (x, y),
+                (entity.name,),
+            )
+            continue
+
         yield Finding(
             Severity.PROBLEM,
             "combinator-unwired",
@@ -598,9 +625,7 @@ def empty_constant_combinators(layout: Layout) -> Iterator[Finding]:
     for entity in layout.entities:
         if getattr(entity, "type", "") != "constant-combinator":
             continue
-        sections = getattr(entity, "sections", None) or []
-        has_signal = any(getattr(s, "filters", None) for s in sections)
-        if has_signal:
+        if _holds_signals(entity):
             continue
         x, y = layout.tile_of(entity)
         yield Finding(
