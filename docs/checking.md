@@ -86,12 +86,47 @@ filtering off, a circuit or logistic condition on an entity no wire reaches, a
 combinator with no wires at all, a constant combinator holding no signals, an
 assembler with no recipe.
 
-Geometry comes from the entities themselves rather than from assumptions.
-Underground reach is read from the prototype, so an express underground is
-allowed its nine tiles where a basic one gets five. An inserter's reach comes
-from the `pickup_position` and `drop_position` it reports, which avoids having
-to reason about which way `direction` points — and that matters, because it
-points the opposite of the obvious way: at the side the inserter takes *from*.
+## Nothing about an entity is hardcoded
+
+Mods change these numbers, often by multiples, so every one of them is read from
+the profile's own game data at the moment of checking. Under Krastorio 2 an
+express underground reaches **twenty** tiles where vanilla gives it nine, and
+the mod adds undergrounds reaching thirty and forty. An underground pipe spans
+twenty rather than ten. A constant in the code would be right for vanilla and
+badly wrong for the player.
+
+Belts state their reach plainly; pipes bury the same idea in their fluid box, so
+both places are read. Where neither yields an answer the check is **skipped**
+rather than run on an assumed number: not knowing is a fact, not a licence to
+guess.
+
+An inserter's reach comes from the `pickup_position` and `drop_position` it
+reports, not from its direction. That avoids having to reason about which way
+`direction` points — it points the opposite of the obvious way, at the side the
+inserter takes *from* — and, more importantly, a mod can change the relationship
+between direction and reach entirely. Bob's Inserters lets inserters pick up at
+ninety degrees. Reading the reported positions keeps that correct for free; a
+formula would not.
+
+## The report says which data it used
+
+The same blueprint legitimately gives different answers under different mod
+sets. A fifteen-tile gap between express undergrounds is fine under Krastorio 2
+and broken under vanilla, and both verdicts are right. So every report names the
+profile it was produced against.
+
+If the blueprint contains entities the loaded data has never heard of, that is
+said **first and as a problem**, because it almost always means the wrong
+profile is active — and every other finding in the report depends on that data,
+so the rest of it cannot be trusted until it is fixed:
+
+```
+2 entity type(s) are missing from the game data in use
+    Not found: kr-advanced-underground-belt, kr-superior-inserter.
+    The data being read is space-ageeeeeeeee. Everything else in this report
+    depends on that data, so activate the profile this blueprint belongs to
+    and check again.
+```
 
 ## Still to come
 

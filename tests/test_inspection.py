@@ -76,22 +76,114 @@ class TestUndergrounds:
         bp.entities.append("underground-belt", tile_position=(0, 0),
                            direction=Direction.EAST, io_type="input")
         # Something far away so the run does not simply leave the blueprint.
-        bp.entities.append("steel-chest", tile_position=(12, 0))
+        bp.entities.append("steel-chest", tile_position=(40, 0))
         assert "underground-unpaired" in codes(bp)
 
-    def test_reach_comes_from_the_prototype_not_a_guess(self) -> None:
-        """An express underground reaches nine tiles where a basic one reaches five."""
-        def run(name: str, gap: int) -> set[str]:
-            bp = Blueprint()
-            bp.entities.append(name, tile_position=(0, 0),
-                               direction=Direction.EAST, io_type="input")
-            bp.entities.append(name, tile_position=(gap, 0),
-                               direction=Direction.EAST, io_type="output")
-            bp.entities.append("steel-chest", tile_position=(gap + 6, 0))
-            return {f.code for f in inspection.inspect(bp).findings}
+    def test_a_pair_exactly_at_the_prototype_reach_is_accepted(self) -> None:
+        """Asserted against the data rather than a literal, because mods change
+        these numbers wholesale and the test must not pin one mod set's values."""
+        bp = Blueprint()
+        bp.entities.append("underground-belt", tile_position=(0, 0),
+                           direction=Direction.EAST, io_type="input")
+        reach = inspection.underground_reach(bp.entities[0])
+        assert reach is not None
 
-        assert "underground-unpaired" not in run("express-underground-belt", 8)
-        assert "underground-unpaired" in run("underground-belt", 8)
+        paired = Blueprint()
+        paired.entities.append("underground-belt", tile_position=(0, 0),
+                               direction=Direction.EAST, io_type="input")
+        paired.entities.append("underground-belt", tile_position=(reach, 0),
+                               direction=Direction.EAST, io_type="output")
+        paired.entities.append("steel-chest", tile_position=(reach + 40, 0))
+        assert "underground-unpaired" not in codes(paired)
+
+    def test_a_pair_one_tile_beyond_reach_is_rejected(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("underground-belt", tile_position=(0, 0),
+                           direction=Direction.EAST, io_type="input")
+        reach = inspection.underground_reach(bp.entities[0])
+
+        stretched = Blueprint()
+        stretched.entities.append("underground-belt", tile_position=(0, 0),
+                                  direction=Direction.EAST, io_type="input")
+        stretched.entities.append("underground-belt", tile_position=(reach + 1, 0),
+                                  direction=Direction.EAST, io_type="output")
+        stretched.entities.append("steel-chest", tile_position=(reach + 40, 0))
+        assert "underground-unpaired" in codes(stretched)
+
+
+class TestReachComesFromTheData:
+    """Mods change these numbers by multiples, so nothing may be hardcoded."""
+
+    def test_belt_reach_is_read_from_the_prototype(self) -> None:
+        import draftsman.data.entities as data
+
+        bp = Blueprint()
+        bp.entities.append("underground-belt", tile_position=(0, 0))
+        expected = data.raw["underground-belt"]["max_distance"]
+        assert inspection.underground_reach(bp.entities[0]) == expected
+
+    def test_pipe_reach_is_read_from_the_fluid_box(self) -> None:
+        """Pipes bury the same idea somewhere else entirely."""
+        import draftsman.data.entities as data
+
+        bp = Blueprint()
+        bp.entities.append("pipe-to-ground", tile_position=(0, 0))
+        connections = data.raw["pipe-to-ground"]["fluid_box"]["pipe_connections"]
+        expected = next(
+            c["max_underground_distance"] for c in connections if "max_underground_distance" in c
+        )
+        assert inspection.underground_reach(bp.entities[0]) == expected
+
+    def test_faster_tiers_reach_further_than_the_basic_one(self) -> None:
+        def reach(name: str) -> int:
+            bp = Blueprint()
+            bp.entities.append(name, tile_position=(0, 0))
+            return inspection.underground_reach(bp.entities[0])
+
+        assert reach("express-underground-belt") > reach("underground-belt")
+
+    def test_an_unknown_prototype_yields_no_number_rather_than_a_guess(self) -> None:
+        class Nothing:
+            name = "not-a-real-entity"
+
+        assert inspection.underground_reach(Nothing()) is None
+
+    def test_inserter_reach_follows_the_prototype(self) -> None:
+        """A long-handed inserter reaches two tiles where a plain one reaches one,
+        and a mod can change that relationship, so it is read not derived."""
+        def pickup_distance(name: str) -> float:
+            bp = Blueprint()
+            bp.entities.append(name, tile_position=(5, 5), direction=Direction.NORTH)
+            entity = bp.entities[0]
+            return abs(entity.position.y - entity.pickup_position.y)
+
+        assert pickup_distance("long-handed-inserter") > pickup_distance("inserter")
+
+
+class TestWrongDataset:
+    def test_entities_the_data_does_not_know_are_reported_first(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        layout = inspection.Layout(bp)
+        # Stand in for an entity from a mod set that is not loaded.
+        class Foreign:
+            name = "kr-something-not-loaded"
+            tile_position = bp.entities[0].tile_position
+            tile_width = tile_height = 1
+        layout.entities.append(Foreign())
+
+        findings = list(inspection.prototypes_the_data_does_not_know(layout))
+        assert findings and findings[0].code == "unknown-prototypes"
+        assert "kr-something-not-loaded" in findings[0].detail
+
+    def test_the_report_names_the_data_it_used(self) -> None:
+        """The same blueprint gives different answers under different mod sets,
+        so a report that does not say which is not reproducible."""
+        bp = Blueprint()
+        bp.entities.append("transport-belt", tile_position=(0, 0))
+        report = inspection.inspect(bp)
+        assert report.dataset
+        assert report.dataset in report.summary()
 
 
 class TestInserters:
@@ -251,7 +343,8 @@ class TestReport:
         bp = Blueprint()
         for x in range(3):
             bp.entities.append("transport-belt", tile_position=(x, 0), direction=Direction.EAST)
-        assert inspection.inspect(bp).summary() == "3 entities, nothing to report"
+        summary = inspection.inspect(bp).summary()
+        assert summary.startswith("3 entities, nothing to report")
 
     def test_nothing_is_modified(self) -> None:
         """The whole contract: this reports, it does not correct."""

@@ -70,6 +70,10 @@ class Report:
 
     findings: list[Finding] = field(default_factory=list)
     entities_checked: int = 0
+    # Which game data the checks read. The same blueprint legitimately gives
+    # different answers under different mod sets, so a report that does not say
+    # which one it used is not reproducible.
+    dataset: str = ""
 
     def of(self, severity: Severity) -> list[Finding]:
         return [f for f in self.findings if f.severity is severity]
@@ -91,8 +95,9 @@ class Report:
         return not self.problems and not self.suspects
 
     def summary(self) -> str:
+        against = f" (against {self.dataset})" if self.dataset else ""
         if self.clean:
-            return f"{self.entities_checked} entities, nothing to report"
+            return f"{self.entities_checked} entities, nothing to report{against}"
         bits = []
         if self.problems:
             bits.append(f"{len(self.problems)} problem(s)")
@@ -100,7 +105,7 @@ class Report:
             bits.append(f"{len(self.suspects)} to look at")
         if self.notes:
             bits.append(f"{len(self.notes)} note(s)")
-        return f"{self.entities_checked} entities: " + ", ".join(bits)
+        return f"{self.entities_checked} entities: " + ", ".join(bits) + against
 
 
 # --------------------------------------------------------------------------
@@ -182,6 +187,48 @@ def _raw(entity) -> dict:
     return entity_data.raw.get(entity.name, {})
 
 
+def underground_reach(entity) -> int | None:
+    """How far this entity's underground run may span, or None if unknown.
+
+    Read from the prototype every time, because mods change it wholesale and
+    a constant here would be wrong by multiples. Krastorio 2 alone gives the
+    express underground twenty tiles where vanilla gives nine, and adds
+    undergrounds reaching thirty and forty.
+
+    Belts state it plainly; pipes bury it in their fluid box, which is a
+    different place for the same idea.
+    """
+    raw = _raw(entity)
+    plain = raw.get("max_distance")
+    if plain is not None:
+        return int(plain)
+
+    fluid_box = raw.get("fluid_box") or {}
+    for connection in fluid_box.get("pipe_connections") or []:
+        distance = connection.get("max_underground_distance")
+        if distance is not None:
+            return int(distance)
+
+    # Not knowing is a fact, not a licence to assume a number.
+    return None
+
+
+def is_known(entity) -> bool:
+    """Whether the loaded game data has anything to say about this entity."""
+    return bool(entity_data.raw.get(entity.name))
+
+
+def active_dataset() -> str:
+    """Which profile's data the checks are reading, if it was recorded."""
+    try:
+        from .profile import Profile
+
+        name = Profile.active_profile_name()
+    except Exception:
+        name = None
+    return name or "the bundled data (no profile activated)"
+
+
 def _needs_electricity(entity) -> bool:
     source = _raw(entity).get("energy_source")
     kind = source.get("type") if isinstance(source, dict) else source
@@ -206,6 +253,31 @@ def check(function: Check) -> Check:
 
 
 @check
+def prototypes_the_data_does_not_know(layout: Layout) -> Iterator[Finding]:
+    """Entities absent from the loaded game data.
+
+    Almost always the wrong profile: checking a Krastorio blueprint against
+    vanilla data, say. Every other check reads sizes, reach and behaviour from
+    that data, so if it is the wrong set then the rest of this report is not to
+    be trusted. Said first, and loudly, for that reason.
+    """
+    unknown = sorted({e.name for e in layout.entities if not is_known(e)})
+    if not unknown:
+        return
+    shown = ", ".join(unknown[:5]) + (f" and {len(unknown) - 5} more" if len(unknown) > 5 else "")
+    yield Finding(
+        Severity.PROBLEM,
+        "unknown-prototypes",
+        f"{len(unknown)} entity type(s) are missing from the game data in use",
+        f"Not found: {shown}. The data being read is {active_dataset()}. "
+        "Everything else in this report depends on that data, so activate the "
+        "profile this blueprint belongs to and check again.",
+        None,
+        tuple(unknown[:5]),
+    )
+
+
+@check
 def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
     """An underground belt or pipe that never surfaces carries nothing."""
     for entity in layout.entities:
@@ -217,7 +289,12 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
         if step is None:
             continue
 
-        reach = _raw(entity).get("max_distance") or 10
+        reach = underground_reach(entity)
+        if reach is None:
+            # Without the prototype we cannot say how far it should reach, and
+            # guessing would produce confident nonsense. The missing data is
+            # reported separately by the unknown-prototype check.
+            continue
         io_type = getattr(entity, "io_type", None)
         # An input travels the way it faces; an output receives from behind it.
         if io_type == "output":
@@ -226,7 +303,7 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
         x, y = layout.tile_of(entity)
         found = False
         left_the_blueprint = False
-        for distance in range(1, int(reach) + 1):
+        for distance in range(1, reach + 1):
             tx, ty = x + step[0] * distance, y + step[1] * distance
             if layout.outside(tx, ty):
                 left_the_blueprint = True
@@ -240,7 +317,7 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
         yield Finding(
             Severity.PROBLEM,
             "underground-unpaired",
-            f"{entity.name} has no matching end within {int(reach)} tiles",
+            f"{entity.name} has no matching end within {reach} tiles",
             "An underground run needs both ends. Nothing passes through this one.",
             (x, y),
             (entity.name,),
@@ -547,7 +624,7 @@ def rail_signals_without_rail(layout: Layout) -> Iterator[Finding]:
 def inspect(blueprint) -> Report:
     """Run every check over a blueprint and collect what they say."""
     layout = Layout(blueprint)
-    report = Report(entities_checked=len(layout.entities))
+    report = Report(entities_checked=len(layout.entities), dataset=active_dataset())
     for run in CHECKS:
         report.findings.extend(run(layout))
     order = {Severity.PROBLEM: 0, Severity.SUSPECT: 1, Severity.NOTE: 2}
