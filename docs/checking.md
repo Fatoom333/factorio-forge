@@ -1,0 +1,100 @@
+# Checking a blueprint
+
+[Русская версия](checking.ru.md)
+
+```bash
+factorio-forge check <blueprint string or file>
+factorio-forge render <blueprint> --check -o layout.html
+```
+
+The first prints what looks wrong. The second draws the blueprint with the
+findings marked where they are, because a check can say *what* and only the
+picture can say *where*.
+
+## Why this exists
+
+A player's own blueprints are the best source of their style — the grid they
+build on, the belt tier they use, how long their trains are. They are not a
+source of correctness. A real blueprint can have a belt someone rotated by
+accident, a wire never run, a filter set on an inserter that ignores filters.
+
+Learning style from such a blueprint is the whole point of this project.
+Learning its mistakes is not. So before any of that, there has to be a way to
+tell the two apart.
+
+## Three things, treated differently
+
+| | What it is | What happens |
+| --- | --- | --- |
+| **Style** | grid size, belt tier, pole type, train length | copied — the blueprint is authoritative |
+| **A defect** | a belt the wrong way, a missing wire, an idle inserter | reported, never learned as style |
+| **Inefficiency** | unbalanced ratios, wasted space | left alone |
+
+The third row is deliberate. Not everyone wants maximum optimisation; some
+build for looks, some leave headroom, some simply do not care. Suspected
+inefficiency is not something this reports, and production ratios are not
+checked at all unless asked for.
+
+## Nothing is ever changed
+
+Every check reports. None of them edits. The line between a mistake and an
+intentional oddity is usually not the tool's to draw, and a tool that quietly
+"fixes" someone's layout is worse than one that points and asks.
+
+## Three strengths, because crying wolf is fatal
+
+A checker that fires on ordinary blueprints teaches its reader to skip the
+output, and then the real findings go unread too. So findings are graded:
+
+- **problem** — almost certainly wrong. An underground belt with no other end,
+  an inserter with empty tiles on both sides, filters set on an inserter with
+  filtering switched off, a combinator no wire reaches, two belts head on.
+- **worth a look** — has honest reasons to be deliberate. A machine outside
+  every pole's supply area, a pole out of wire reach of the rest, an assembler
+  with no recipe, a constant combinator holding nothing.
+- **note** — context, not criticism. An assembler without a recipe in a
+  *parameterised* blueprint is a note, because that is exactly what
+  parameterising means.
+
+The test suite has as many tests for what must **not** be reported as for what
+must.
+
+## Edges
+
+Most blueprints are fragments meant to join onto something else. A belt running
+off the edge is normal; so is a machine with no power in a piece that carries
+none, and an inserter at the boundary whose neighbour is in the next blueprint
+along.
+
+Every check that could otherwise fire on half of all blueprints is therefore
+edge-aware: anything reaching past the boundary is presumed to meet whatever is
+out there. Where silencing a check entirely would make it useless — a rail
+signal, which sits at a blueprint's edge by its nature — the finding is softened
+to *worth a look* instead of suppressed.
+
+## What is checked
+
+Connectivity and geometry: underground belts and pipes without a matching end,
+inserters reaching nothing or shuffling one container into itself, belts facing
+each other, entities sharing a tile, rail signals not beside a rail.
+
+Power: machines outside every supply area, poles isolated from the rest of the
+network.
+
+Settings that silently do nothing: filters stored on an entity that has
+filtering off, a circuit or logistic condition on an entity no wire reaches, a
+combinator with no wires at all, a constant combinator holding no signals, an
+assembler with no recipe.
+
+Geometry comes from the entities themselves rather than from assumptions.
+Underground reach is read from the prototype, so an express underground is
+allowed its nine tiles where a basic one gets five. An inserter's reach comes
+from the `pickup_position` and `drop_position` it reports, which avoids having
+to reason about which way `direction` points — and that matters, because it
+points the opposite of the obvious way: at the side the inserter takes *from*.
+
+## Still to come
+
+Circuit logic is not yet checked in any meaningful sense. A combinator with no
+wires is caught, but whether a circuit does what it was built to do needs the
+tick simulator, which is the next piece of this.

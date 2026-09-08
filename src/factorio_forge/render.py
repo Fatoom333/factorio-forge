@@ -379,8 +379,15 @@ def snap_cell(blueprint, bounds: Bounds) -> tuple[float, float, float, float] | 
     )
 
 
-def render_svg(blueprint) -> str:
-    """The blueprint as a standalone SVG element."""
+SEVERITY_COLOUR = {"problem": "#e0574f", "suspect": "#e0a23f", "note": "#5b9bd5"}
+
+
+def render_svg(blueprint, findings: Iterable = ()) -> str:
+    """The blueprint as a standalone SVG element.
+
+    `findings` are marked where they sit. A check can say what is wrong; only
+    the picture can say where, and the two are useless apart.
+    """
     entities = list(blueprint.entities)
     tiles = list(blueprint.tiles)
     bounds = measure(entities, tiles)
@@ -528,6 +535,23 @@ def render_svg(blueprint) -> str:
             summary += "\n" + "\n".join(f"{k}: {v}" for k, v in details.items())
         parts.append(f"<title>{html.escape(summary)}</title>")
         parts.append("</g>")
+
+    # Findings last, so a marker is never hidden under an entity.
+    for finding in findings:
+        position = getattr(finding, "position", None)
+        if position is None:
+            continue
+        severity = getattr(getattr(finding, "severity", None), "value", "note")
+        colour = SEVERITY_COLOUR.get(severity, SEVERITY_COLOUR["note"])
+        fx, fy = px(position[0] + 0.5, position[1] + 0.5)
+        summary = getattr(finding, "summary", "")
+        parts.append(
+            f'<g class="finding"><circle cx="{fx:.1f}" cy="{fy:.1f}" r="{CELL * 0.42:.1f}" '
+            f'fill="none" stroke="{colour}" stroke-width="3"/>'
+            f'<circle cx="{fx:.1f}" cy="{fy:.1f}" r="{CELL * 0.42:.1f}" fill="{colour}" '
+            f'opacity=".18"/>'
+            f"<title>{html.escape(f'{severity}: {summary}')}</title></g>"
+        )
 
     parts.append("</svg>")
     return "\n".join(parts)
@@ -822,7 +846,49 @@ def _parameters_card(blueprint) -> str:
     )
 
 
-def render_html(blueprint, title: str | None = None, blueprint_string: str | None = None) -> str:
+def _findings_card(findings: list) -> str:
+    """What the checks said, grouped by how sure they are."""
+    if not findings:
+        return ""
+    groups: dict[str, list] = {}
+    for finding in findings:
+        severity = getattr(getattr(finding, "severity", None), "value", "note")
+        groups.setdefault(severity, []).append(finding)
+
+    blocks = []
+    for severity, heading in (
+        ("problem", "almost certainly wrong"),
+        ("suspect", "worth a look"),
+        ("note", "notes"),
+    ):
+        items = groups.get(severity)
+        if not items:
+            continue
+        colour = SEVERITY_COLOUR[severity]
+        rows = "".join(
+            f'<div><span class="swatch" style="background:{colour}"></span>'
+            f"{html.escape(getattr(f, 'summary', ''))}"
+            f'<span class="count">{f.position[0]}, {f.position[1]}</span></div>'
+            if getattr(f, "position", None)
+            else f'<div><span class="swatch" style="background:{colour}"></span>'
+            f"{html.escape(getattr(f, 'summary', ''))}</div>"
+            for f in items
+        )
+        blocks.append(
+            f'<div style="margin-bottom:10px"><div style="color:var(--muted);'
+            f'font-size:12px;margin-bottom:4px">{heading} ({len(items)})</div>'
+            f'<div class="legend">{rows}</div></div>'
+        )
+
+    return f'<div class="card"><h2>what the checks found</h2>{"".join(blocks)}</div>'
+
+
+def render_html(
+    blueprint,
+    title: str | None = None,
+    blueprint_string: str | None = None,
+    findings: Iterable = (),
+) -> str:
     """A complete, self-contained page showing the blueprint."""
     entities = list(blueprint.entities)
     bounds = measure(entities, blueprint.tiles)
@@ -850,8 +916,10 @@ def render_html(blueprint, title: str | None = None, blueprint_string: str | Non
         facts.append(("tiles", str(tile_count)))
     facts_html = "\n".join(f"<dt>{k}</dt><dd>{html.escape(v)}</dd>" for k, v in facts)
 
+    findings = list(findings)
     snapping_card = _snapping_card(blueprint, bounds)
     parameters_card = _parameters_card(blueprint)
+    findings_card = _findings_card(findings)
 
     if blueprint_string is None:
         try:
@@ -886,10 +954,11 @@ def render_html(blueprint, title: str | None = None, blueprint_string: str | Non
       <button id="zoomreset">fit</button>
       <span id="zoomlevel">100%</span>
     </div>
-    {render_svg(blueprint)}
+    {render_svg(blueprint, findings)}
   </div>
   <div class="side">
     <div class="card"><h2>about</h2><dl>{facts_html}</dl></div>
+    {findings_card}
     {snapping_card}
     {parameters_card}
     <div class="card"><h2>legend</h2><div class="legend">{legend}</div></div>
@@ -903,9 +972,11 @@ def render_html(blueprint, title: str | None = None, blueprint_string: str | Non
 """
 
 
-def write_html(blueprint, path: str | Path, title: str | None = None) -> Path:
+def write_html(
+    blueprint, path: str | Path, title: str | None = None, findings: Iterable = ()
+) -> Path:
     """Render to a file and return where it went."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_html(blueprint, title=title), encoding="utf-8")
+    path.write_text(render_html(blueprint, title=title, findings=findings), encoding="utf-8")
     return path

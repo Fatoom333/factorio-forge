@@ -1,0 +1,555 @@
+"""Look at a blueprint and say what looks wrong, without changing anything.
+
+A player's own blueprints are the best source of their style — the grid they
+build on, the belt tier they use, how long their trains are. They are not a
+source of correctness. A real blueprint can have a belt someone rotated by
+accident, a wire never run, a filter set on an inserter that ignores filters.
+Learning style from such a blueprint is right; learning its mistakes is not.
+
+So this module separates three things that want opposite treatment:
+
+    style        a choice — copy it
+    a defect     a mistake — never copy it, say so
+    inefficiency neither — it may be entirely deliberate
+
+and it only ever reports. Nothing here edits a blueprint. The line between a
+mistake and an intentional oddity is usually not ours to draw, and a tool that
+quietly "fixes" a layout is worse than one that points and asks.
+
+Findings come in three strengths, because crying wolf is the way to make
+someone stop reading: `PROBLEM` is almost certainly wrong, `SUSPECT` is worth a
+look and has honest reasons to be deliberate, `NOTE` is context.
+
+## Edges
+
+Most blueprints are fragments meant to join onto something else. A belt running
+off the edge is normal, and so is a machine with no power in a piece that
+carries none. Checks that would otherwise fire on every second blueprint are
+therefore edge-aware: anything reaching past the boundary is presumed to meet
+whatever is out there.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable, Iterable, Iterator
+
+import draftsman.data.entities as entity_data
+
+# --------------------------------------------------------------------------
+# findings
+# --------------------------------------------------------------------------
+
+
+class Severity(str, Enum):
+    PROBLEM = "problem"
+    SUSPECT = "suspect"
+    NOTE = "note"
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One thing worth telling the player about."""
+
+    severity: Severity
+    code: str
+    summary: str
+    detail: str = ""
+    position: tuple[int, int] | None = None
+    entities: tuple[str, ...] = ()
+
+    def __str__(self) -> str:
+        where = f" at {self.position[0]}, {self.position[1]}" if self.position else ""
+        return f"[{self.severity.value}] {self.summary}{where}"
+
+
+@dataclass
+class Report:
+    """Everything one inspection found."""
+
+    findings: list[Finding] = field(default_factory=list)
+    entities_checked: int = 0
+
+    def of(self, severity: Severity) -> list[Finding]:
+        return [f for f in self.findings if f.severity is severity]
+
+    @property
+    def problems(self) -> list[Finding]:
+        return self.of(Severity.PROBLEM)
+
+    @property
+    def suspects(self) -> list[Finding]:
+        return self.of(Severity.SUSPECT)
+
+    @property
+    def notes(self) -> list[Finding]:
+        return self.of(Severity.NOTE)
+
+    @property
+    def clean(self) -> bool:
+        return not self.problems and not self.suspects
+
+    def summary(self) -> str:
+        if self.clean:
+            return f"{self.entities_checked} entities, nothing to report"
+        bits = []
+        if self.problems:
+            bits.append(f"{len(self.problems)} problem(s)")
+        if self.suspects:
+            bits.append(f"{len(self.suspects)} to look at")
+        if self.notes:
+            bits.append(f"{len(self.notes)} note(s)")
+        return f"{self.entities_checked} entities: " + ", ".join(bits)
+
+
+# --------------------------------------------------------------------------
+# what the checks work from
+# --------------------------------------------------------------------------
+
+# 2.0 counts direction in sixteenths of a turn from north.
+STEP: dict[int, tuple[int, int]] = {
+    0: (0, -1),
+    4: (1, 0),
+    8: (0, 1),
+    12: (-1, 0),
+}
+
+
+class Layout:
+    """A blueprint arranged so questions about neighbours are cheap."""
+
+    def __init__(self, blueprint) -> None:
+        self.blueprint = blueprint
+        self.entities = list(blueprint.entities)
+        self.occupied: dict[tuple[int, int], list[int]] = {}
+        for index, entity in enumerate(self.entities):
+            for tile in self.tiles_of(entity):
+                self.occupied.setdefault(tile, []).append(index)
+
+        xs = [t[0] for t in self.occupied] or [0]
+        ys = [t[1] for t in self.occupied] or [0]
+        self.left, self.right = min(xs), max(xs)
+        self.top, self.bottom = min(ys), max(ys)
+
+        self.wired: set[int] = set()
+        for wire in getattr(blueprint, "wires", None) or []:
+            for part in (wire[0], wire[2]):
+                resolved = _resolve(part)
+                if resolved is not None:
+                    self.wired.add(id(resolved))
+
+    @staticmethod
+    def tiles_of(entity) -> Iterator[tuple[int, int]]:
+        x, y = int(entity.tile_position.x), int(entity.tile_position.y)
+        for dx in range(entity.tile_width):
+            for dy in range(entity.tile_height):
+                yield (x + dx, y + dy)
+
+    def at(self, x: float, y: float) -> list:
+        """Entities occupying a tile, given a position that may be a centre."""
+        import math
+
+        key = (math.floor(x), math.floor(y))
+        return [self.entities[i] for i in self.occupied.get(key, ())]
+
+    def outside(self, x: float, y: float) -> bool:
+        """Whether a tile falls beyond the blueprint, where anything may be."""
+        import math
+
+        tx, ty = math.floor(x), math.floor(y)
+        return not (self.left <= tx <= self.right and self.top <= ty <= self.bottom)
+
+    def has_wire(self, entity) -> bool:
+        return id(entity) in self.wired
+
+    @staticmethod
+    def tile_of(entity) -> tuple[int, int]:
+        return int(entity.tile_position.x), int(entity.tile_position.y)
+
+
+def _resolve(part):
+    """An Association dereferences to the entity; anything else passes through."""
+    try:
+        return part()
+    except TypeError:
+        return part
+    except Exception:
+        return None
+
+
+def _raw(entity) -> dict:
+    return entity_data.raw.get(entity.name, {})
+
+
+def _needs_electricity(entity) -> bool:
+    source = _raw(entity).get("energy_source")
+    kind = source.get("type") if isinstance(source, dict) else source
+    return kind == "electric"
+
+
+def _condition_is_set(condition) -> bool:
+    return condition is not None and getattr(condition, "first_signal", None) is not None
+
+
+# --------------------------------------------------------------------------
+# checks
+# --------------------------------------------------------------------------
+
+Check = Callable[[Layout], Iterable[Finding]]
+CHECKS: list[Check] = []
+
+
+def check(function: Check) -> Check:
+    CHECKS.append(function)
+    return function
+
+
+@check
+def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
+    """An underground belt or pipe that never surfaces carries nothing."""
+    for entity in layout.entities:
+        kind = getattr(entity, "type", "")
+        if kind not in ("underground-belt", "pipe-to-ground"):
+            continue
+        direction = int(getattr(entity, "direction", 0) or 0)
+        step = STEP.get(direction)
+        if step is None:
+            continue
+
+        reach = _raw(entity).get("max_distance") or 10
+        io_type = getattr(entity, "io_type", None)
+        # An input travels the way it faces; an output receives from behind it.
+        if io_type == "output":
+            step = (-step[0], -step[1])
+
+        x, y = layout.tile_of(entity)
+        found = False
+        left_the_blueprint = False
+        for distance in range(1, int(reach) + 1):
+            tx, ty = x + step[0] * distance, y + step[1] * distance
+            if layout.outside(tx, ty):
+                left_the_blueprint = True
+                break
+            if any(other.name == entity.name for other in layout.at(tx, ty)):
+                found = True
+                break
+
+        if found or left_the_blueprint:
+            continue
+        yield Finding(
+            Severity.PROBLEM,
+            "underground-unpaired",
+            f"{entity.name} has no matching end within {int(reach)} tiles",
+            "An underground run needs both ends. Nothing passes through this one.",
+            (x, y),
+            (entity.name,),
+        )
+
+
+@check
+def inserters_reaching_nothing(layout: Layout) -> Iterator[Finding]:
+    """An inserter with empty tiles on both sides does nothing at all."""
+    for entity in layout.entities:
+        if getattr(entity, "type", "") != "inserter":
+            continue
+        pickup = getattr(entity, "pickup_position", None)
+        drop = getattr(entity, "drop_position", None)
+        if pickup is None or drop is None:
+            continue
+
+        # Reading the positions the entity reports avoids having to reason about
+        # which way `direction` points, which is the opposite of the obvious
+        # guess: it names the side the inserter takes from.
+        pickup_empty = not layout.at(pickup.x, pickup.y) and not layout.outside(pickup.x, pickup.y)
+        drop_empty = not layout.at(drop.x, drop.y) and not layout.outside(drop.x, drop.y)
+
+        x, y = layout.tile_of(entity)
+        if pickup_empty and drop_empty:
+            yield Finding(
+                Severity.PROBLEM,
+                "inserter-idle",
+                f"{entity.name} has nothing to take from and nothing to feed",
+                "Both the tile it reaches into and the tile it drops onto are empty.",
+                (x, y),
+                (entity.name,),
+            )
+            continue
+
+        taking = layout.at(pickup.x, pickup.y)
+        giving = layout.at(drop.x, drop.y)
+        if taking and giving and taking[0] is giving[0]:
+            yield Finding(
+                Severity.PROBLEM,
+                "inserter-loop",
+                f"{entity.name} takes from and drops into the same {taking[0].name}",
+                "It will move items in a circle.",
+                (x, y),
+                (entity.name, taking[0].name),
+            )
+
+
+@check
+def settings_that_do_nothing(layout: Layout) -> Iterator[Finding]:
+    """Configuration that is set but switched off, or has no wire to act on.
+
+    This is the careless-mistake family: everything looks configured, and none
+    of it runs.
+    """
+    for entity in layout.entities:
+        x, y = layout.tile_of(entity)
+
+        filters = getattr(entity, "filters", None) or []
+        if filters and getattr(entity, "use_filters", None) is False:
+            yield Finding(
+                Severity.PROBLEM,
+                "filters-ignored",
+                f"{entity.name} has filters set but filtering is switched off",
+                "The filters are stored and never applied.",
+                (x, y),
+                (entity.name,),
+            )
+
+        for attribute, what in (
+            ("circuit_condition", "a circuit condition"),
+            ("logistic_condition", "a logistic condition"),
+        ):
+            if _condition_is_set(getattr(entity, attribute, None)) and not layout.has_wire(entity):
+                yield Finding(
+                    Severity.PROBLEM,
+                    "condition-without-wire",
+                    f"{entity.name} has {what} but no wire reaches it",
+                    "The condition can never be satisfied, so the entity stays disabled.",
+                    (x, y),
+                    (entity.name,),
+                )
+
+
+@check
+def combinators_without_wires(layout: Layout) -> Iterator[Finding]:
+    """A combinator no wire reaches computes into the void."""
+    for entity in layout.entities:
+        kind = getattr(entity, "type", "")
+        if kind not in (
+            "arithmetic-combinator",
+            "decider-combinator",
+            "selector-combinator",
+            "constant-combinator",
+        ):
+            continue
+        if layout.has_wire(entity):
+            continue
+        x, y = layout.tile_of(entity)
+        yield Finding(
+            Severity.PROBLEM,
+            "combinator-unwired",
+            f"{entity.name} has no wires attached",
+            "Nothing can reach its output, and nothing feeds its input.",
+            (x, y),
+            (entity.name,),
+        )
+
+
+@check
+def entities_without_power(layout: Layout) -> Iterator[Finding]:
+    """An electric machine outside every pole's supply area never runs."""
+    poles = [e for e in layout.entities if getattr(e, "type", "") == "electric-pole"]
+    if not poles:
+        # A fragment carrying no power at all is a normal thing to blueprint.
+        return
+
+    covered: set[tuple[int, int]] = set()
+    for pole in poles:
+        reach = _raw(pole).get("supply_area_distance") or 0
+        px = pole.tile_position.x + pole.tile_width / 2
+        py = pole.tile_position.y + pole.tile_height / 2
+        span = int(reach)
+        for dx in range(-span, span + 1):
+            for dy in range(-span, span + 1):
+                covered.add((int(px + dx), int(py + dy)))
+
+    for entity in layout.entities:
+        if not _needs_electricity(entity):
+            continue
+        tiles = list(layout.tiles_of(entity))
+        if any(tile in covered for tile in tiles):
+            continue
+        x, y = layout.tile_of(entity)
+        yield Finding(
+            Severity.SUSPECT,
+            "unpowered",
+            f"{entity.name} is not covered by any pole in this blueprint",
+            "It may be fed by a pole outside the blueprint, but check.",
+            (x, y),
+            (entity.name,),
+        )
+
+
+@check
+def isolated_poles(layout: Layout) -> Iterator[Finding]:
+    """A pole out of wire reach of every other pole powers only itself."""
+    poles = [e for e in layout.entities if getattr(e, "type", "") == "electric-pole"]
+    if len(poles) < 2:
+        return
+    for pole in poles:
+        reach = _raw(pole).get("maximum_wire_distance") or 0
+        px, py = pole.position.x, pole.position.y
+        connected = any(
+            other is not pole
+            and (other.position.x - px) ** 2 + (other.position.y - py) ** 2 <= reach**2
+            for other in poles
+        )
+        if connected:
+            continue
+        x, y = layout.tile_of(pole)
+        yield Finding(
+            Severity.SUSPECT,
+            "pole-isolated",
+            f"{pole.name} is out of wire reach of every other pole",
+            f"Its reach is {reach} tiles; the network here is broken in two.",
+            (x, y),
+            (pole.name,),
+        )
+
+
+@check
+def machines_without_a_recipe(layout: Layout) -> Iterator[Finding]:
+    """Deliberate in a parameterised blueprint, an oversight otherwise."""
+    parameterised = bool(getattr(layout.blueprint, "parameters", None))
+    for entity in layout.entities:
+        if getattr(entity, "type", "") != "assembling-machine":
+            continue
+        if getattr(entity, "recipe", None):
+            continue
+        x, y = layout.tile_of(entity)
+        yield Finding(
+            Severity.NOTE if parameterised else Severity.SUSPECT,
+            "machine-no-recipe",
+            f"{entity.name} has no recipe set",
+            "Expected in a parameterised blueprint; otherwise it will sit idle."
+            if parameterised
+            else "It will do nothing until a recipe is chosen.",
+            (x, y),
+            (entity.name,),
+        )
+
+
+@check
+def empty_constant_combinators(layout: Layout) -> Iterator[Finding]:
+    for entity in layout.entities:
+        if getattr(entity, "type", "") != "constant-combinator":
+            continue
+        sections = getattr(entity, "sections", None) or []
+        has_signal = any(getattr(s, "filters", None) for s in sections)
+        if has_signal:
+            continue
+        x, y = layout.tile_of(entity)
+        yield Finding(
+            Severity.SUSPECT,
+            "constant-empty",
+            f"{entity.name} holds no signals",
+            "It outputs nothing. Often a placeholder that was never filled in.",
+            (x, y),
+            (entity.name,),
+        )
+
+
+@check
+def belts_facing_each_other(layout: Layout) -> Iterator[Finding]:
+    """Two belts pointing into one another jam where they meet."""
+    seen: set[tuple[int, int, int, int]] = set()
+    for entity in layout.entities:
+        if getattr(entity, "type", "") != "transport-belt":
+            continue
+        step = STEP.get(int(getattr(entity, "direction", 0) or 0))
+        if step is None:
+            continue
+        x, y = layout.tile_of(entity)
+        ahead = (x + step[0], y + step[1])
+        for other in layout.at(*ahead):
+            if getattr(other, "type", "") != "transport-belt":
+                continue
+            other_step = STEP.get(int(getattr(other, "direction", 0) or 0))
+            if other_step != (-step[0], -step[1]):
+                continue
+            key = tuple(sorted([(x, y), ahead]))
+            flat = (key[0][0], key[0][1], key[1][0], key[1][1])
+            if flat in seen:
+                continue
+            seen.add(flat)
+            yield Finding(
+                Severity.PROBLEM,
+                "belts-head-on",
+                "two belts face each other and will jam",
+                "Items arrive from both sides onto the same tile.",
+                (x, y),
+                (entity.name, other.name),
+            )
+
+
+@check
+def overlapping_entities(layout: Layout) -> Iterator[Finding]:
+    """Two things on one tile cannot both exist in game."""
+    reported: set[tuple[str, str]] = set()
+    for tile, indices in layout.occupied.items():
+        if len(indices) < 2:
+            continue
+        names = tuple(sorted(layout.entities[i].name for i in indices))
+        if names in reported:
+            continue
+        reported.add(names)
+        yield Finding(
+            Severity.PROBLEM,
+            "overlap",
+            f"{' and '.join(names)} occupy the same tile",
+            "The game will refuse to place one of them.",
+            tile,
+            names,
+        )
+
+
+@check
+def rail_signals_without_rail(layout: Layout) -> Iterator[Finding]:
+    """A signal not beside a rail governs nothing."""
+    for entity in layout.entities:
+        if getattr(entity, "type", "") not in ("rail-signal", "rail-chain-signal"):
+            continue
+        x, y = layout.tile_of(entity)
+        neighbours = ((1, 0), (-1, 0), (0, 1), (0, -1), (0, 0))
+        near_rail = any(
+            "rail" in getattr(other, "type", "")
+            for dx, dy in neighbours
+            for other in layout.at(x + dx, y + dy)
+        )
+        if near_rail:
+            continue
+
+        # At the boundary the rail may genuinely be in the neighbouring
+        # blueprint, so this is softened rather than silenced. Silencing it
+        # would make the check almost never fire: signals sit at the edges of
+        # rail blueprints by their nature.
+        at_edge = any(layout.outside(x + dx, y + dy) for dx, dy in neighbours[:4])
+        yield Finding(
+            Severity.SUSPECT if at_edge else Severity.PROBLEM,
+            "signal-without-rail",
+            f"{entity.name} is not beside a rail",
+            "The track it governs would have to be in the neighbouring blueprint."
+            if at_edge
+            else "A signal must sit against the track it governs.",
+            (x, y),
+            (entity.name,),
+        )
+
+
+# --------------------------------------------------------------------------
+
+
+def inspect(blueprint) -> Report:
+    """Run every check over a blueprint and collect what they say."""
+    layout = Layout(blueprint)
+    report = Report(entities_checked=len(layout.entities))
+    for run in CHECKS:
+        report.findings.extend(run(layout))
+    order = {Severity.PROBLEM: 0, Severity.SUSPECT: 1, Severity.NOTE: 2}
+    report.findings.sort(key=lambda f: (order[f.severity], f.code, f.position or (0, 0)))
+    return report

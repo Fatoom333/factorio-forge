@@ -45,14 +45,17 @@ def _cmd_init(_: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_render(args: argparse.Namespace) -> int:
+def _load_blueprint(args: argparse.Namespace):
+    """Read a blueprint from a string or a file, explaining any refusal.
+
+    Returns the blueprint, or None once it has said why it could not. Shared by
+    every command that takes a blueprint, so they all fail the same way.
+    """
     from draftsman.blueprintable import (
         Blueprint,
         BlueprintBook,
         get_blueprintable_from_string,
     )
-
-    from . import render
 
     source = args.blueprint
     # A blueprint string starts with its version byte; anything else is a path.
@@ -85,11 +88,11 @@ def _cmd_render(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         print(f"  (underlying error: {exc})", file=sys.stderr)
-        return 1
+        return None
 
     if isinstance(blueprint, BlueprintBook):
         contents = list(blueprint.blueprints)
-        if args.index is None:
+        if getattr(args, "index", None) is None:
             print(
                 f"That is a blueprint book holding {len(contents)} entries. "
                 "Choose one with --index:",
@@ -103,28 +106,82 @@ def _cmd_render(args: argparse.Namespace) -> int:
                     f"  --index {i}   {label}  [{kind}, {_plural(count, 'entity', 'entities')}]",
                     file=sys.stderr,
                 )
-            return 1
+            return None
         if not 0 <= args.index < len(contents):
             print(
                 f"The book has {len(contents)} entries, numbered 0 to {len(contents) - 1}.",
                 file=sys.stderr,
             )
-            return 1
+            return None
         blueprint = contents[args.index]
 
     if not isinstance(blueprint, Blueprint):
         print(
-            f"A {type(blueprint).__name__} has no entities to draw — it is a list of "
-            "settings rather than a layout.",
+            f"A {type(blueprint).__name__} has no entities — it is a list of settings "
+            "rather than a layout.",
             file=sys.stderr,
         )
+        return None
+
+    return blueprint
+
+
+def _cmd_render(args: argparse.Namespace) -> int:
+    from . import render
+
+    blueprint = _load_blueprint(args)
+    if blueprint is None:
         return 1
 
+    findings = []
+    if args.check:
+        from . import inspection
+
+        findings = inspection.inspect(blueprint).findings
+
     output = Path(args.output) if args.output else Path("blueprint.html")
-    written = render.write_html(blueprint, output, title=args.title)
+    written = render.write_html(blueprint, output, title=args.title, findings=findings)
+    if findings:
+        print(f"{_plural(len(findings), 'finding', 'findings')} marked on the drawing")
     bounds = render.measure(blueprint.entities, blueprint.tiles)
     print(f"{_plural(len(blueprint.entities), 'entity', 'entities')}, {bounds}")
     print(f"written: {written.resolve()}")
+    return 0
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    from . import inspection
+
+    blueprint = _load_blueprint(args)
+    if blueprint is None:
+        return 1
+
+    report = inspection.inspect(blueprint)
+    print(report.summary())
+
+    groups = [
+        ("problems", report.problems, "almost certainly wrong"),
+        ("worth a look", report.suspects, "may be deliberate"),
+    ]
+    if args.all:
+        groups.append(("notes", report.notes, ""))
+
+    for heading, findings, aside in groups:
+        if not findings:
+            continue
+        print(f"\n{heading}" + (f" — {aside}" if aside else ""))
+        for finding in findings:
+            where = f"  ({finding.position[0]}, {finding.position[1]})" if finding.position else ""
+            print(f"  {finding.summary}{where}")
+            if finding.detail:
+                print(f"      {finding.detail}")
+
+    if report.clean:
+        print("\nNothing here changes the blueprint; this only reports.")
+    else:
+        print("\nNothing was changed. Whether any of this is a mistake is your call.")
+    # A blueprint with problems is still a valid blueprint, so this is not an
+    # error exit; it is a report.
     return 0
 
 
@@ -150,7 +207,19 @@ def build_parser() -> argparse.ArgumentParser:
     draw.add_argument(
         "--index", type=int, help="which entry to draw, when the string is a blueprint book"
     )
+    draw.add_argument(
+        "--check", action="store_true", help="run the checks and mark what they find"
+    )
     draw.set_defaults(func=_cmd_render)
+
+    look = sub.add_parser(
+        "check", help="report what looks wrong in a blueprint, without changing it"
+    )
+    look.add_argument("blueprint", help="a blueprint string, or a file containing one")
+    look.add_argument(
+        "--all", action="store_true", help="include notes, not just problems and suspects"
+    )
+    look.set_defaults(func=_cmd_check)
 
     return parser
 

@@ -90,12 +90,25 @@ their direction; hovering shows recipes, priorities and the rest. The page is a
 single self-contained file with nothing to fetch. See
 [docs/rendering.md](docs/rendering.md).
 
+## Checking a blueprint
+
+```bash
+factorio-forge check "0eNqlk...="
+```
+
+Reports what looks wrong — an underground belt with no other end, an inserter
+reaching nothing, filters set on an inserter with filtering switched off —
+without changing anything. Add `--check` to `render` to see the findings marked
+on the drawing. See [docs/checking.md](docs/checking.md).
+
 ## Documentation
 
 - [Profiles](docs/profiles.md) — what a profile is, how mod sets are resolved,
   and why extraction happens once
 - [Rendering](docs/rendering.md) — how a blueprint is drawn, and what is
   deliberately left out
+- [Checking](docs/checking.md) — what is reported, why nothing is corrected,
+  and how false alarms are kept down
 - [Notes on factorio-draftsman](docs/draftsman-notes.md) — what we rely on, what
   was verified by hand, and why the dependency points at a fork
 
