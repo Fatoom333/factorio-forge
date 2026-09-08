@@ -202,6 +202,11 @@ def measure(entities: Iterable, tiles: Iterable = ()) -> Bounds:
 # drawing
 # --------------------------------------------------------------------------
 
+# Factorio's directions run 0 to 15 around the compass, so one step is a
+# sixteenth of a turn. Named because `* 22.5` in the middle of drawing code
+# reads as a magic number rather than as the thing it is.
+DEGREES_PER_STEP = 360 / 16
+
 CELL = 26  # pixels per tile
 MARGIN = 34  # room for the coordinate ruler
 
@@ -226,7 +231,7 @@ def _arrow(cx: float, cy: float, direction: int, size: float) -> str:
     the angle is a plain multiplication; SVG rotates clockwise from the same
     north, which happens to match.
     """
-    angle = int(direction) * 22.5
+    angle = int(direction) * DEGREES_PER_STEP
     half = size / 2
     points = f"0,{-half} {half * 0.8},{half * 0.6} 0,{half * 0.15} {-half * 0.8},{half * 0.6}"
     return (

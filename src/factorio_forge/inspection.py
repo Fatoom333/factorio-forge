@@ -475,17 +475,26 @@ def settings_that_do_nothing(layout: Layout) -> Iterator[Finding]:
                 )
 
 
+def combinator_types() -> set[str]:
+    """Which prototype types are combinators, according to the loaded data.
+
+    Listing the four that exist today would be right until the day it is not:
+    2.1 revises circuit logic, and a version or a mod that introduces another
+    combinator would be skipped in silence rather than checked. The engine
+    names them consistently, so the data itself can be asked.
+    """
+    import draftsman.data.entities as data
+
+    return {kind for kind in getattr(data, "of_type", {}) if kind.endswith("-combinator")}
+
+
 @check
 def combinators_without_wires(layout: Layout) -> Iterator[Finding]:
     """A combinator no wire reaches computes into the void."""
+    kinds = combinator_types()
     for entity in layout.entities:
         kind = getattr(entity, "type", "")
-        if kind not in (
-            "arithmetic-combinator",
-            "decider-combinator",
-            "selector-combinator",
-            "constant-combinator",
-        ):
+        if kind not in kinds:
             continue
         if layout.has_wire(entity):
             continue
