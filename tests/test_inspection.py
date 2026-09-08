@@ -353,3 +353,67 @@ class TestReport:
         before = bp.to_string()
         inspection.inspect(bp)
         assert bp.to_string() == before
+
+
+class TestCollisionIsTheGamesOwn:
+    """Sharing a tile is not the same as colliding, and the game knows it."""
+
+    def test_a_signal_beside_a_rail_is_not_an_overlap(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("straight-rail", tile_position=(0, 0))
+        bp.entities.append("rail-signal", tile_position=(1, 0))
+        assert not [f for f in inspection.inspect(bp).findings if f.code == "overlap"]
+
+    def test_two_things_in_the_same_place_still_collide(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("wooden-chest", tile_position=(0, 0))
+        bp.entities.append("iron-chest", tile_position=(0, 0))
+        found = [f for f in inspection.inspect(bp).findings if f.code == "overlap"]
+        assert found and found[0].severity is Severity.PROBLEM
+
+
+class TestUndergroundDirectionComesFromTheData:
+    """A pipe buries its run behind itself; the prototype says so."""
+
+    def test_a_facing_away_pair_counts_as_paired(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("pipe-to-ground", tile_position=(0, 0), direction=Direction.NORTH)
+        bp.entities.append("pipe-to-ground", tile_position=(0, 4), direction=Direction.SOUTH)
+        assert not [
+            f for f in inspection.inspect(bp).findings if f.code == "underground-unpaired"
+        ]
+
+    def test_a_lone_pipe_is_still_reported(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("pipe-to-ground", tile_position=(0, 0), direction=Direction.NORTH)
+        # Far enough that the search stays inside the blueprint: a run leaving
+        # it is not a defect, since the other end may be off the edge.
+        for y in range(1, 14):
+            bp.entities.append("pipe", tile_position=(0, y))
+        assert [f for f in inspection.inspect(bp).findings if f.code == "underground-unpaired"]
+
+
+class TestInserterReach:
+    """A blueprint that states where an inserter reaches is telling the truth."""
+
+    def test_stated_positions_win_over_computed_ones(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("inserter", tile_position=(0, 0), direction=Direction.SOUTH)
+        inserter = bp.entities[0]
+        stated = inserter.to_dict()
+        stated["pickup_position"] = [1.0, -1.0]
+        stated["drop_position"] = [1.2, 1.2]
+        original = inserter.to_dict
+        inserter.to_dict = lambda *args, **kwargs: stated
+
+        pickup, drop = inspection.inserter_reach(inserter)
+        inserter.to_dict = original
+        assert pickup == (1.5, -0.5)
+        assert drop == (1.7, 1.7)
+
+    def test_without_stated_positions_the_computed_ones_are_used(self) -> None:
+        bp = Blueprint()
+        bp.entities.append("inserter", tile_position=(5, 5), direction=Direction.NORTH)
+        pickup, drop = inspection.inserter_reach(bp.entities[0])
+        assert pickup == (5.5, 4.5)
+        assert round(drop[1], 1) == 6.7

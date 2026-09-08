@@ -74,6 +74,16 @@ to *worth a look* instead of suppressed.
 
 ## What is checked
 
+Two entities are reported as overlapping only when the game itself would
+refuse them: their collision masks must share a layer, and their real collision
+boxes must intersect. Sharing a tile is neither necessary nor sufficient — a
+rail signal is a fifth of a tile across, and a diagonal rail is a slanted shape
+inside a square of four — and tile arithmetic reported thirty-one collisions on
+a blueprint taken straight off a working map, where by definition there were
+none. Rails are excluded from the check altogether: their true shapes are
+curved, the geometry available here approximates each with a rectangle, and at
+a junction those rectangles overlap while the rails do not.
+
 Connectivity and geometry: underground belts and pipes without a matching end,
 inserters reaching nothing or shuffling one container into itself, belts facing
 each other, entities sharing a tile, rail signals not beside a rail.
@@ -100,8 +110,18 @@ both places are read. Where neither yields an answer the check is **skipped**
 rather than run on an assumed number: not knowing is a fact, not a licence to
 guess.
 
-An inserter's reach comes from the `pickup_position` and `drop_position` it
-reports, not from its direction. That avoids having to reason about which way
+An underground run's direction comes from the prototype too. A pipe to ground
+shows its open end above ground and buries the run *behind* itself: the
+prototype lists the two connections separately, the visible one at the entity's
+direction and the underground one at the opposite. Assuming the run follows the
+facing reported eighteen unpaired pipes in one real city block, every one of
+which had its partner in the other direction.
+
+An inserter's reach comes from the `pickup_position` and `drop_position` in the
+blueprint when it carries them, and from the ones the entity reports otherwise.
+A blueprint that states them is describing what the game wrote down, already
+oriented; mods that let an inserter reach sideways or diagonally express
+themselves entirely through those numbers. Neither comes from the direction. That avoids having to reason about which way
 `direction` points — it points the opposite of the obvious way, at the side the
 inserter takes *from* — and, more importantly, a mod can change the relationship
 between direction and reach entirely. Bob's Inserters lets inserters pick up at

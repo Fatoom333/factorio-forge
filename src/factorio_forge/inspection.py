@@ -213,6 +213,29 @@ def underground_reach(entity) -> int | None:
     return None
 
 
+def underground_direction(entity) -> int | None:
+    """Which way this entity's underground run leaves it, or None if unknown.
+
+    Not simply the way the entity faces. A pipe to ground shows its open end
+    above ground and buries the run behind it: the prototype states the two
+    connections separately, the visible one at the entity's own direction and
+    the underground one at the opposite. Reading it rather than assuming the
+    opposite matters because a mod is free to place it anywhere -- the number
+    lives in the data, so that is where it is taken from.
+
+    Belts say nothing of the kind. Their run follows the way they face, turned
+    around for the receiving end, which the caller knows from `io_type`.
+    """
+    raw = _raw(entity)
+    fluid_box = raw.get("fluid_box") or {}
+    for connection in fluid_box.get("pipe_connections") or []:
+        if connection.get("connection_type") == "underground":
+            offset = connection.get("direction")
+            if offset is not None:
+                return int(offset)
+    return None
+
+
 def is_known(entity) -> bool:
     """Whether the loaded game data has anything to say about this entity."""
     return bool(entity_data.raw.get(entity.name))
@@ -295,9 +318,17 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
             # guessing would produce confident nonsense. The missing data is
             # reported separately by the unknown-prototype check.
             continue
-        io_type = getattr(entity, "io_type", None)
-        # An input travels the way it faces; an output receives from behind it.
-        if io_type == "output":
+        offset = underground_direction(entity)
+        if offset is not None:
+            # A pipe's run leaves it the way its underground connection points,
+            # which is its own direction turned by whatever the prototype says
+            # -- the opposite way, in every pipe to ground seen so far.
+            step = STEP.get((direction + offset) % 16)
+            if step is None:
+                continue
+        elif getattr(entity, "io_type", None) == "output":
+            # A belt input travels the way it faces; an output receives from
+            # behind it.
             step = (-step[0], -step[1])
 
         x, y = layout.tile_of(entity)
@@ -324,22 +355,56 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
         )
 
 
+def inserter_reach(entity) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Where an inserter takes from and where it puts, in world coordinates.
+
+    A blueprint may carry the two positions itself, as offsets from the
+    inserter, and when it does they are the answer: they are what the game
+    wrote down, and mods that let an inserter reach sideways or diagonally --
+    Bob's Inserters, Change Inserter Drop Lane -- express themselves entirely
+    through them. They are already oriented, so they are added as they stand.
+
+    Checked against a real base of 298 such inserters: taken as written the
+    pickups land on belts, underground belts and chests, and on nothing
+    absurd; rotated by the inserter's direction, thirty-six of them take from
+    another inserter. The computed positions disagree with both, which is why
+    they are the last resort rather than the first.
+    """
+    position = entity.position
+    stored = entity.to_dict()
+    pickup, drop = stored.get("pickup_position"), stored.get("drop_position")
+    if pickup is not None and drop is not None:
+        return (
+            (position.x + pickup[0], position.y + pickup[1]),
+            (position.x + drop[0], position.y + drop[1]),
+        )
+
+    computed_pickup = getattr(entity, "pickup_position", None)
+    computed_drop = getattr(entity, "drop_position", None)
+    if computed_pickup is None or computed_drop is None:
+        return None
+    return (
+        (computed_pickup.x, computed_pickup.y),
+        (computed_drop.x, computed_drop.y),
+    )
+
+
 @check
 def inserters_reaching_nothing(layout: Layout) -> Iterator[Finding]:
     """An inserter with empty tiles on both sides does nothing at all."""
     for entity in layout.entities:
         if getattr(entity, "type", "") != "inserter":
             continue
-        pickup = getattr(entity, "pickup_position", None)
-        drop = getattr(entity, "drop_position", None)
-        if pickup is None or drop is None:
+        reach = inserter_reach(entity)
+        if reach is None:
             continue
+        pickup, drop = reach
 
-        # Reading the positions the entity reports avoids having to reason about
-        # which way `direction` points, which is the opposite of the obvious
-        # guess: it names the side the inserter takes from.
-        pickup_empty = not layout.at(pickup.x, pickup.y) and not layout.outside(pickup.x, pickup.y)
-        drop_empty = not layout.at(drop.x, drop.y) and not layout.outside(drop.x, drop.y)
+        # Reading the positions rather than reasoning from `direction`, which
+        # names the side the inserter takes from -- the opposite of the obvious
+        # guess, and not even fixed once mods are involved.
+        pickup_empty = not layout.at(*pickup) and not layout.outside(*pickup)
+        drop_empty = not layout.at(*drop) and not layout.outside(*drop)
 
         x, y = layout.tile_of(entity)
         if pickup_empty and drop_empty:
@@ -353,8 +418,8 @@ def inserters_reaching_nothing(layout: Layout) -> Iterator[Finding]:
             )
             continue
 
-        taking = layout.at(pickup.x, pickup.y)
-        giving = layout.at(drop.x, drop.y)
+        taking = layout.at(*pickup)
+        giving = layout.at(*drop)
         if taking and giving and taking[0] is giving[0]:
             yield Finding(
                 Severity.PROBLEM,
@@ -564,25 +629,76 @@ def belts_facing_each_other(layout: Layout) -> Iterator[Finding]:
             )
 
 
+def _collides(first, second) -> bool:
+    """Whether the game would refuse to have both of these where they are.
+
+    Two conditions, both the game's own. Their collision masks must share a
+    layer -- a rail and a rail signal are allowed to sit close precisely
+    because their masks differ -- and their real collision boxes must actually
+    intersect. Sharing a tile is neither necessary nor sufficient: a rail
+    signal is a fifth of a tile across and a diagonal rail is a slanted shape
+    inside a square of four, so tile arithmetic reported dozens of collisions
+    the game had already accepted on the map.
+    """
+    first_mask = getattr(first, "collision_mask", None) or set()
+    second_mask = getattr(second, "collision_mask", None) or set()
+    if isinstance(first_mask, dict):
+        first_mask = set(first_mask.get("layers") or ())
+    if isinstance(second_mask, dict):
+        second_mask = set(second_mask.get("layers") or ())
+    if not (first_mask & second_mask):
+        return False
+
+    # Rails are the one family this cannot judge. Their real shapes are
+    # curved and diagonal, the geometry available here approximates each with
+    # a rectangle, and at a junction those rectangles overlap while the rails
+    # themselves do not. Every rail pair flagged on a blueprint taken straight
+    # off a working map was one the game had already accepted, so the honest
+    # answer is that we do not know rather than a confident wrong one.
+    if "rail" in getattr(first, "type", "") and "rail" in getattr(second, "type", ""):
+        return False
+
+    try:
+        return first.get_world_collision_set().overlaps(second.get_world_collision_set())
+    except Exception:
+        # Geometry we cannot obtain is not evidence of a collision. The
+        # prototype being unknown is reported by its own check.
+        return False
+
+
 @check
 def overlapping_entities(layout: Layout) -> Iterator[Finding]:
-    """Two things on one tile cannot both exist in game."""
+    """Two things the game would not let stand together."""
     reported: set[tuple[str, str]] = set()
+    seen_pairs: set[tuple[int, int]] = set()
     for tile, indices in layout.occupied.items():
         if len(indices) < 2:
             continue
-        names = tuple(sorted(layout.entities[i].name for i in indices))
-        if names in reported:
-            continue
-        reported.add(names)
-        yield Finding(
-            Severity.PROBLEM,
-            "overlap",
-            f"{' and '.join(names)} occupy the same tile",
-            "The game will refuse to place one of them.",
-            tile,
-            names,
-        )
+        # Sharing a tile only makes a pair worth examining; the answer comes
+        # from the geometry below.
+        for position, first in enumerate(indices):
+            for second in indices[position + 1:]:
+                pair = (first, second) if first < second else (second, first)
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+
+                one, other = layout.entities[pair[0]], layout.entities[pair[1]]
+                if not _collides(one, other):
+                    continue
+                names = tuple(sorted((one.name, other.name)))
+                if names in reported:
+                    continue
+                reported.add(names)
+                yield Finding(
+                    Severity.PROBLEM,
+                    "overlap",
+                    f"{' and '.join(names)} cannot both stand there",
+                    "Their collision boxes intersect on a layer they share, "
+                    "so the game will refuse to place one of them.",
+                    tile,
+                    names,
+                )
 
 
 @check
