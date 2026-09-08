@@ -21,6 +21,27 @@ from draftsman.blueprintable import Blueprint
 from draftsman.constants import Direction
 
 from factorio_forge import render
+from prototypes import (
+    another,
+    arithmetic_combinator,
+    assembler,
+    belt,
+    chest,
+    constant_combinator,
+    decider_combinator,
+    filtering_inserter,
+    inserter,
+    item,
+    other_chest,
+    pipe,
+    pipe_to_ground,
+    pole,
+    rail,
+    rail_signal,
+    recipe,
+    splitter,
+    underground_belt,
+)
 
 SVG_NS = "{http://www.w3.org/2000/svg}"
 
@@ -36,9 +57,9 @@ def quiet():
 def small_blueprint() -> Blueprint:
     bp = Blueprint()
     bp.label = "test"
-    bp.entities.append("transport-belt", tile_position=(0, 0), direction=Direction.EAST)
-    bp.entities.append("assembling-machine-2", tile_position=(2, 0))
-    bp.entities.append("medium-electric-pole", tile_position=(6, 0))
+    bp.entities.append(belt(), tile_position=(0, 0), direction=Direction.EAST)
+    bp.entities.append(assembler(), tile_position=(2, 0))
+    bp.entities.append(pole(), tile_position=(6, 0))
     return bp
 
 
@@ -49,8 +70,8 @@ def parse_svg(blueprint) -> ElementTree.Element:
 class TestMeasure:
     def test_covers_every_entity_including_its_footprint(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
-        bp.entities.append("assembling-machine-2", tile_position=(5, 5))  # 3x3
+        bp.entities.append(belt(), tile_position=(0, 0))
+        bp.entities.append(assembler(), tile_position=(5, 5))  # 3x3
         bounds = render.measure(bp.entities)
         assert (bounds.left, bounds.top) == (0, 0)
         assert (bounds.right, bounds.bottom) == (8, 8)
@@ -58,14 +79,14 @@ class TestMeasure:
 
     def test_negative_coordinates(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(-4, -3))
+        bp.entities.append(belt(), tile_position=(-4, -3))
         bounds = render.measure(bp.entities)
         assert (bounds.left, bounds.top) == (-4, -3)
         assert (bounds.width, bounds.height) == (1, 1)
 
     def test_tiles_count_towards_the_bounds(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(0, 0))
         bp.tiles.append("concrete", position=(9, 9))
         bounds = render.measure(bp.entities, bp.tiles)
         assert (bounds.right, bounds.bottom) == (10, 10)
@@ -82,18 +103,18 @@ class TestFamilies:
     @pytest.mark.parametrize(
         "name, family",
         [
-            ("transport-belt", "transport"),
-            ("underground-belt", "transport"),
-            ("splitter", "transport"),
-            ("inserter", "inserter"),
-            ("assembling-machine-2", "production"),
+            (belt(), "transport"),
+            (underground_belt(), "transport"),
+            (splitter(), "transport"),
+            (inserter(), "inserter"),
+            (assembler(), "production"),
             ("electric-mining-drill", "production"),
-            ("steel-chest", "storage"),
-            ("pipe-to-ground", "fluid"),
-            ("medium-electric-pole", "power"),
-            ("decider-combinator", "circuit"),
+            (chest(), "storage"),
+            (pipe_to_ground(), "fluid"),
+            (pole(), "power"),
+            (decider_combinator(), "circuit"),
             ("small-lamp", "circuit"),
-            ("straight-rail", "rail"),
+            (rail(), "rail"),
             ("stone-wall", "military"),
         ],
     )
@@ -131,15 +152,15 @@ class TestDrawing:
 
     def test_a_rotated_entity_changes_shape(self) -> None:
         bp = Blueprint()
-        bp.entities.append("splitter", tile_position=(0, 0), direction=Direction.NORTH)
-        bp.entities.append("splitter", tile_position=(0, 4), direction=Direction.EAST)
+        bp.entities.append(splitter(), tile_position=(0, 0), direction=Direction.NORTH)
+        bp.entities.append(splitter(), tile_position=(0, 4), direction=Direction.EAST)
         north, east = bp.entities[0], bp.entities[1]
         assert (north.tile_width, north.tile_height) == (2, 1)
         assert (east.tile_width, east.tile_height) == (1, 2)
 
     def test_direction_becomes_a_rotated_arrow(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0), direction=Direction.SOUTH)
+        bp.entities.append(belt(), tile_position=(0, 0), direction=Direction.SOUTH)
         svg = parse_svg(bp)
         arrow = svg.find(f".//{SVG_NS}polygon[@class='dir']")
         assert arrow is not None
@@ -148,14 +169,14 @@ class TestDrawing:
 
     def test_entities_without_a_direction_get_no_arrow(self) -> None:
         bp = Blueprint()
-        bp.entities.append("medium-electric-pole", tile_position=(0, 0))
+        bp.entities.append(pole(), tile_position=(0, 0))
         svg = parse_svg(bp)
         assert svg.find(f".//{SVG_NS}polygon[@class='dir']") is None
 
     def test_tiles_are_drawn_under_the_grid(self) -> None:
         bp = Blueprint()
         bp.tiles.append("concrete", position=(0, 0))
-        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(0, 0))
         svg = parse_svg(bp)
         children = list(svg)
         first_tile = next(i for i, e in enumerate(children) if e.get("class") == "tile")
@@ -173,18 +194,18 @@ class TestDrawing:
 class TestDetails:
     def test_recipe_and_priorities_reach_the_drawing(self) -> None:
         bp = Blueprint()
-        bp.entities.append("assembling-machine-2", tile_position=(0, 0),
-                           recipe="electronic-circuit")
-        bp.entities.append("splitter", tile_position=(0, 4), input_priority="left")
+        bp.entities.append(assembler(), tile_position=(0, 0),
+                           recipe=recipe())
+        bp.entities.append(splitter(), tile_position=(0, 4), input_priority="left")
         svg = parse_svg(bp)
         details = [json.loads(g.get("data-info"))["details"]
                    for g in svg.findall(f".//{SVG_NS}g[@class='entity']")]
-        assert {"recipe": "electronic-circuit"} in details
+        assert {"recipe": recipe()} in details
         assert {"input priority": "left"} in details
 
     def test_defaults_are_not_shown_as_though_they_were_set(self) -> None:
         bp = Blueprint()
-        bp.entities.append("splitter", tile_position=(0, 0))
+        bp.entities.append(splitter(), tile_position=(0, 0))
         svg = parse_svg(bp)
         info = json.loads(svg.find(f".//{SVG_NS}g[@class='entity']").get("data-info"))
         assert "input priority" not in info["details"]
@@ -196,7 +217,7 @@ class TestSnapping:
 
     def blueprint_with_grid(self, grid=(24, 24), offset=(2, 2), absolute=True) -> Blueprint:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(0, 0))
         bp.snapping_grid_size = grid
         bp.absolute_snapping = absolute
         bp.position_relative_to_grid = offset
@@ -204,7 +225,7 @@ class TestSnapping:
 
     def test_no_grid_declared_means_nothing_drawn(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(0, 0))
         assert render.snap_cell(bp, render.measure(bp.entities)) is None
         assert 'class="snap"' not in render.render_svg(bp)
 
@@ -224,8 +245,8 @@ class TestSnapping:
 
     def test_cells_tile_across_a_blueprint_larger_than_one(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
-        bp.entities.append("transport-belt", tile_position=(20, 20))
+        bp.entities.append(belt(), tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(20, 20))
         bp.snapping_grid_size = (8, 8)
         bp.absolute_snapping = True
         svg = parse_svg(bp)
@@ -239,8 +260,8 @@ class TestSnapping:
 
     def test_contents_larger_than_the_cell_are_called_out(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
-        bp.entities.append("transport-belt", tile_position=(30, 0))
+        bp.entities.append(belt(), tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(30, 0))
         bp.snapping_grid_size = (8, 8)
         page = render.render_html(bp)
         assert "larger than" in page and "overlap" in page
@@ -259,9 +280,9 @@ class TestParameters:
 
     def parameterised(self) -> Blueprint:
         bp = Blueprint()
-        bp.entities.append("constant-combinator", tile_position=(0, 0))
+        bp.entities.append(constant_combinator(), tile_position=(0, 0))
         bp.parameters = [
-            {"type": "id", "name": "Recipe", "id": "electronic-circuit"},
+            {"type": "id", "name": "Recipe", "id": recipe()},
             {"type": "number", "name": "Machines", "number": "3"},
             {"type": "number", "name": "Belt", "number": "6",
              "formula": "p1 * 2", "dependent": True},
@@ -270,7 +291,7 @@ class TestParameters:
 
     def test_no_parameters_means_no_panel(self) -> None:
         bp = Blueprint()
-        bp.entities.append("constant-combinator", tile_position=(0, 0))
+        bp.entities.append(constant_combinator(), tile_position=(0, 0))
         assert "parameters, in order" not in render.render_html(bp)
 
     def test_parameters_are_listed_in_declaration_order(self) -> None:
@@ -295,47 +316,47 @@ class TestEntityDetails:
 
     def test_item_filters(self) -> None:
         bp = Blueprint()
-        bp.entities.append("stack-inserter", tile_position=(0, 0), use_filters=True)
-        bp.entities[0].set_item_filter(0, "iron-plate")
-        assert render._entity_details(bp.entities[0])["filters"] == "iron-plate"
+        bp.entities.append(filtering_inserter(), tile_position=(0, 0), use_filters=True)
+        bp.entities[0].set_item_filter(0, item())
+        assert render._entity_details(bp.entities[0])["filters"] == item()
 
     def test_a_blacklist_says_so(self) -> None:
         bp = Blueprint()
-        bp.entities.append("stack-inserter", tile_position=(0, 0), use_filters=True)
+        bp.entities.append(filtering_inserter(), tile_position=(0, 0), use_filters=True)
         bp.entities[0].set_item_filter(0, "coal")
         bp.entities[0].filter_mode = "blacklist"
         assert render._entity_details(bp.entities[0])["filters"].startswith("blacklist:")
 
     def test_constant_combinator_signals_with_counts(self) -> None:
         bp = Blueprint()
-        bp.entities.append("constant-combinator", tile_position=(0, 0))
+        bp.entities.append(constant_combinator(), tile_position=(0, 0))
         bp.entities[0].add_section()
-        bp.entities[0].set_signal(0, "iron-plate", 42)
-        assert render._entity_details(bp.entities[0])["signals"] == "iron-plate×42"
+        bp.entities[0].set_signal(0, item(), 42)
+        assert render._entity_details(bp.entities[0])["signals"] == f"{item()}×42"
 
     def test_splitter_priorities_are_shown_and_defaults_are_not(self) -> None:
         bp = Blueprint()
-        bp.entities.append("splitter", tile_position=(0, 0), output_priority="left")
-        bp.entities.append("splitter", tile_position=(0, 4))
+        bp.entities.append(splitter(), tile_position=(0, 0), output_priority="left")
+        bp.entities.append(splitter(), tile_position=(0, 4))
         assert render._entity_details(bp.entities[0])["output priority"] == "left"
         assert "output priority" not in render._entity_details(bp.entities[1])
 
     def test_underground_belt_says_which_end_it_is(self) -> None:
         bp = Blueprint()
-        bp.entities.append("underground-belt", tile_position=(0, 0), io_type="output")
+        bp.entities.append(underground_belt(), tile_position=(0, 0), io_type="output")
         assert render._entity_details(bp.entities[0])["type"] == "output"
 
     def test_a_circuit_condition_reads_as_a_sentence(self) -> None:
         bp = Blueprint()
-        bp.entities.append("stack-inserter", tile_position=(0, 0))
-        bp.entities[0].circuit_condition.first_signal = "iron-plate"
+        bp.entities.append(filtering_inserter(), tile_position=(0, 0))
+        bp.entities[0].circuit_condition.first_signal = item()
         bp.entities[0].circuit_condition.comparator = "<"
         bp.entities[0].circuit_condition.constant = 100
-        assert render._entity_details(bp.entities[0])["enabled when"] == "iron-plate < 100"
+        assert render._entity_details(bp.entities[0])["enabled when"] == f"{item()} < 100"
 
     def test_nothing_configured_means_nothing_claimed(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(0, 0))
         assert render._entity_details(bp.entities[0]) == {}
 
 
@@ -345,14 +366,14 @@ class TestParameterReferences:
 
     def parameterised(self) -> Blueprint:
         bp = Blueprint()
-        bp.entities.append("stack-inserter", tile_position=(0, 0), use_filters=True)
+        bp.entities.append(filtering_inserter(), tile_position=(0, 0), use_filters=True)
         bp.entities[0].set_item_filter(0, "parameter-0")
-        bp.entities.append("constant-combinator", tile_position=(3, 0))
+        bp.entities.append(constant_combinator(), tile_position=(3, 0))
         bp.entities[1].add_section()
         bp.entities[1].set_signal(0, "parameter-1", 5)
-        bp.entities.append("transport-belt", tile_position=(6, 0))
+        bp.entities.append(belt(), tile_position=(6, 0))
         bp.parameters = [
-            {"type": "id", "name": "Product", "id": "electronic-circuit"},
+            {"type": "id", "name": "Product", "id": recipe()},
             {"type": "number", "name": "Count", "number": "5"},
             {"type": "number", "name": "Spare", "number": "1"},
         ]
@@ -384,7 +405,7 @@ class TestParameterReferences:
 
     def test_a_plain_blueprint_gets_no_parameter_marks(self) -> None:
         bp = Blueprint()
-        bp.entities.append("transport-belt", tile_position=(0, 0))
+        bp.entities.append(belt(), tile_position=(0, 0))
         svg = render.render_svg(bp)
         assert "param-ring" not in svg
         assert "parameterised" not in svg

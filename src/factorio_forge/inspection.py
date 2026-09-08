@@ -339,7 +339,15 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
             if layout.outside(tx, ty):
                 left_the_blueprint = True
                 break
-            if any(other.name == entity.name for other in layout.at(tx, ty)):
+            # `is not entity` matters: an underground wider than one tile
+            # covers the first tiles the search walks through, and matching on
+            # name alone let it find itself and call that a pair. Everything
+            # vanilla is one tile across, so this only shows up under a mod --
+            # the ducts in Fluid Must Flow are two.
+            if any(
+                other is not entity and other.name == entity.name
+                for other in layout.at(tx, ty)
+            ):
                 found = True
                 break
 
