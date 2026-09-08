@@ -353,11 +353,31 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
 
         if found or left_the_blueprint:
             continue
+
+        if kind == "pipe-to-ground":
+            # Not a defect on its own. A pipe to ground does not connect to
+            # above-ground pipes on its buried side, so one placed alone caps a
+            # run: nothing built further along can join it. Asking where the
+            # run would continue to is the wrong question, since it is not
+            # meant to continue. Said, because a genuinely forgotten end looks
+            # the same; not accused, because this one usually is not.
+            yield Finding(
+                Severity.NOTE,
+                "underground-unpaired",
+                f"{entity.name} has no matching end within {reach} tiles",
+                "Alone it caps the run rather than carrying anything, which is "
+                "often exactly what was wanted.",
+                (x, y),
+                (entity.name,),
+            )
+            continue
+
         yield Finding(
-            Severity.PROBLEM,
+            Severity.SUSPECT,
             "underground-unpaired",
             f"{entity.name} has no matching end within {reach} tiles",
-            "An underground run needs both ends. Nothing passes through this one.",
+            "Items entering it stop there. The other end may lie outside this "
+            "blueprint.",
             (x, y),
             (entity.name,),
         )
