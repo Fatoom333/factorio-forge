@@ -109,18 +109,23 @@ Each extraction records counts and a digest of every prototype name into
 `data_fingerprint`. That is not a correctness check; it answers "is this still
 the data my blueprint was built against?", which is the question that matters.
 
-### A known gap: startup mod settings
+### Startup mod settings
 
 Startup settings feed into the data lifecycle and therefore change recipes — how
 long an underground pipe may run, whether a mod's loaders exist at all. A save
-carries its own settings in its header, but that section is not parsed yet, so
-the profile copies the player's current global `mod-settings.dat` instead.
+carries its own settings in its header, but that section is not parsed, and
+copying the player's current global `mod-settings.dat` is only an approximation
+that silently rots once those settings move on.
 
-For a player who has not changed those settings since playing the save this is
-exactly right, and it is why extraction works at all. But if the settings have
-moved on, or differ between saves, the extracted data is subtly wrong in a way
-nothing currently detects. Worth fixing by reading the settings out of the save
-header, alongside the mod list that is already read from it.
+The companion mod closes this gap from the other side: `/forge-export` (or its
+button) writes `environment.json`, which includes the exact `startup_settings`
+a play session had loaded, alongside the mod set that produced them. When that
+mod set matches this profile's exactly — `Environment.matches_mods()` — those
+settings are trusted and encoded straight into a fresh `mod-settings.dat` via
+Draftsman's `write_mod_settings()`. Only when there is no matching export does
+`_copy_mod_settings()` fall back to copying the global file, and either way the
+source is recorded rather than left silent: `Profile.mod_settings_source` is
+`"environment"` or `"global-approximation"`.
 
 ## Sharing a profile
 

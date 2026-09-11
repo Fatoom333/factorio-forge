@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from draftsman.environment.mod_settings import read_mod_settings
 
 from factorio_forge import paths
 from factorio_forge.profile import (
@@ -322,3 +323,89 @@ class TestModLinking:
         profile.write()
         with pytest.raises(ProfileError, match="mod folder"):
             profile.prepare_mods()
+
+
+def write_environment_export(script_output_dir: Path, mods: dict, startup_settings: dict) -> None:
+    target = script_output_dir / "factorio-forge" / "environment.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            {
+                "exported_by": "factorio-forge-companion",
+                "game_version": "2.0.77",
+                "tick": 1,
+                "force": "player",
+                "mods": mods,
+                "startup_settings": startup_settings,
+                "researched": [],
+                "available_to_research": [],
+                "recipes_enabled": [],
+                "counts": {"mods": len(mods), "researched": 0, "recipes_enabled": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestModSettings:
+    def prepare(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Profile:
+        mods = tmp_path / "mods"
+        mods.mkdir()
+        with zipfile.ZipFile(mods / "Krastorio2_2.0.19.zip", "w") as zf:
+            zf.writestr("Krastorio2_2.0.19/info.json", '{"name": "Krastorio2"}')
+        (mods / "mod-settings.dat").write_bytes(b"global settings, byte for byte")
+        monkeypatch.setattr(paths, "mods_dir", lambda: mods)
+
+        profile = Profile.from_save(make_save())
+        profile.write()
+        return profile
+
+    def test_matching_export_is_used_instead_of_the_approximation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        script_output = tmp_path / "script-output"
+        write_environment_export(
+            script_output,
+            mods={"base": "2.0.77", "Krastorio2": "2.0.19"},
+            startup_settings={"kr-flag": True, "kr-count": 3},
+        )
+        monkeypatch.setattr(paths, "script_output_dir", lambda: script_output)
+
+        profile = self.prepare(monkeypatch, tmp_path)
+        profile.prepare_mods()
+
+        assert profile.mod_settings_source == "environment"
+        written = read_mod_settings(str(profile.mods_dir))
+        assert written["startup"] == {
+            "kr-flag": {"value": True},
+            "kr-count": {"value": 3},
+        }
+        assert Profile.load(profile.name).mod_settings_source == "environment"
+
+    def test_mismatched_export_falls_back_to_the_approximation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        script_output = tmp_path / "script-output"
+        write_environment_export(
+            script_output,
+            mods={"base": "2.0.77", "Krastorio2": "2.0.10"},  # wrong version
+            startup_settings={"kr-flag": True},
+        )
+        monkeypatch.setattr(paths, "script_output_dir", lambda: script_output)
+
+        profile = self.prepare(monkeypatch, tmp_path)
+        profile.prepare_mods()
+
+        assert profile.mod_settings_source == "global-approximation"
+        copied = (profile.mods_dir / "mod-settings.dat").read_bytes()
+        assert copied == b"global settings, byte for byte"
+
+    def test_no_export_falls_back_to_the_approximation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(paths, "script_output_dir", lambda: None)
+
+        profile = self.prepare(monkeypatch, tmp_path)
+        profile.prepare_mods()
+
+        assert profile.mod_settings_source == "global-approximation"

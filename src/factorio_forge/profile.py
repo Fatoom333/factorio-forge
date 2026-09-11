@@ -39,7 +39,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from draftsman.environment.mod_settings import ModSettings, write_mod_settings
+
 from . import paths
+from .environment import EnvironmentError, read_environment
 from .save import ModRef, SaveInfo
 
 # Wube's own modules live in the game's data folder, not the user mod folder,
@@ -221,6 +224,11 @@ class Profile:
     # Mods used at a version the save did not record, because the player has
     # since updated them. See docs/profiles.md.
     mod_substitutions: list[dict] = field(default_factory=list)
+    # Where mod-settings.dat came from: "environment" when the companion mod's
+    # export matched this profile's mod set exactly, "global-approximation"
+    # when it did not (or the mod has never exported), None before this was
+    # tracked. See docs/profiles.md.
+    mod_settings_source: str | None = None
 
     # ------------------------------------------------------------------
     # locations
@@ -276,6 +284,7 @@ class Profile:
             "updated_at": self.updated_at,
             "data_fingerprint": self.data_fingerprint,
             "mod_substitutions": self.mod_substitutions,
+            "mod_settings_source": self.mod_settings_source,
             "mods": [
                 {"name": m.name, "version": list(m.version)}
                 for m in sorted(self.mods, key=lambda m: m.name.lower())
@@ -297,6 +306,7 @@ class Profile:
             updated_at=data.get("updated_at", ""),
             data_fingerprint=data.get("data_fingerprint"),
             mod_substitutions=data.get("mod_substitutions", []),
+            mod_settings_source=data.get("mod_settings_source"),
         )
 
     def write(self) -> Path:
@@ -431,7 +441,7 @@ class Profile:
                 report.copied.append(mod.name)
 
         self._write_mod_list()
-        self._copy_mod_settings(source)
+        self.mod_settings_source = self._copy_mod_settings(source)
         # Keep substitutions with the profile: data extracted against a mod the
         # save never saw should be traceable long after this call.
         self.mod_substitutions = [s.to_dict() for s in report.substituted]
@@ -455,18 +465,42 @@ class Profile:
             json.dump(payload, handle, indent=2)
             handle.write("\n")
 
-    def _copy_mod_settings(self, source: Path) -> None:
-        """Take the player's global startup settings for this profile.
+    def _copy_mod_settings(self, source: Path) -> str:
+        """Assemble mod-settings.dat for this profile's mod folder.
 
         Startup mod settings feed into the data lifecycle and therefore change
-        recipes. A save carries its own settings in its header, but that section
-        is not parsed yet, so the global file is used as an approximation. When
-        a profile's settings differ from the currently loaded ones, extracted
-        data can be subtly wrong -- worth revisiting.
+        recipes. A save carries its own settings in its header, but that
+        section is not parsed yet. The companion mod's `environment.json`
+        export carries the exact startup settings a play session had loaded,
+        so when the mod set it recorded matches this profile's exactly, that
+        export is trusted and written out as a fresh mod-settings.dat. Failing
+        that, the player's current global settings are copied as an
+        approximation, which can be subtly wrong if they have since changed --
+        worth knowing, so the source used is returned rather than left silent.
         """
-        settings = source / "mod-settings.dat"
-        if settings.is_file():
-            shutil.copy2(settings, self.mods_dir / "mod-settings.dat")
+        try:
+            environment = read_environment()
+        except EnvironmentError:
+            environment = None
+
+        if environment is not None and environment.matches_mods(self.mods):
+            settings: ModSettings = {
+                "startup": {
+                    name: {"value": value}
+                    for name, value in environment.startup_settings.items()
+                },
+                "runtime-global": {},
+                "runtime-per-user": {},
+            }
+            write_mod_settings(
+                str(self.mods_dir), settings, factorio_version=self.game_version
+            )
+            return "environment"
+
+        settings_path = source / "mod-settings.dat"
+        if settings_path.is_file():
+            shutil.copy2(settings_path, self.mods_dir / "mod-settings.dat")
+        return "global-approximation"
 
     # ------------------------------------------------------------------
     # game data
