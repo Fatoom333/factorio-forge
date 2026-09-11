@@ -35,6 +35,9 @@ dependencies = [
     # both are reported upstream. See its FORK.md. Once they are released this
     # goes back to a plain version specifier.
     "factorio-draftsman @ git+https://github.com/Fatoom333/factorio-draftsman@3.3.1-forge",
+    # Decodes a prototype's own icon so the renderer can draw it in its real
+    # colour instead of a family-level guess. See render._dominant_icon_colour.
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]

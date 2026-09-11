@@ -48,10 +48,95 @@ Direction becomes an arrow. Factorio 2.0 counts direction in sixteenths of a
 turn from north, which is the same convention SVG rotates in, so the arrow is
 the direction with no translation to get wrong.
 
+An inserter is the one entity that does not get that arrow. Its `direction`
+names the side it picks up from, not the side it drops onto — the opposite of
+what an arrow means on every belt around it — so drawing it the same way would
+read backwards for exactly the entity where backwards matters most. Instead an
+inserter draws the real pickup and drop tiles, read the same way the checker
+reads them: a hollow ring where it reaches to take an item, a solid dot where
+it puts it, joined by a thin line.
+
 Colour is by family — belts, inserters, production, storage, fluids, power,
 circuits, rails, military — grouped by what someone looks for when reading a
 layout rather than by the game's own prototype taxonomy. A pump and a pipe
 belong together here; the game considers them unrelated.
+
+The family table has ten entries and is meant to: it is a hand-picked grouping
+of what a reader looks for, not a catalogue of every prototype a mod set might
+contain, and was never going to reproduce the game's own colours. A fast belt
+is red in the game and, drawn purely by family, would come out the same
+amber as every other belt — recognisably "a belt," but not recognisably
+*that* belt.
+
+So each entity is drawn, where possible, in **the colour read out of its own
+icon** — the same PNG the game itself points the prototype at, decoded once
+and reduced to the single colour a person would call its colour. A plain
+pixel average is not that colour: most of an icon's area is a dark steel
+frame or a drop shadow, and averaging a red belt's icon gives a muddy brown.
+Weighting each pixel by how saturated and how bright it is before averaging
+its hue instead recovers the accent colour — the belt's red, not its frame —
+the way a favicon "dominant colour" picker would. The icon comes from
+wherever the active profile says it lives: the game's own data directory for
+`__base__` and the other packages it ships with, or the matching mod's zip
+archive in the profile's mod folder otherwise. Nothing is looked up by name —
+a mod's own tier gets its own real colour automatically, because the mod's
+own icon is what is being read, not a name this tool would have to already
+know.
+
+When no icon resolves — a mod that supplies no icon, an inactive profile, a
+file this reader cannot decode — each specific prototype instead gets its own
+shade of the family's colour, nudged away from the family's base hue and
+lightness by a hash of the prototype's own name. This keeps the same promise
+the icon lookup makes (one particular prototype, one particular colour,
+determined without a table of known tiers) with a weaker one attached: the
+result is merely *distinct*, not *correct*. Two entities that share a
+prototype always match either way, because the name is the only input; two
+different prototypes in the same family almost always end up visibly apart,
+and a hash-derived colour always stays close enough to the family's own hue
+to still read as that family at a glance.
+
+Colour alone still cannot tell two members of the same family apart with
+certainty — two icons can coincidentally share an accent colour, and a hash
+can coincidentally place two fallback colours close together — so two places
+where that used to matter get their own treatment on top of it:
+
+- **Rails are drawn as track, not as a filled block.** A rail's bounding box
+  is usually bigger than the rail — a curve's box covers tiles the curve
+  never touches — so filling it solid overstates the footprint and makes a
+  chain of pieces read as an undifferentiated grey mass. Instead each piece
+  draws a pair of rails and ties through its own footprint, oriented by its
+  direction; a curved piece bends, a straight one does not, and `curved-rail-a`
+  bends the opposite way from `curved-rail-b` so the two are not confused with
+  each other either. This is a schematic, not the game's actual curve
+  geometry — reproducing that exactly, per rail type and per one of sixteen
+  directions, was not worth it for a diagram whose job is "track or not track,
+  straight or bent." A rail signal draws as a circle and a chain signal as a
+  diamond, since both used to sit on the same small grey square and were
+  otherwise only told apart by hovering.
+- **A buried connection — an underground belt, a pipe-to-ground — gets a
+  diagonal hatch and a dashed outline**, and keeps its label even at one tile,
+  below the size a label would normally get room for. In flat colour alone an
+  underground belt is a transport-belt-coloured square with an arrow, which is
+  also exactly what a transport belt is; the one thing that told them apart
+  was the entity name in the hover tooltip. The hatch means the difference no
+  longer needs a hover to see. Hovering either end of a paired run also draws
+  a dashed line to the other end, found the same way the checker finds it —
+  walking the direction the run leaves the entity, as far as the prototype
+  states it can reach, looking for a same-named partner. An end with no
+  partner simply gets no line, which is itself the same fact the checker
+  reports as a finding.
+- **The whole transport family — belts, undergrounds, splitters, loaders —
+  keeps its label regardless of size**, for the same reason: a belt is one
+  tile, well below the size a label would normally get room for, and a tier
+  difference (a yellow belt next to a red one) is invisible in flat colour
+  alone. The label is the entity's own name abbreviated, so different tiers
+  read as different labels without a hover.
+
+Wires — red and green circuit, copper power — are drawn as coloured lines
+between the entities they join, read from the blueprint's own wire list
+rather than inferred from adjacency. A wire this picture cannot resolve to two
+drawn entities (a bare index a mismatched profile cannot make sense of, say)
+is left out rather than guessed at.
 
 Hovering an entity shows its name, size, position and everything it has been
 configured to do: a recipe, a splitter's priority side, whether an underground

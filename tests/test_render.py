@@ -9,6 +9,7 @@ would have to fetch.
 
 from __future__ import annotations
 
+import colorsys
 import json
 import re
 import warnings
@@ -26,8 +27,10 @@ from prototypes import (
     arithmetic_combinator,
     assembler,
     belt,
+    chain_signal,
     chest,
     constant_combinator,
+    curved_rail,
     decider_combinator,
     filtering_inserter,
     inserter,
@@ -41,6 +44,7 @@ from prototypes import (
     recipe,
     splitter,
     underground_belt,
+    underground_reach_of,
 )
 
 SVG_NS = "{http://www.w3.org/2000/svg}"
@@ -135,6 +139,81 @@ class TestFamilies:
         assert render.family_of(Alien()) == "other"
 
 
+class TestVariantColour:
+    """A family has ten entries and always will; a mod's own belt tiers,
+    furnace variants or anything else this table has never heard of should
+    still not all render as one identical square."""
+
+    def test_the_same_prototype_always_gets_the_same_colour(self) -> None:
+        base = render.FAMILY_COLOUR["transport"]
+        assert render._variant_colour(base, "transport-belt") == render._variant_colour(
+            base, "transport-belt"
+        )
+
+    def test_two_prototypes_in_one_family_get_different_colours(self) -> None:
+        first = belt()
+        second = another("transport-belt", first)
+        base = render.FAMILY_COLOUR["transport"]
+        assert render._variant_colour(base, first) != render._variant_colour(base, second)
+
+    def test_the_variant_stays_close_to_the_familys_own_hue(self) -> None:
+        """The point is a family is still recognisable at a glance -- a belt
+        should not drift into looking like a fluid pipe."""
+        base = render.FAMILY_COLOUR["transport"]
+        variant = render._variant_colour(base, "some-modded-belt-tier")
+
+        def hue(hex_colour: str) -> float:
+            r, g, b = (int(hex_colour[i : i + 2], 16) / 255 for i in (1, 3, 5))
+            return colorsys.rgb_to_hls(r, g, b)[0]
+
+        diff = abs(hue(variant) - hue(base))
+        assert min(diff, 1 - diff) < 0.15
+
+    def test_an_entitys_drawn_fill_uses_the_variant_colour_when_no_icon_resolves(self) -> None:
+        name = belt()
+        if render._icon_colour(name) is not None:
+            pytest.skip("this environment resolves a real icon for the active profile's belt")
+        bp = Blueprint()
+        bp.entities.append(name, tile_position=(0, 0))
+        svg = parse_svg(bp)
+        body = svg.find(f".//{SVG_NS}g[@class='entity']").find(f"{SVG_NS}rect")
+        expected = render._variant_colour(render.FAMILY_COLOUR["transport"], name)
+        assert body.get("fill") == expected
+
+
+class TestIconColour:
+    """"The belt is red, the render isn't" -- a person can tell at a glance
+    whether the picture matches the game, which a hash-derived colour can
+    never promise. Reading the colour out of the icon the active profile's
+    own data points at is the alternative that needs no table of tiers."""
+
+    def test_an_unknown_prototype_returns_none_rather_than_raising(self) -> None:
+        assert render._icon_colour("not-a-real-prototype-at-all") is None
+
+    def test_a_resolved_icon_colour_is_a_valid_hex_string(self) -> None:
+        colour = render._icon_colour(belt())
+        if colour is None:
+            pytest.skip("no resolvable icon for the active profile's belt in this environment")
+        assert re.fullmatch(r"#[0-9a-f]{6}", colour)
+
+    def test_the_same_prototype_always_resolves_to_the_same_colour(self) -> None:
+        name = belt()
+        if render._icon_colour(name) is None:
+            pytest.skip("no resolvable icon for the active profile's belt in this environment")
+        assert render._icon_colour(name) == render._icon_colour(name)
+
+    def test_the_drawn_fill_prefers_the_icon_colour_over_the_hash_fallback(self) -> None:
+        name = belt()
+        icon_colour = render._icon_colour(name)
+        if icon_colour is None:
+            pytest.skip("no resolvable icon for the active profile's belt in this environment")
+        bp = Blueprint()
+        bp.entities.append(name, tile_position=(0, 0))
+        svg = parse_svg(bp)
+        body = svg.find(f".//{SVG_NS}g[@class='entity']").find(f"{SVG_NS}rect")
+        assert body.get("fill") == icon_colour
+
+
 class TestDrawing:
     def test_one_group_per_entity(self) -> None:
         svg = parse_svg(small_blueprint())
@@ -189,6 +268,138 @@ class TestDrawing:
         for group in svg.findall(f".//{SVG_NS}g[@class='entity']"):
             title = group.find(f"{SVG_NS}title")
             assert title is not None and title.text
+
+
+class TestTrackAndBuried:
+    """Rails, underground belts and pipes-to-ground used to be indistinguishable
+    from their neighbours at a glance: rails were all the same grey block, and
+    an underground piece looked exactly like the ordinary one beside it."""
+
+    def test_a_straight_rail_draws_track_not_a_block_arrow(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(rail(), tile_position=(0, 0), direction=Direction.EAST)
+        svg = parse_svg(bp)
+        assert svg.find(f".//{SVG_NS}line[@class='rail-line']") is not None
+        # The glyph replaces the plain chevron; the shape itself carries direction.
+        assert svg.find(f".//{SVG_NS}polygon[@class='dir']") is None
+
+    def test_a_curved_rail_draws_a_curve_not_a_straight_line(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(curved_rail(), tile_position=(0, 0), direction=Direction.NORTH)
+        svg = parse_svg(bp)
+        assert svg.find(f".//{SVG_NS}path[@class='rail-line']") is not None
+        assert svg.find(f".//{SVG_NS}line[@class='rail-line']") is None
+
+    def test_a_rail_signal_and_a_chain_signal_get_different_shapes(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(rail_signal(), tile_position=(0, 0), direction=Direction.NORTH)
+        bp.entities.append(chain_signal(), tile_position=(0, 4), direction=Direction.NORTH)
+        svg = parse_svg(bp)
+        assert svg.find(f".//{SVG_NS}circle[@class='rail-point']") is not None
+        assert svg.find(f".//{SVG_NS}polygon[@class='rail-point']") is not None
+
+    def test_an_underground_belt_gets_a_hatch_and_a_dashed_body(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(inserter(), tile_position=(0, 0), direction=Direction.EAST)
+        bp.entities.append(underground_belt(), tile_position=(2, 0), direction=Direction.EAST)
+        svg = parse_svg(bp)
+        groups = svg.findall(f".//{SVG_NS}g[@class='entity']")
+        plain_body = groups[0].find(f"{SVG_NS}rect")
+        buried_body = groups[1].find(f"{SVG_NS}rect")
+        assert "buried" not in plain_body.get("class")
+        assert "buried" in buried_body.get("class")
+        assert groups[0].find(f"{SVG_NS}clipPath") is None
+        assert groups[1].find(f"{SVG_NS}clipPath") is not None
+
+    def test_the_transport_family_always_gets_a_label_the_inserter_family_does_not(self) -> None:
+        """A belt is one tile, below the size a label would normally need --
+        but that is exactly where a tier difference (yellow/red/blue and the
+        like) would otherwise be invisible without hovering."""
+        bp = Blueprint()
+        bp.entities.append(belt(), tile_position=(0, 0), direction=Direction.EAST)
+        bp.entities.append(inserter(), tile_position=(2, 0), direction=Direction.EAST)
+        svg = parse_svg(bp)
+        groups = svg.findall(f".//{SVG_NS}g[@class='entity']")
+        assert groups[0].find(f"{SVG_NS}text[@class='label']") is not None
+        assert groups[1].find(f"{SVG_NS}text[@class='label']") is None
+
+    def test_a_pipe_to_ground_gets_the_same_treatment_as_an_underground_belt(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(pipe(), tile_position=(0, 0))
+        bp.entities.append(pipe_to_ground(), tile_position=(2, 0), direction=Direction.EAST)
+        svg = parse_svg(bp)
+        groups = svg.findall(f".//{SVG_NS}g[@class='entity']")
+        assert groups[0].find(f"{SVG_NS}clipPath") is None
+        assert groups[1].find(f"{SVG_NS}clipPath") is not None
+
+    def test_track_body_is_marked_so_it_can_be_drawn_lighter(self) -> None:
+        """A curve's bounding box usually covers tiles the curve does not
+        touch, so a full-opacity fill there overstates the footprint."""
+        bp = Blueprint()
+        bp.entities.append(rail(), tile_position=(0, 0))
+        svg = parse_svg(bp)
+        body = svg.find(f".//{SVG_NS}g[@class='entity']").find(f"{SVG_NS}rect")
+        assert "track" in body.get("class")
+
+
+class TestWiresReachAndPairs:
+    """Three more things flat colour alone cannot show: which entities a wire
+    actually joins, where an inserter really reaches, and which underground
+    piece a given one is paired with."""
+
+    def test_a_circuit_wire_draws_as_a_coloured_line(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(constant_combinator(), tile_position=(0, 0))
+        bp.entities.append(constant_combinator(), tile_position=(4, 0))
+        bp.add_circuit_connection("red", 0, 1)
+        svg = parse_svg(bp)
+        assert svg.find(f".//{SVG_NS}line[@class='wire wire-red']") is not None
+
+    def test_a_power_wire_draws_as_copper(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(pole(), tile_position=(0, 0))
+        bp.entities.append(pole(), tile_position=(6, 0))
+        bp.add_power_connection(0, 1)
+        svg = parse_svg(bp)
+        assert svg.find(f".//{SVG_NS}line[@class='wire wire-copper']") is not None
+
+    def test_an_inserter_draws_pickup_and_drop_not_a_compass_arrow(self) -> None:
+        """An inserter's `direction` points at the side it picks up from, not
+        the side it drops onto, so the plain arrow every other entity gets
+        would read backwards here specifically."""
+        bp = Blueprint()
+        bp.entities.append(inserter(), tile_position=(0, 0), direction=Direction.EAST)
+        svg = parse_svg(bp)
+        group = svg.find(f".//{SVG_NS}g[@class='entity']")
+        assert group.find(f"{SVG_NS}line[@class='inserter-reach']") is not None
+        assert group.find(f"{SVG_NS}circle[@class='inserter-pickup']") is not None
+        assert group.find(f"{SVG_NS}circle[@class='inserter-drop']") is not None
+        assert group.find(f"{SVG_NS}polygon[@class='dir']") is None
+
+    def test_paired_underground_pieces_share_a_pair_line(self) -> None:
+        name = underground_belt()
+        reach = underground_reach_of(name)
+        bp = Blueprint()
+        bp.entities.append(name, tile_position=(0, 0), direction=Direction.EAST, io_type="input")
+        bp.entities.append(
+            name, tile_position=(reach, 0), direction=Direction.EAST, io_type="output"
+        )
+        svg = parse_svg(bp)
+        groups = svg.findall(f".//{SVG_NS}g[@class='entity']")
+        pair_id = groups[0].get("data-pair")
+        assert pair_id is not None
+        assert groups[1].get("data-pair") == pair_id
+        line = svg.find(f".//{SVG_NS}line[@class='pair-line']")
+        assert line is not None
+        assert line.get("id") == pair_id
+
+    def test_an_unpaired_underground_piece_gets_no_pair_attribute(self) -> None:
+        bp = Blueprint()
+        bp.entities.append(underground_belt(), tile_position=(0, 0), direction=Direction.EAST)
+        svg = parse_svg(bp)
+        group = svg.find(f".//{SVG_NS}g[@class='entity']")
+        assert group.get("data-pair") is None
+        assert svg.find(f".//{SVG_NS}line[@class='pair-line']") is None
 
 
 class TestDetails:

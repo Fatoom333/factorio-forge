@@ -140,6 +140,26 @@ def rail_signal() -> str:
     return prototype("rail-signal")
 
 
+def chain_signal() -> str:
+    return prototype("rail-chain-signal")
+
+
+def curved_rail() -> str:
+    """A curved rail piece, however this mod set builds one.
+
+    Curved rails are usually placed by a rail planner rather than by a plain
+    item mapping straight to one prototype, so unlike the lookups above this
+    does not require an item that places it directly -- only that the
+    prototype exists in the active data.
+    """
+    found = _first(
+        entities.raw, lambda name, data: data.get("type") == "curved-rail-a", buildable_only=False
+    )
+    if found is None:
+        pytest.skip("the active game data has no curved-rail-a")
+    return found
+
+
 def item() -> str:
     """Any item, for a filter or a slot that has to hold something."""
     found = _first(items.raw, lambda name, data: bool(data), buildable_only=False)
