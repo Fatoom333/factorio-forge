@@ -49,6 +49,17 @@ link costs nothing because a mod archive of a given version never changes.
 Where hard links are unavailable — a different volume, an exotic filesystem —
 the file is copied instead and the report says so.
 
+**That single fixed directory is machine-wide, not scoped by `FACTORIO_FORGE_HOME`.**
+Setting the environment variable to a scratch location isolates `profiles/` —
+which is exactly what the test suite does — but `activate()` and
+`extract_data()` still read and write the one real draftsman install on the
+machine. Running `create-profile`/`activate-profile` by hand against a
+throwaway save, the way a change gets smoke-tested, overwrites whichever
+profile the machine actually had active, including for anything else on it
+that reads Draftsman's data. There is no sandbox for that half of the state;
+the only fix afterwards is to `activate-profile` back to the profile that
+should be active.
+
 ## Mod versions: the same ladder the game uses
 
 A save records the exact version of every mod it was played with. Months later
