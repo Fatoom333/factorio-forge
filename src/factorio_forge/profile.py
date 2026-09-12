@@ -42,6 +42,7 @@ from pathlib import Path
 from draftsman.environment.mod_settings import ModSettings, write_mod_settings
 
 from . import paths
+from . import style as style_module
 from .environment import EnvironmentError, read_environment
 from .save import ModRef, SaveInfo
 
@@ -253,6 +254,14 @@ class Profile:
     @property
     def notes_path(self) -> Path:
         return self.directory / "notes.md"
+
+    @property
+    def style_path(self) -> Path:
+        return self.directory / style_module.STYLE_FILE
+
+    @property
+    def has_measured_style(self) -> bool:
+        return self.style_path.is_file()
 
     @property
     def game_version_string(self) -> str:
@@ -652,3 +661,31 @@ class Profile:
 
     def is_active(self) -> bool:
         return Profile.active_profile_name() == self.name
+
+    # ------------------------------------------------------------------
+    # style
+    # ------------------------------------------------------------------
+
+    def measure_style(self) -> style_module.Style:
+        """Measure this base's building style from its reference blueprints.
+
+        A one-shot read of ``blueprints/``, cached to ``style.json``. Never
+        called on its own -- see factorio_forge.style for what is measured
+        and why remeasuring is always the player's call, not automatic.
+        """
+        measured = style_module.measure(self.blueprints_dir)
+        measured.write(self.directory)
+        return measured
+
+    def load_style(self) -> style_module.Style:
+        return style_module.Style.load(self.directory)
+
+    def new_reference_blueprints(self) -> list[str]:
+        """Reference blueprints not accounted for by the cached style.
+
+        Everything in ``blueprints/`` counts as new when style has never been
+        measured at all.
+        """
+        if not self.has_measured_style:
+            return sorted(p.name for p in self.blueprints_dir.glob("*.txt"))
+        return style_module.new_reference_blueprints(self.load_style(), self.blueprints_dir)

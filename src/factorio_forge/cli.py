@@ -185,6 +185,91 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_measure_style(args: argparse.Namespace) -> int:
+    from .profile import Profile, ProfileError
+    from .style import StyleError
+
+    try:
+        profile = Profile.load(args.profile)
+    except ProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        measured = profile.measure_style()
+    except StyleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"style measured from {_plural(len(measured.source_files), 'reference blueprint', 'reference blueprints')}")
+    print(f"written: {profile.style_path.resolve()}")
+    return 0
+
+
+def _cmd_show_style(args: argparse.Namespace) -> int:
+    from .profile import Profile, ProfileError
+    from .style import StyleError
+
+    try:
+        profile = Profile.load(args.profile)
+    except ProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        measured = profile.load_style()
+    except StyleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(
+        f"measured {measured.measured_at} from "
+        f"{_plural(len(measured.source_files), 'reference blueprint', 'reference blueprints')}"
+    )
+
+    spacing = measured.layout.get("spacing") or {}
+    if spacing:
+        print("\nspacing")
+        for name, info in sorted(spacing.items()):
+            print(
+                f"  {name}: {info['tiles']} tiles apart "
+                f"({info['agreement'] * 100:.0f}% agreement, n={info['sample_size']})"
+            )
+
+    alignment = measured.layout.get("alignment") or {}
+    if alignment:
+        print(f"\nalignment: {alignment['step_x']}x{alignment['step_y']} tile grid")
+
+    symmetry = measured.layout.get("symmetry") or {}
+    if symmetry:
+        print(
+            f"symmetry: {symmetry['horizontal'] * 100:.0f}% horizontal, "
+            f"{symmetry['vertical'] * 100:.0f}% vertical"
+        )
+
+    identity = measured.identity
+    station_names = identity.get("station_names") or []
+    if station_names:
+        shown = ", ".join(station_names[:5])
+        more = "…" if len(station_names) > 5 else ""
+        print(f"\nstation names: {shown}{more}")
+    if identity.get("annotations"):
+        print(f"combinator annotations: {len(identity['annotations'])}")
+    if identity.get("colors"):
+        print(f"colours used: {len(identity['colors'])}")
+    if identity.get("tag_keys"):
+        print(f"tag keys: {', '.join(sorted(identity['tag_keys']))}")
+
+    new = profile.new_reference_blueprints()
+    if new:
+        print(
+            f"\n{_plural(len(new), 'new reference blueprint', 'new reference blueprints')} "
+            "since this measurement — run measure-style again to include them"
+        )
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="factorio-forge",
@@ -220,6 +305,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--all", action="store_true", help="include notes, not just problems and suspects"
     )
     look.set_defaults(func=_cmd_check)
+
+    measure_style = sub.add_parser(
+        "measure-style", help="measure a base's building style from its reference blueprints"
+    )
+    measure_style.add_argument("profile", help="the profile to measure")
+    measure_style.set_defaults(func=_cmd_measure_style)
+
+    show_style = sub.add_parser("show-style", help="show a base's previously measured style")
+    show_style.add_argument("profile", help="the profile to show")
+    show_style.set_defaults(func=_cmd_show_style)
 
     return parser
 

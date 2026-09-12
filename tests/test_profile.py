@@ -409,3 +409,57 @@ class TestModSettings:
         profile.prepare_mods()
 
         assert profile.mod_settings_source == "global-approximation"
+
+
+class TestStyle:
+    """The Profile-level wiring; the algorithm itself is tests/test_style.py."""
+
+    def write_reference_blueprint(self, profile: Profile, filename: str = "region-1.txt") -> None:
+        import warnings
+
+        from draftsman.blueprintable import Blueprint
+
+        from prototypes import pole
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            bp = Blueprint()
+            bp.entities.append(pole(), tile_position=(0, 0))
+            bp.entities.append(pole(), tile_position=(3, 0))
+        (profile.blueprints_dir / filename).write_text(bp.to_string(), encoding="utf-8")
+
+    def test_no_reference_blueprints_is_a_named_error(self) -> None:
+        from factorio_forge.style import StyleError
+
+        profile = Profile.from_save(make_save())
+        profile.write()
+        with pytest.raises(StyleError, match="no reference blueprints"):
+            profile.measure_style()
+
+    def test_measuring_writes_the_cache_next_to_the_profile(self) -> None:
+        profile = Profile.from_save(make_save())
+        profile.write()
+        self.write_reference_blueprint(profile)
+
+        assert not profile.has_measured_style
+        profile.measure_style()
+
+        assert profile.has_measured_style
+        assert profile.style_path == profile.directory / "style.json"
+        assert profile.load_style().source_files == ("region-1.txt",)
+
+    def test_new_reference_blueprints_before_any_measurement(self) -> None:
+        profile = Profile.from_save(make_save())
+        profile.write()
+        self.write_reference_blueprint(profile)
+
+        assert profile.new_reference_blueprints() == ["region-1.txt"]
+
+    def test_new_reference_blueprints_after_measurement(self) -> None:
+        profile = Profile.from_save(make_save())
+        profile.write()
+        self.write_reference_blueprint(profile, "region-1.txt")
+        profile.measure_style()
+
+        self.write_reference_blueprint(profile, "region-2.txt")
+        assert profile.new_reference_blueprints() == ["region-2.txt"]
