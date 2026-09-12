@@ -126,6 +126,50 @@ RECIPES = {
         "ingredients": [{"type": "item", "name": "null-item", "amount": 1}],
         "results": [{"type": "item", "name": "null-item", "amount": 1}],
     },
+    # 2 of the 5 are a catalyst returned to the same recipe, not a net
+    # product; only the remaining 3 may benefit from a productivity bonus.
+    "catalytic-recipe": {
+        "name": "catalytic-recipe",
+        "category": "crafting",
+        "energy_required": 1,
+        "allow_productivity": True,
+        "ingredients": [{"type": "item", "name": "ore", "amount": 1}],
+        "results": [
+            {"type": "item", "name": "catalytic-item", "amount": 5, "catalyst_amount": 2}
+        ],
+    },
+    # A single producer with a stated output temperature: informational, no
+    # conflict to report.
+    "vent-hot-steam": {
+        "name": "vent-hot-steam",
+        "category": "crafting",
+        "energy_required": 1,
+        "ingredients": [{"type": "item", "name": "ore", "amount": 1}],
+        "results": [{"type": "fluid", "name": "hot-steam", "amount": 10, "temperature": 500}],
+    },
+    # Two producers of the same fluid name at genuinely different
+    # temperatures -- each also makes a byproduct nothing else can, so
+    # demanding both byproducts forces both into use at once.
+    "vent-steam-a": {
+        "name": "vent-steam-a",
+        "category": "crafting",
+        "energy_required": 1,
+        "ingredients": [{"type": "item", "name": "ore", "amount": 1}],
+        "results": [
+            {"type": "fluid", "name": "dual-steam", "amount": 10, "temperature": 500},
+            {"type": "item", "name": "byproduct-a", "amount": 1},
+        ],
+    },
+    "vent-steam-b": {
+        "name": "vent-steam-b",
+        "category": "crafting",
+        "energy_required": 1,
+        "ingredients": [{"type": "item", "name": "ore", "amount": 1}],
+        "results": [
+            {"type": "fluid", "name": "dual-steam", "amount": 10, "temperature": 300},
+            {"type": "item", "name": "byproduct-b", "amount": 1},
+        ],
+    },
 }
 
 ENTITIES = {
@@ -359,6 +403,57 @@ class TestSelfLoop:
         result = bom.compute(request)
         line = by_recipe(result, "loop-recipe")
         assert line.rate == pytest.approx(1.0)
+
+
+class TestCatalystAmount:
+    def test_baseline_amount_is_unaffected(self) -> None:
+        request = bom.Request(targets=(bom.Target("catalytic-item", 5.0),))
+        result = bom.compute(request)
+        assert by_recipe(result, "catalytic-recipe").rate == pytest.approx(1.0)
+
+    def test_productivity_skips_the_catalyst_portion(self) -> None:
+        """Only 3 of the 5 (5 - catalyst_amount 2) may double.
+
+        +100% productivity turns 5/craft into 5 + 3*1 = 8/craft, not the 10
+        an unguarded multiplier on the whole result would give.
+        """
+        request = bom.Request(
+            targets=(bom.Target("catalytic-item", 8.0),),
+            effects={"crafting": bom.Effects(productivity=1.0)},
+        )
+        result = bom.compute(request)
+        assert by_recipe(result, "catalytic-recipe").rate == pytest.approx(1.0)
+
+
+class TestTemperature:
+    def test_output_temperature_is_reported(self) -> None:
+        request = bom.Request(targets=(bom.Target("hot-steam", 5.0),))
+        result = bom.compute(request)
+        line = by_recipe(result, "vent-hot-steam")
+        assert line.output_temperatures == {"hot-steam": 500}
+        assert not any(a.kind == "temperature" for a in result.ambiguities)
+
+    def test_pinning_a_matching_temperature_narrows_to_that_producer(self) -> None:
+        request = bom.Request(targets=(bom.Target("dual-steam", 5.0, temperature=500),))
+        result = bom.compute(request)
+        assert by_recipe(result, "vent-steam-a").rate > 0
+        assert not any(line.recipe == "vent-steam-b" for line in result.lines)
+
+    def test_pinning_a_temperature_nothing_produces_is_a_named_error(self) -> None:
+        request = bom.Request(targets=(bom.Target("dual-steam", 5.0, temperature=999),))
+        with pytest.raises(bom.BillOfMaterialsError, match="999"):
+            bom.compute(request)
+
+    def test_conflicting_temperatures_are_reported_not_silently_pooled(self) -> None:
+        # Both producers are forced into use: byproduct-a only comes from
+        # vent-steam-a, byproduct-b only from vent-steam-b.
+        request = bom.Request(
+            targets=(bom.Target("byproduct-a", 1.0), bom.Target("byproduct-b", 1.0))
+        )
+        result = bom.compute(request)
+        ambiguity = next(a for a in result.ambiguities if a.kind == "temperature")
+        assert ambiguity.subject == "dual-steam"
+        assert set(ambiguity.candidates) == {"vent-steam-a", "vent-steam-b"}
 
 
 # --------------------------------------------------------------------------

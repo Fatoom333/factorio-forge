@@ -53,6 +53,16 @@ a given loadout, it does not choose one. Productivity changes how much of a
 recipe's ingredients a given output actually needs, so it is folded into the
 program's coefficients; speed and consumption only affect machine count and
 power once rates are known, so they are applied afterwards.
+
+A fluid's name is what balances in the linear program; its temperature, where
+a recipe states one, rides along as reported metadata rather than a second
+axis the program balances separately -- every real recipe checked so far (see
+CONTEXT.md) states a temperature on a result at most, never a range on an
+ingredient, and never two different temperatures for the same name at once.
+`Target.temperature` lets a caller pin which one is meant when it matters
+(Space Age gives some planets fluids that share a name across temperatures
+that are not interchangeable); `BillOfMaterials.ambiguities` warns instead of
+guessing if that ever stops holding.
 """
 
 from __future__ import annotations
@@ -65,6 +75,7 @@ from dataclasses import dataclass, field, replace
 from draftsman.data import entities as entity_data
 from draftsman.data import items as item_data
 from draftsman.data import recipes as recipe_data
+from draftsman.data import resources as resource_data
 
 from .environment import Environment
 
@@ -83,10 +94,20 @@ class BillOfMaterialsError(Exception):
 
 @dataclass(frozen=True)
 class Target:
-    """A rate the finished bill of materials must produce, at minimum."""
+    """A rate the finished bill of materials must produce, at minimum.
+
+    `temperature` pins which physical state of a fluid counts: Space Age
+    gives some fluids the same name at genuinely different temperatures
+    (`steam` leaving a foundry's acid-neutralisation at 500 degrees is not
+    interchangeable with plain 100-degree steam), and which one a target
+    means is not decidable from the item name alone. Left `None`, any
+    recipe that makes the item counts, whatever temperature its result
+    states or leaves unstated -- the previous, only behaviour.
+    """
 
     item: str
     rate: float  # per second
+    temperature: float | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +156,12 @@ class MachineLine:
     power: float  # watts, total across every machine on the line
     inputs: dict[str, float] = field(default_factory=dict)  # item -> per second
     outputs: dict[str, float] = field(default_factory=dict)  # item -> per second
+    # Only the outputs whose recipe entry actually states a temperature --
+    # most items and most fluids have none. Informational: the rate above
+    # already trusts every producer of the same name as one fungible pool
+    # (see `Ambiguity(kind="temperature")` in `BillOfMaterials.ambiguities`
+    # for when that pool actually mixes more than one temperature).
+    output_temperatures: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -189,22 +216,39 @@ def _ingredient_entry(recipe: dict, item: str) -> dict | None:
     return next((i for i in recipe.get("ingredients", []) if i.get("name") == item), None)
 
 
+def _result_temperature(recipe: dict, item: str) -> float | None:
+    """The exact temperature `recipe` states for its `item` result, if any.
+
+    Only an exact `temperature` is read here, not a `minimum_temperature`/
+    `maximum_temperature` range: no ingredient in any profile inspected so
+    far states a temperature range at all (that mechanic lives on a
+    building's fluidbox, not a crafting recipe -- see CONTEXT.md), so there
+    is nothing real to test a range-matching rule against yet.
+    """
+    entry = _result_entry(recipe, item)
+    return entry.get("temperature") if entry else None
+
+
 def _productivity_multiplier(recipe: dict, entry: dict, productivity: float) -> float:
     """How much of a result's amount actually benefits from a productivity bonus.
 
     A recipe that consumes and produces the same item -- Kovarex enrichment is
     the vanilla example -- marks the portion that merely offsets its own
     ingredient as `ignored_by_productivity`, so productivity modules cannot
-    turn a self-sustaining loop into an unbounded multiplier. Only the amount
-    above that is scaled.
+    turn a self-sustaining loop into an unbounded multiplier. `catalyst_amount`
+    excludes a result's amount from the bonus for a related reason: it marks
+    the portion handed back to replace what a catalytic ingredient elsewhere
+    in the same recipe consumed, not a net product, so a bigger productivity
+    bonus should not multiply it either -- Helmod's `Product:getBonusAmount`
+    excludes it the same way. Only the amount above both is scaled.
     """
     if not recipe.get("allow_productivity"):
         return 1.0
     amount = _expected_amount(entry)
     if amount <= 0:
         return 1.0
-    ignored = float(entry.get("ignored_by_productivity", 0))
-    scaled = ignored + (amount - ignored) * (1 + max(productivity, 0.0))
+    excluded = float(entry.get("ignored_by_productivity", 0)) + float(entry.get("catalyst_amount", 0))
+    scaled = excluded + (amount - excluded) * (1 + max(productivity, 0.0))
     return scaled / amount
 
 
@@ -310,24 +354,53 @@ def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity 
 # --------------------------------------------------------------------------
 
 
-def _is_mined(item: str) -> bool:
-    """Whether an item is something a drill pulls out of the ground.
+# Fluids drawn straight from a tile (an offshore pump) rather than mined from
+# a resource entity -- `draftsman.data.resources` cannot see these no matter
+# what, because there is no resource prototype backing them at all, and
+# Factorio's data has no generic "this fluid is pumped" marker to read
+# instead. Helmod hits the identical wall from inside a running game with
+# full access to every prototype, and resorts to the same hardcoded name
+# (`ModelCompute.computeResources`, see CONTEXT.md) -- this is not a gap our
+# own data access could close, it is what the data itself is missing.
+# Krastorio 2 also has real recipes that make water (`kr-water`, atmospheric
+# condensation, ...), which would otherwise send the chain hunting for
+# chemistry to avoid ever pumping it for free; water is a leaf regardless.
+_PUMPED_FLUIDS = frozenset({"water"})
 
-    Coal, stone and every ore sit in the `raw-resource` subgroup, and a
-    crafted item never does -- an iron plate is `raw-material`, a different
-    subgroup entirely. This matters because "nothing crafts it" is not enough
-    on its own: Krastorio 2 has a coal filtration recipe, so coal *can* be
-    crafted, and following that as a way to get coal sends the chain hunting
-    for the chemistry that filtration itself needs, which needs coal. A mined
-    resource is a leaf whatever else happens to produce it.
 
-    This reads the data rather than asking the game. The game knows exactly
-    which resource entities yield what, but resource prototypes are not in
-    draftsman's data at all, and fluids carry no such marker either -- a
-    pumped fluid and a chemically produced one are both just `fluid`. Having
-    the companion mod export the real list is the proper fix; see CONTEXT.md.
+def _mined_items() -> frozenset[str]:
+    """Every item/fluid a resource entity's `minable` block actually yields.
+
+    This is the game's own answer to "is this raw", read from
+    `draftsman.data.resources` (`data.raw["resource"]`, not extracted by
+    draftsman before this): a resource entity's `minable` names exactly what
+    mining it produces, either as a single `result` or, for multi-output
+    mining (Space Age asteroid chunks) or a resource that needs an input
+    fluid (uranium ore), as a list under `results`. This matters because
+    "nothing crafts it" is not enough on its own: Krastorio 2 has a coal
+    filtration recipe, so coal *can* be crafted, and following that as a way
+    to get coal sends the chain hunting for the chemistry that filtration
+    itself needs, which needs coal. A mined resource is a leaf whatever else
+    happens to produce it.
+
+    The `subgroup == "raw-resource"` check this replaced is kept alongside
+    it, not instead of it: a profile extracted before `resources.pkl` existed
+    has nothing here until it is re-extracted, and the two signals should
+    agree wherever both are present anyway.
     """
-    return item_data.raw.get(item, {}).get("subgroup") == "raw-resource"
+    mined: set[str] = set(_PUMPED_FLUIDS)
+    for resource in resource_data.raw.values():
+        minable = resource.get("minable") or {}
+        if "result" in minable:
+            mined.add(minable["result"])
+        for result in minable.get("results", []) or []:
+            name = result.get("name")
+            if name:
+                mined.add(name)
+    for name, entry in item_data.raw.items():
+        if entry.get("subgroup") == "raw-resource":
+            mined.add(name)
+    return frozenset(mined)
 
 
 @dataclass
@@ -366,7 +439,9 @@ def _candidate_recipes(item: str, result_index: dict[str, list[str]], request: R
     return producers
 
 
-def _gather(request: Request, result_index: dict[str, list[str]]) -> _Chain:
+def _gather(
+    request: Request, result_index: dict[str, list[str]], mined: frozenset[str]
+) -> _Chain:
     """Collect every recipe reachable from the targets, keeping all the options.
 
     Unlike a walk that commits to one producer per item, this keeps every
@@ -386,14 +461,27 @@ def _gather(request: Request, result_index: dict[str, list[str]]) -> _Chain:
     for t in request.targets:
         target_demand[t.item] += t.rate
 
+    target_temperature = {t.item: t.temperature for t in request.targets if t.temperature is not None}
+
     queue = [t.item for t in request.targets]
     queued: set[str] = set(queue)
     while queue:
         item = queue.pop()
-        if item in request.boundary or _is_mined(item):
+        if item in request.boundary or item in mined:
             continue
 
         candidates = _candidate_recipes(item, result_index, request)
+        wanted_temperature = target_temperature.get(item)
+        if wanted_temperature is not None and candidates:
+            matching = [
+                r for r in candidates if _result_temperature(recipe_data.raw[r], item) == wanted_temperature
+            ]
+            if not matching:
+                raise BillOfMaterialsError(
+                    f"{item!r} was asked for at {wanted_temperature} degrees; "
+                    f"{sorted(candidates)} produce it, but none of them at that temperature"
+                )
+            candidates = matching
         if not candidates:
             continue  # raw material, or nothing unlocked makes it
         produced.add(item)
@@ -622,7 +710,8 @@ def compute(request: Request) -> BillOfMaterials:
         raise BillOfMaterialsError("no targets to produce")
 
     result_index = _build_result_index()
-    chain = _gather(request, result_index)
+    mined = _mined_items()
+    chain = _gather(request, result_index, mined)
     rates = _solve_rates(chain, request)
 
     bom = BillOfMaterials()
@@ -653,6 +742,9 @@ def compute(request: Request) -> BillOfMaterials:
             * _productivity_multiplier(entry, r, effects.productivity)
             for r in entry.get("results", [])
         }
+        output_temperatures = {
+            r["name"]: r["temperature"] for r in entry.get("results", []) if "temperature" in r
+        }
         for name, amount in inputs.items():
             if name not in chain.produced:
                 drawn[name] += amount
@@ -667,6 +759,7 @@ def compute(request: Request) -> BillOfMaterials:
                 power=power,
                 inputs=inputs,
                 outputs=outputs,
+                output_temperatures=output_temperatures,
             )
         )
         bom.total_power += power
@@ -700,6 +793,35 @@ def compute(request: Request) -> BillOfMaterials:
             )
         elif ambiguity.subject in used_categories:
             reported.append(ambiguity)
+
+    # Every producer of the same name is treated as one fungible pool of
+    # rate, temperature or not -- correct for total mass balance, but a
+    # caller building an actual factory needs to know when that pool is not
+    # actually one physical fluid. Pin a temperature on the target instead
+    # of guessing which producer was meant when this fires.
+    temperatures: dict[str, set[float]] = defaultdict(set)
+    producers: dict[str, set[str]] = defaultdict(set)
+    for recipe in used:
+        for r in recipe_data.raw[recipe].get("results", []):
+            temperature = r.get("temperature")
+            if temperature is not None:
+                temperatures[r["name"]].add(temperature)
+                producers[r["name"]].add(recipe)
+    for item, degrees in sorted(temperatures.items()):
+        if len(degrees) > 1:
+            reported.append(
+                Ambiguity(
+                    subject=item,
+                    kind="temperature",
+                    candidates=tuple(sorted(producers[item])),
+                    detail=(
+                        f"{', '.join(sorted(producers[item]))} produce {item!r} at different "
+                        f"temperatures ({sorted(degrees)}); the rate above pools them as one "
+                        "fungible amount -- pin a temperature on the target if the physical "
+                        "difference matters"
+                    ),
+                )
+            )
 
     bom.ambiguities = reported
     bom.raw_materials = dict(sorted(drawn.items()))

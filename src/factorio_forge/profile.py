@@ -591,7 +591,7 @@ class Profile:
         program = (
             "import json, sys\n"
             "out = {}\n"
-            "for mod in ('entities', 'recipes', 'items', 'fluids', 'tiles'):\n"
+            "for mod in ('entities', 'recipes', 'items', 'fluids', 'tiles', 'resources'):\n"
             "    try:\n"
             "        m = __import__('draftsman.data.' + mod, fromlist=['raw'])\n"
             "        out[mod] = sorted(m.raw)\n"
