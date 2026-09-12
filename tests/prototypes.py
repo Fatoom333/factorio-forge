@@ -132,6 +132,14 @@ def pole() -> str:
     return prototype("electric-pole", requires=("supply_area_distance",))
 
 
+def train_stop() -> str:
+    return prototype("train-stop")
+
+
+def lamp() -> str:
+    return prototype("lamp")
+
+
 def rail() -> str:
     return prototype("straight-rail")
 
