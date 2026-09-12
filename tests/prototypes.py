@@ -218,10 +218,17 @@ def two_inserters() -> tuple[str, str]:
 
 
 def _footprint(data: dict) -> tuple[int, int]:
-    """How many tiles a prototype covers, from its collision box."""
+    """How many tiles a prototype covers, from its collision box.
+
+    Rounded up: a collision box is drawn a little inside the tiles it fills
+    (0.7 for a chest, 2.4 for a 3-tile machine, 1.4 for a 2-tile substation),
+    and rounding to nearest calls a substation one tile wide.
+    """
+    import math
+
     box = data.get("collision_box") or [[0, 0], [0, 0]]
     (left, top), (right, bottom) = box[0], box[1]
-    return max(1, round(right - left)), max(1, round(bottom - top))
+    return max(1, math.ceil(right - left)), max(1, math.ceil(bottom - top))
 
 
 def small_chest() -> str:
@@ -242,6 +249,113 @@ def small_chest() -> str:
     if found is None:
         pytest.skip("the active game data has no one-tile container")
     return found
+
+
+def inserter_reaching(distance: int) -> str:
+    """An electric inserter that picks up exactly `distance` tiles from itself."""
+    import math
+
+    def matches(_name, data) -> bool:
+        pickup = data.get("pickup_position")
+        source = data.get("energy_source")
+        return (
+            data.get("type") == "inserter"
+            and pickup is not None
+            and round(math.hypot(*pickup)) == distance
+            and isinstance(source, dict)
+            and source.get("type") == "electric"
+        )
+
+    found = _first(entities.raw, matches)
+    if found is None:
+        pytest.skip(f"the active game data has no electric inserter reaching {distance} tile(s)")
+    return found
+
+
+def small_pole() -> str:
+    """A one-tile pole with a supply area and wire reach worth building rows with."""
+    found = _first(
+        entities.raw,
+        lambda name, data: data.get("type") == "electric-pole"
+        and _footprint(data) == (1, 1)
+        and (data.get("supply_area_distance") or 0) >= 3
+        and (data.get("maximum_wire_distance") or 0) >= 7,
+    )
+    if found is None:
+        pytest.skip("the active game data has no one-tile pole with a useful supply area")
+    return found
+
+
+def fastest_belt() -> str:
+    belts = [n for n, d in entities.raw.items() if d.get("type") == "transport-belt" and d.get("speed")]
+    placeable = _buildable()
+    belts = [n for n in belts if n in placeable]
+    if not belts:
+        pytest.skip("the active game data has no transport belt")
+    return max(belts, key=lambda n: (entities.raw[n]["speed"], n))
+
+
+def crafting_setup(solids_in: int, fluids_in: int, solids_out: int, fluids_out: int) -> tuple[str, str]:
+    """A recipe of exactly this shape and a three-tile machine that crafts it.
+
+    Machines are only considered when every fluid box connects along a long
+    side at their default rotation, so a refusal from the layout code is a
+    real failure rather than a machine this row form cannot hold.
+    """
+    placeable = _buildable()
+
+    def fluids_fit(data) -> bool:
+        for box in data.get("fluid_boxes") or []:
+            for connection in box.get("pipe_connections") or []:
+                if connection.get("connection_type") == "underground":
+                    continue
+                if connection.get("direction") not in (0, 8):
+                    return False
+        return True
+
+    machines = sorted(
+        name
+        for name, data in entities.raw.items()
+        if name in placeable
+        and data.get("crafting_speed")
+        and data.get("crafting_categories")
+        and _footprint(data) == (3, 3)
+        and fluids_fit(data)
+    )
+    for name in sorted(recipes.raw):
+        recipe = recipes.raw[name]
+        if not recipe or recipe.get("category") == "recycling":
+            continue
+        parts = lambda key, fluid: [  # noqa: E731
+            p for p in recipe.get(key, []) if (p.get("type") == "fluid") == fluid
+        ]
+        shape = (
+            len(parts("ingredients", False)),
+            len(parts("ingredients", True)),
+            len(parts("results", False)),
+            len(parts("results", True)),
+        )
+        if shape != (solids_in, fluids_in, solids_out, fluids_out):
+            continue
+        if any("amount" not in p for p in recipe.get("results", [])):
+            continue
+        category = recipe.get("category", "crafting")
+        for machine in machines:
+            data = entities.raw[machine]
+            boxes = data.get("fluid_boxes") or []
+            inputs = sum(1 for b in boxes if b.get("production_type") == "input")
+            outputs = sum(1 for b in boxes if b.get("production_type") == "output")
+            if category not in data["crafting_categories"]:
+                continue
+            if fluids_in and (inputs < fluids_in or inputs % fluids_in):
+                continue
+            if fluids_out and (outputs < fluids_out or outputs % fluids_out):
+                continue
+            return name, machine
+    pytest.skip(
+        f"the active game data has no recipe with {solids_in} solid and {fluids_in} fluid "
+        f"ingredients, {solids_out} solid and {fluids_out} fluid results, in a 3x3 machine"
+    )
 
 
 def underground_reach_of(name: str) -> int:

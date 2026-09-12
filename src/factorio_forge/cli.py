@@ -387,6 +387,216 @@ def _cmd_show_style(args: argparse.Namespace) -> int:
     return 0
 
 
+def _prototype_menu(kind: str) -> list[str]:
+    """One line per prototype of a kind, with the numbers that tell them apart."""
+    from draftsman.data import entities
+
+    from . import layout
+
+    lines = []
+    for name, data in sorted(entities.raw.items()):
+        if data.get("type") != kind:
+            continue
+        if kind == "transport-belt":
+            detail = f"{layout.belt_throughput(name):g}/s ({layout.lane_throughput(name):g}/s a lane)"
+        elif kind == "inserter":
+            try:
+                detail = (
+                    f"reach {layout.inserter_reach(name)}, up to {layout.inserter_rate(name):.3g} items/s "
+                    "per stack, chest to chest"
+                )
+            except layout.LayoutError:
+                continue
+        elif kind == "electric-pole":
+            w, h = layout.machine_size(name)
+            detail = (
+                f"{w}x{h}, supply {data.get('supply_area_distance')}, "
+                f"wire {data.get('maximum_wire_distance')}"
+            )
+        else:
+            detail = ""
+        lines.append(f"  {name}  {detail}")
+    return lines
+
+
+def _cmd_options(args: argparse.Namespace) -> int:
+    """The numbers to decide a row layout with, for one recipe and machine."""
+    import json
+    import math
+
+    from . import layout, rows
+
+    missing = [
+        (flag, kind)
+        for flag, kind, value in (
+            ("--belt", "transport-belt", args.belt),
+            ("--inserter", "inserter", args.inserter),
+            ("--pole", "electric-pole", args.pole),
+        )
+        if value is None
+    ]
+    if missing:
+        for flag, kind in missing:
+            print(f"{flag}: choose one of", file=sys.stderr)
+            for line in _prototype_menu(kind):
+                print(line, file=sys.stderr)
+        return 2
+
+    def spec(counts: list[int], stack: str) -> rows.RowBlockSpec:
+        return rows.RowBlockSpec(
+            recipe=args.recipe, machine=args.machine, rows=counts, belt=args.belt,
+            inserter=args.inserter, long_inserter=args.long_inserter, pole=args.pole,
+            stack=stack, input_belts=args.input_belts, speed_bonus=args.speed_bonus,
+            stack_size=args.stack_size,
+        )
+
+    try:
+        alone = layout.row_capacity(
+            args.recipe, args.machine, args.belt, inserter=args.inserter,
+            long_inserter=args.long_inserter, input_belts=args.input_belts,
+            stack_size=args.stack_size, speed_bonus=args.speed_bonus,
+        )
+        shared = layout.row_capacity(
+            args.recipe, args.machine, args.belt, inserter=args.inserter,
+            long_inserter=args.long_inserter, input_belts=args.input_belts,
+            rows_per_input_belt=2, stack_size=args.stack_size, speed_bonus=args.speed_bonus,
+        )
+    except layout.LayoutError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    report: dict = {
+        "recipe": args.recipe,
+        "machine": args.machine,
+        "machine_size": layout.machine_size(args.machine),
+        "crafts_per_second_each": layout.crafts_per_second(args.recipe, args.machine, args.speed_bonus),
+        "per_machine": [f.__dict__ for f in alone.per_machine + alone.fluids_per_machine],
+        "row_capacity": {"own_input_belts": alone.per_row, "input_belts_shared": shared.per_row},
+        "limit": {"own_input_belts": alone.limit, "input_belts_shared": shared.limit},
+        "input_lanes": alone.input_lanes,
+        "inserters_per_machine": alone.inserters,
+        "notes": alone.notes,
+        "stacks": {},
+        "suggestions": [],
+    }
+    for stack in ("mirror", "repeat"):
+        try:
+            sample = rows.build_block(spec([2, 2], stack))
+            report["stacks"][stack] = {"pitch_of_two_rows": sample.height / 2, "height_of_two_rows": sample.height}
+        except layout.LayoutError as exc:
+            report["stacks"][stack] = {"refused": str(exc)}
+
+    if args.machines:
+        for count in range(1, min(args.machines, 8) + 1):
+            per_row = math.ceil(args.machines / count)
+            counts = [per_row] * (count - 1) + [args.machines - per_row * (count - 1)]
+            if counts[-1] < 1:
+                continue
+            try:
+                block = rows.build_block(spec(counts, args.stack))
+            except layout.LayoutError as exc:
+                report["suggestions"].append({"rows": counts, "refused": str(exc)})
+                continue
+            overfull = [r.index + 1 for r in block.rows if r.capacity and r.machines > r.capacity]
+            report["suggestions"].append({
+                "rows": counts, "size": [block.width, block.height],
+                "overfed_rows": overfull, "notes": block.notes,
+            })
+            if per_row <= 2:
+                break
+
+    if args.json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+
+    w, h = report["machine_size"]
+    print(f"{args.recipe} in {args.machine} ({w}x{h}), {report['crafts_per_second_each']:.4g} crafts/s each")
+    for flow in alone.per_machine + alone.fluids_per_machine:
+        print(f"  {flow.direction:3s} {flow.item}: {flow.rate:.4g}/s per machine")
+    if alone.per_row:
+        print(f"\none row keeps {alone.per_row} running on its own input belts")
+        print(f"  because {alone.limit}")
+        if shared.per_row != alone.per_row:
+            print(f"  {shared.per_row} when its input belts are shared with a mirrored row")
+    else:
+        print(f"\n{alone.limit}")
+    if alone.input_lanes:
+        print("input lanes: " + "  |  ".join(" + ".join(lanes) for lanes in alone.input_lanes))
+    if alone.inserters:
+        print("inserters per machine: " + ", ".join(f"{k} x{n}" for k, n in alone.inserters.items()))
+    for note in alone.notes:
+        print(f"  note: {note}")
+    print()
+    for stack, info in report["stacks"].items():
+        if "refused" in info:
+            print(f"{stack}: cannot be built -- {info['refused']}")
+        else:
+            print(f"{stack}: {info['pitch_of_two_rows']:g} tiles per row")
+    if report["suggestions"]:
+        print(f"\n{args.machines} machines, stacked {args.stack}:")
+        for s in report["suggestions"]:
+            shape = " + ".join(str(n) for n in s["rows"])
+            if "refused" in s:
+                print(f"  {shape}: refused -- {s['refused']}")
+                continue
+            warn = f"  (overfed rows: {s['overfed_rows']})" if s["overfed_rows"] else ""
+            print(f"  {len(s['rows'])} row(s) of {shape}: {s['size'][0]}x{s['size'][1]}{warn}")
+    return 0
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    """A layout plan in; blueprint string, drawing and report out."""
+    import json
+    import re
+
+    from . import plan, render
+
+    try:
+        result = plan.build(plan.load(Path(args.plan)))
+    except plan.PlanError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", result.label).strip("-") or "layout"
+    out = Path(args.output) if args.output else Path(args.plan).resolve().parent
+    out.mkdir(parents=True, exist_ok=True)
+    string_path = out / f"{slug}.txt"
+    string_path.write_text(result.blueprint.to_string(), encoding="utf-8")
+    report_path = out / f"{slug}.report.json"
+    report_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    html_path = None
+    if not args.no_render:
+        html_path = render.write_html(result.blueprint, out / f"{slug}.html", title=result.label, findings=result.findings)
+
+    print(f"{result.label}: {_plural(len(result.blueprint.entities), 'entity', 'entities')}, "
+          f"{_plural(result.power_networks, 'power network', 'power networks')}")
+    for block in result.blocks:
+        print(f"\nblock {block.index}: {block.machines} x {block.machine} on {block.recipe}, "
+              f"{block.width}x{block.height} at {tuple(block.at)}, {block.crafts_per_second:.4g} crafts/s")
+        for row in block.rows:
+            limit = f" of {row['capacity']}" if row["capacity"] else ""
+            print(f"  row {row['index'] + 1}: {row['machines']}{limit}")
+        for port in block.ports:
+            items = " | ".join(i or "-" for i in port["items"])
+            print(f"  {port['io']:3s} {port['kind']:4s} ({port['x']}, {port['y']}) flowing {port['direction']}: "
+                  f"{items} at {port['rate']:.4g}/s")
+        for note in block.notes:
+            print(f"  note: {note}")
+    shown = [f for f in result.findings if f.severity.value != "note"]
+    if shown:
+        print(f"\n{_plural(len(shown), 'finding', 'findings')}:")
+        for finding in shown:
+            where = f" at {finding.position}" if finding.position else ""
+            print(f"  [{finding.severity.value}] {finding.summary}{where}")
+    else:
+        print("\nchecks: nothing to report")
+    print(f"\nblueprint: {string_path.resolve()}")
+    print(f"report:    {report_path.resolve()}")
+    if html_path:
+        print(f"drawing:   {html_path.resolve()}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="factorio-forge",
@@ -452,6 +662,29 @@ def build_parser() -> argparse.ArgumentParser:
     show_style = sub.add_parser("show-style", help="show a base's previously measured style")
     show_style.add_argument("profile", help="the profile to show")
     show_style.set_defaults(func=_cmd_show_style)
+
+    options = sub.add_parser(
+        "options", help="the numbers to decide a row layout with: capacity, limits, pitch, sizes"
+    )
+    options.add_argument("recipe")
+    options.add_argument("machine")
+    options.add_argument("--belt")
+    options.add_argument("--inserter", help="serves the nearer input belt and the output")
+    options.add_argument("--long-inserter", help="serves a second input belt, further out")
+    options.add_argument("--pole")
+    options.add_argument("--input-belts", type=int)
+    options.add_argument("--stack-size", type=int, default=1, help="inserter hand size from research")
+    options.add_argument("--speed-bonus", type=float, default=0.0, help="module/beacon speed, 0.5 = +50%%")
+    options.add_argument("--machines", type=int, help="also suggest row splits for this many machines")
+    options.add_argument("--stack", choices=("mirror", "repeat"), default="mirror")
+    options.add_argument("--json", action="store_true")
+    options.set_defaults(func=_cmd_options)
+
+    build = sub.add_parser("build", help="build a layout plan into a checked blueprint, drawing and report")
+    build.add_argument("plan", help="a plan JSON file (see factorio_forge/plan.py)")
+    build.add_argument("-o", "--output", help="directory to write into (default: beside the plan)")
+    build.add_argument("--no-render", action="store_true")
+    build.set_defaults(func=_cmd_build)
 
     return parser
 
