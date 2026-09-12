@@ -45,6 +45,123 @@ def _cmd_init(_: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_save_path(raw: str) -> Path | None:
+    """A save file from a path, or by name from the game's own save folder."""
+    from . import save as save_module
+
+    candidate = Path(raw)
+    if candidate.is_file():
+        return candidate
+
+    for path in save_module.list_saves(include_autosaves=True):
+        if path.stem.lower() == raw.lower():
+            return path
+    return None
+
+
+def _cmd_create_profile(args: argparse.Namespace) -> int:
+    from . import save as save_module
+    from .profile import Profile, ProfileError
+
+    save_path = _resolve_save_path(args.save)
+    if save_path is None:
+        print(f"no save named {args.save!r} was found.", file=sys.stderr)
+        available = save_module.list_saves()
+        if available:
+            shown, rest = available[:15], available[15:]
+            print("saves in the game's save folder (newest first):", file=sys.stderr)
+            for path in shown:
+                print(f"  {path.stem}", file=sys.stderr)
+            if rest:
+                print(f"  ... and {len(rest)} more", file=sys.stderr)
+        return 1
+
+    try:
+        info = save_module.read_save_info(save_path)
+    except save_module.SaveFormatError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        profile = Profile.from_save(info, name=args.name)
+    except ProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if profile.name in Profile.list_all() and not args.force:
+        print(
+            f"a profile named {profile.name!r} already exists; pass --force to replace it",
+            file=sys.stderr,
+        )
+        return 1
+
+    profile.write()
+    print(
+        f"profile {profile.name!r} created from {info.name} "
+        f"(Factorio {info.game_version_string}, {_plural(len(info.mods), 'mod', 'mods')})"
+    )
+
+    report = profile.prepare_mods(force=args.force)
+    print(f"mods: {report.summary()}")
+    if not report.ok:
+        for mod in report.missing:
+            print(f"  missing: {mod}", file=sys.stderr)
+        for sub in report.outdated:
+            print(f"  too old: {sub}", file=sys.stderr)
+        print("cannot extract data until every mod is available.", file=sys.stderr)
+        return 1
+
+    result = profile.extract_data()
+    if result.returncode != 0:
+        print("data extraction failed:", file=sys.stderr)
+        print(result.stderr[-2000:], file=sys.stderr)
+        return 1
+
+    counts = (profile.data_fingerprint or {}).get("counts", {})
+    if counts:
+        print("data extracted: " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())))
+    print(f"ready — activate with: factorio-forge activate-profile {profile.name}")
+    return 0
+
+
+def _cmd_activate_profile(args: argparse.Namespace) -> int:
+    from .profile import Profile, ProfileError
+
+    try:
+        profile = Profile.load(args.profile)
+    except ProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        profile.activate()
+    except ProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"profile {profile.name!r} is now active")
+    return 0
+
+
+def _cmd_list_profiles(_: argparse.Namespace) -> int:
+    from .profile import Profile
+
+    names = Profile.list_all()
+    if not names:
+        print("no profiles yet — create one with create-profile")
+        return 0
+
+    active = Profile.active_profile_name()
+    for name in names:
+        profile = Profile.load(name)
+        marker = "*" if name == active else " "
+        extracted = "data extracted" if profile.has_extracted_data else "no data extracted"
+        styled = "style measured" if profile.has_measured_style else "style not measured"
+        source = f" (from {profile.source_save})" if profile.source_save else ""
+        print(f"{marker} {name}{source} — {extracted}, {styled}")
+    return 0
+
+
 def _load_blueprint(args: argparse.Namespace):
     """Read a blueprint from a string or a file, explaining any refusal.
 
@@ -284,6 +401,26 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create the data directory and remember where Factorio is").set_defaults(
         func=_cmd_init
     )
+
+    create = sub.add_parser(
+        "create-profile", help="create a profile from a save and extract its game data"
+    )
+    create.add_argument("save", help="a save file path, or the name of a save in the game's save folder")
+    create.add_argument("--name", help="name for the profile (default: derived from the save name)")
+    create.add_argument(
+        "--force", action="store_true", help="replace an existing profile of the same name"
+    )
+    create.set_defaults(func=_cmd_create_profile)
+
+    activate = sub.add_parser(
+        "activate-profile", help="put a profile's game data in front of draftsman"
+    )
+    activate.add_argument("profile", help="the profile to activate")
+    activate.set_defaults(func=_cmd_activate_profile)
+
+    sub.add_parser(
+        "list-profiles", help="list every profile, and which one is active"
+    ).set_defaults(func=_cmd_list_profiles)
 
     draw = sub.add_parser("render", help="draw a blueprint string as an HTML page")
     draw.add_argument("blueprint", help="a blueprint string, or a file containing one")
