@@ -78,6 +78,7 @@ from draftsman.data import recipes as recipe_data
 from draftsman.data import resources as resource_data
 from draftsman.data import tiles as tile_data
 
+from . import surface as surface_rules
 from .environment import Environment
 
 SPEED_FLOOR = -0.8
@@ -137,6 +138,12 @@ class Request:
     # entry of its own.
     effects: dict[str, Effects] = field(default_factory=dict)
     environment: Environment | None = None
+    # The planet or surface the factory stands on. With one, only what that
+    # surface offers is free, and only recipes and machines whose
+    # `surface_conditions` hold there are used (see `surface.py`). Without
+    # one, everything minable anywhere counts as free -- right for a mod set
+    # with a single planet, and the only choice before the surface is known.
+    surface: str | None = None
 
     def effects_for(self, category: str) -> Effects:
         return self.effects.get(category, self.effects.get("*", Effects()))
@@ -201,6 +208,11 @@ class BillOfMaterials:
     raw_materials: dict[str, float] = field(default_factory=dict)  # item -> per second
     ambiguities: list[Ambiguity] = field(default_factory=list)
     total_power: float = 0.0
+    # With a surface: each item drawn from outside that the surface neither
+    # offers nor was named as a boundary supply, and where it is -- the
+    # surfaces offering it for free ("offered_on") and those where a recipe
+    # for it can run ("made_on"). Empty lists mean nowhere in the data.
+    from_elsewhere: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -346,6 +358,21 @@ def _watts(value) -> float:
 # --------------------------------------------------------------------------
 
 
+def _machines_for(recipe_name: str, surface: str | None) -> list[str]:
+    """Machines that can run a recipe -- on a surface, if one is given."""
+    recipe = recipe_data.raw[recipe_name]
+    category = recipe.get("category", "crafting")
+    ingredient_count = len(recipe.get("ingredients", []))
+    return sorted(
+        name
+        for name, data in entity_data.raw.items()
+        if category in (data.get("crafting_categories") or ())
+        and data.get("crafting_speed")
+        and (data.get("ingredient_count") is None or data["ingredient_count"] >= ingredient_count)
+        and (surface is None or surface_rules.allows(data.get("surface_conditions"), surface))
+    )
+
+
 def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity | None]:
     recipe = recipe_data.raw[recipe_name]
     category = recipe.get("category", "crafting")
@@ -354,17 +381,11 @@ def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity 
     if override is not None:
         return override, None
 
-    ingredient_count = len(recipe.get("ingredients", []))
-    candidates = sorted(
-        name
-        for name, data in entity_data.raw.items()
-        if category in (data.get("crafting_categories") or ())
-        and data.get("crafting_speed")
-        and (data.get("ingredient_count") is None or data["ingredient_count"] >= ingredient_count)
-    )
+    candidates = _machines_for(recipe_name, request.surface)
     if not candidates:
+        where = f" that works on {request.surface}" if request.surface is not None else " in the active data"
         raise BillOfMaterialsError(
-            f"no machine in the active data can craft category {category!r} (needed for {recipe_name!r})"
+            f"no machine{where} can craft category {category!r} (needed for {recipe_name!r})"
         )
 
     # With an export of the player's game, the fastest machine they can
@@ -417,8 +438,13 @@ def _asteroid_chunks() -> dict:
     return asteroid_chunks.raw
 
 
-def _mined_items() -> frozenset[str]:
+def _mined_items(surface: str | None = None) -> frozenset[str]:
     """Every item/fluid a resource entity's `minable` block actually yields.
+
+    With a `surface`, only what that surface offers (see `surface.sources`):
+    its resources, its tiles' fluids, asteroid chunks where a collector works,
+    what its boilers make. The `subgroup` fallback below stays only for data
+    extracted before resources were, where nothing else says what is mined.
 
     This is the game's own answer to "is this raw", read from
     `draftsman.data.resources` (`data.raw["resource"]`, not extracted by
@@ -452,6 +478,20 @@ def _mined_items() -> frozenset[str]:
       recipe making steam from sulfuric acid and calcite, which is not how
       anybody gets steam.
     """
+    if surface is not None:
+        offered = set(surface_rules.sources(surface))
+        # An item marked raw whose source the data does not place anywhere --
+        # wood and fish come from trees and fish, which draftsman does not
+        # extract -- stays raw everywhere: not knowing where it comes from is
+        # no reason to call it absent. What the data does place (iron ore on
+        # Nauvis) counts only where it is placed.
+        known_anywhere = set().union(*(set(surface_rules.sources(name)) for name in surface_rules.names()))
+        offered |= {
+            name for name, entry in item_data.raw.items()
+            if entry.get("subgroup") == "raw-resource" and name not in known_anywhere
+        }
+        return frozenset(offered)
+
     mined: set[str] = set(_PUMPED_FLUIDS)
     made_by_recipe = set(_build_result_index())
     for tile in tile_data.raw.values():
@@ -503,7 +543,19 @@ def _candidate_recipes(item: str, result_index: dict[str, list[str]], request: R
         recipe = recipe_data.raw.get(override)
         if recipe is None or not any(r.get("name") == item for r in recipe.get("results", [])):
             raise BillOfMaterialsError(f"{override!r} does not produce {item!r}")
+        if request.surface is not None and not surface_rules.allows(recipe.get("surface_conditions"), request.surface):
+            raise BillOfMaterialsError(f"{override!r} cannot run on {request.surface}: its surface conditions fail there")
         return [override]
+
+    if request.surface is not None:
+        # Both halves of "can run here": the recipe's own conditions, and a
+        # machine for it whose conditions hold too -- asteroid crushing has no
+        # conditions of its own, but the crusher only works in space.
+        producers = [
+            r for r in producers
+            if surface_rules.allows(recipe_data.raw[r].get("surface_conditions"), request.surface)
+            and (r in request.machine_choices.values() or _machines_for(r, request.surface))
+        ]
 
     if request.environment is not None:
         unlocked = [r for r in producers if r in request.environment.recipes_enabled]
@@ -918,12 +970,26 @@ def _machine_seconds(recipe: str, chain: _Chain, request: Request) -> float:
     return float(entry.get("energy_required", 0.5) or 0.5) / speed
 
 
-def _solve_rates(chain: _Chain, request: Request) -> dict[str, float]:
+# How much dearer one unit brought in from elsewhere is than a craft of the
+# dearest recipe in the chain. Large enough that a route using an import only
+# wins when there is no local route at all; not so large that the scaled
+# program loses the difference between ordinary recipes.
+_IMPORT_PREMIUM = 1000.0
+
+
+def _solve_rates(chain: _Chain, request: Request, imports: frozenset[str] = frozenset()) -> dict[str, float]:
     """Crafts per second for every candidate recipe; unused ones come back zero.
 
     One variable per recipe, one `>=` constraint per item the chain can make,
     and a cost of machine-seconds per craft, so the cheapest way to meet the
     demand wins and everything unnecessary settles at zero.
+
+    `imports` are items the chain needs that its surface does not offer and
+    nobody named as arriving from outside. Each gets a variable of its own at
+    a prohibitive cost, so the solver brings one in only when nothing local
+    can stand in for it. Without that, anything not made here would be free,
+    and on Nauvis casting iron from molten iron with imported calcite beats
+    smelting ore.
     """
     if not chain.recipes:
         return {}
@@ -931,16 +997,19 @@ def _solve_rates(chain: _Chain, request: Request) -> dict[str, float]:
 
     productivity = {recipe: request.productivity_for(recipe) for recipe in chain.recipes}
 
-    constrained = sorted(chain.produced)
+    imported = sorted(imports)
+    constrained = sorted(set(chain.produced) | set(imported))
     matrix = [
         [
             _signed_amount(recipe_data.raw[recipe], item, productivity[recipe])
             for recipe in chain.recipes
         ]
+        + [1.0 if item == other else 0.0 for other in imported]
         for item in constrained
     ]
     rhs = [chain.target_demand.get(item, 0.0) for item in constrained]
     cost = [_machine_seconds(recipe, chain, request) for recipe in chain.recipes]
+    cost += [_IMPORT_PREMIUM * max(cost)] * len(imported)
 
     rates = _simplex(cost, matrix, rhs)
     return {recipe: rates[index[recipe]] for recipe in chain.recipes}
@@ -955,10 +1024,19 @@ def compute(request: Request) -> BillOfMaterials:
     if not request.targets:
         raise BillOfMaterialsError("no targets to produce")
 
+    if request.surface is not None and not surface_rules.exists(request.surface):
+        raise BillOfMaterialsError(
+            f"{request.surface!r} is not a surface in the active data; it has {', '.join(surface_rules.names())}"
+        )
     result_index = _build_result_index()
-    mined = _mined_items()
+    mined = _mined_items(request.surface)
     chain = _gather(request, result_index, mined)
-    rates = _solve_rates(chain, request)
+    imports: frozenset[str] = frozenset()
+    if request.surface is not None:
+        needed = {i["name"] for r in chain.recipes for i in recipe_data.raw[r].get("ingredients", [])}
+        needed |= {t.item for t in request.targets}
+        imports = frozenset(needed - chain.produced - set(request.boundary) - mined)
+    rates = _solve_rates(chain, request, imports)
 
     bom = BillOfMaterials()
     drawn: dict[str, float] = defaultdict(float)
@@ -1071,6 +1149,23 @@ def compute(request: Request) -> BillOfMaterials:
 
     bom.ambiguities = reported
     bom.raw_materials = dict(sorted(drawn.items()))
+
+    if request.surface is not None:
+        for item in bom.raw_materials:
+            if item in request.boundary or item in mined:
+                continue
+            others = [name for name in surface_rules.names() if name != request.surface]
+            bom.from_elsewhere[item] = {
+                "offered_on": [name for name in others if item in surface_rules.sources(name)],
+                "made_on": [
+                    name for name in others
+                    if any(
+                        surface_rules.allows(recipe_data.raw[r].get("surface_conditions"), name)
+                        and _machines_for(r, name)
+                        for r in result_index.get(item, [])
+                    )
+                ],
+            }
     return bom
 
 

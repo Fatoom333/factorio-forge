@@ -93,7 +93,8 @@ against the game's own files.
   "recipe_choices": {},
   "effects": {"*": {"speed": 0, "productivity": 0, "consumption": 0}},
   "plot": {"width": 120, "height": 40},
-  "style": ["mirrored rows like their copper block"]
+  "style": ["mirrored rows like their copper block"],
+  "surface": "nauvis"
 }
 ```
 
@@ -109,6 +110,11 @@ against the game's own files.
 - **plot**: the space and its shape; a hexagonal city block is not a
   rectangle.
 - **style**: what they said about looks, in their words.
+- **surface**: the planet or platform it is built on. It decides what is free
+  to mine, pump or collect there and which recipes and machines work (Space
+  Age surface conditions). With one surface in the mod set it is assumed;
+  with several and none given, the review asks, and until then anything
+  minable anywhere counts as free.
 
 **Review it**:
 
@@ -121,7 +127,10 @@ It reports three lists and the bill of materials:
 - **problems** -- unknown names (with suggestions), locked targets, tiers or
   machines. Fix them, usually by asking.
 - **ask the player** -- what only they can answer: missing plot, what arrives
-  from outside when nothing does, tiers when there is no export.
+  from outside when nothing does, tiers when there is no export, the surface
+  when there are several, and anything the bill needs that this surface does
+  not have ("calcite cannot be had on nauvis (free on vulcanus)") -- the
+  answer is usually "it comes by rocket", which goes into `boundary`.
 - **assumed** -- tiers filled in, the machine picked per category (the
   fastest they can build), researched productivity applied. Say these to the
   player in one short list; do not make them confirm each.

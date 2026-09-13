@@ -74,7 +74,8 @@ companion mod itself aside), and every tool says when it is not.
   "recipe_choices": {},
   "effects": {"*": {"speed": 0, "productivity": 0, "consumption": 0}},
   "plot": {"width": 120, "height": 40},
-  "style": ["mirrored rows, like the copper block"]
+  "style": ["mirrored rows, like the copper block"],
+  "surface": "nauvis"
 }
 ```
 
@@ -83,10 +84,35 @@ companion mod itself aside), and every tool says when it is not.
 - **problems**: unknown names with suggestions, locked targets, tiers and
   machines;
 - **questions** for the player: the plot when missing, what arrives from
-  outside when nothing does, tiers when there is no export;
+  outside when nothing does, tiers when there is no export, the surface when
+  the mod set has several, and each thing the bill needs that the surface
+  cannot supply, with where it can be had;
 - **assumptions**: tiers filled in from what is unlocked, the machine picked
   per category, researched productivity applied;
 - the **bill of materials**.
+
+## Surfaces
+
+What is free depends on where the block stands. A surface offers what is
+*placed* there (its `map_gen_settings.autoplace_settings`: resources and
+tiles) and what a machine that *works* there can take from it: a drill whose
+resource categories reach the resource, an offshore pump on a tile with a
+fluid, an asteroid collector for chunks, a boiler for steam once its water is
+offered. "Works" is the prototype's `surface_conditions` against the
+surface's `surface_properties`, a property left unstated taking its
+`default_value`; the same check decides which recipes and machines the bill
+may use.
+
+On a surface the bill of materials still prefers local routes, but an item
+the surface cannot supply is not simply free: each gets a column at a price
+far above any recipe, so it is brought in only when nothing local stands in
+(on Nauvis, casting iron with imported calcite no longer beats smelting ore).
+What is brought in anyway is listed as `from_elsewhere`, with the surfaces it
+is free on and those it can be made on, and becomes a question.
+
+Items that no surface places and no recipe makes -- wood, fish, Krastorio 2's
+sand -- stay free: the data does not say where they come from. Gleba's plants
+are not extracted yet, so fruit and spoilage count as not offered anywhere.
 
 ## Commands
 

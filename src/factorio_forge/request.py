@@ -16,7 +16,8 @@ answer.
       "recipe_choices": {},
       "effects": {"*": {"speed": 0, "productivity": 0, "consumption": 0}},
       "plot": {"width": 120, "height": 40},
-      "style": ["mirrored rows, like the copper block"]
+      "style": ["mirrored rows, like the copper block"],
+      "surface": "nauvis"
     }
 
 Only `targets` is required. A rate is `per_second` or `per_minute`. What is
@@ -38,6 +39,7 @@ from draftsman.data import fluids as fluid_data
 from draftsman.data import items as item_data
 
 from . import bom, environment, layout, names
+from . import surface as surfaces
 
 ROLES = ("belt", "inserter", "long_inserter", "pole")
 
@@ -57,6 +59,7 @@ class Spec:
     effects: dict[str, bom.Effects] = field(default_factory=dict)
     plot: dict | None = None
     style: list[str] = field(default_factory=list)
+    surface: str | None = None
 
 
 @dataclass
@@ -77,6 +80,7 @@ class Review:
     tiers: dict[str, str] = field(default_factory=dict)
     bill: bom.BillOfMaterials | None = None
     bonuses: dict[str, float] = field(default_factory=dict)
+    surface: str | None = None
 
     @property
     def ready(self) -> bool:
@@ -97,10 +101,12 @@ class Review:
                 "from_outside": self.bill.raw_materials,
                 "total_power_watts": self.bill.total_power,
                 "choices_made": [a.__dict__ for a in self.bill.ambiguities],
+                "from_elsewhere": self.bill.from_elsewhere,
             }
         return {
             "ready": self.ready,
             "environment": self.environment_note,
+            "surface": self.surface,
             "problems": self.problems,
             "questions": self.questions,
             "assumptions": self.assumptions,
@@ -118,7 +124,7 @@ class Review:
 def parse(data: dict) -> Spec:
     if not isinstance(data, dict):
         raise RequestError("a request is a JSON object")
-    known = {"said", "targets", "boundary", "tiers", "machine_choices", "recipe_choices", "effects", "plot", "style"}
+    known = {"said", "targets", "boundary", "tiers", "machine_choices", "recipe_choices", "effects", "plot", "style", "surface"}
     unknown = set(data) - known
     if unknown:
         raise RequestError(f"unknown field(s): {', '.join(sorted(unknown))}")
@@ -156,6 +162,7 @@ def parse(data: dict) -> Spec:
         effects=effects,
         plot=data.get("plot"),
         style=[str(s) for s in data.get("style") or []],
+        surface=str(data["surface"]) if data.get("surface") else None,
     )
 
 
@@ -290,6 +297,24 @@ def review(spec: Spec, found: environment.Environment | None = None, note: str |
         elif found is not None and not found.can_build(machine):
             result.problems.append(f"machine {machine!r} for {category!r} is not unlocked in the player's game")
 
+    known_surfaces = surfaces.names()
+    chosen = spec.surface
+    if chosen is not None and chosen not in known_surfaces:
+        result.problems.append(
+            f"surface {chosen!r} is not in the active data; it has {', '.join(known_surfaces) or 'none'}"
+        )
+        chosen = None
+    elif chosen is None and len(known_surfaces) == 1:
+        chosen = known_surfaces[0]
+        result.assumptions.append(f"surface: {chosen}, the only one this mod set has")
+    elif chosen is None and len(known_surfaces) > 1:
+        result.questions.append(
+            f"Which planet or surface is this for? The mod set has {', '.join(known_surfaces)}. "
+            "What is free to mine or pump, and which recipes and machines work, depend on it; "
+            "until then everything minable anywhere is treated as free."
+        )
+    result.surface = chosen
+
     if not result.problems:
         request = bom.Request(
             targets=tuple(bom.Target(item, rate) for item, rate in spec.targets),
@@ -298,6 +323,7 @@ def review(spec: Spec, found: environment.Environment | None = None, note: str |
             machine_choices=spec.machine_choices,
             effects=spec.effects,
             environment=found,
+            surface=chosen,
         )
         try:
             result.bill = bom.compute(request)
@@ -321,6 +347,16 @@ def review(spec: Spec, found: environment.Environment | None = None, note: str |
                     "researched recipe productivity applied: "
                     + ", ".join(f"{r} +{v:.0%}" for r, v in researched.items())
                 )
+        for item, where in result.bill.from_elsewhere.items():
+            places = []
+            if where["offered_on"]:
+                places.append(f"free on {', '.join(where['offered_on'])}")
+            if where["made_on"]:
+                places.append(f"made on {', '.join(where['made_on'])}")
+            result.questions.append(
+                f"{item} cannot be had on {chosen} ({'; '.join(places) or 'nowhere in the data'}), and the bill "
+                "needs it. Is it brought in? If so, add it to boundary."
+            )
         if not spec.boundary:
             intermediate = sorted(
                 {i for line in result.bill.lines for i in line.inputs if i not in raw and i not in dict(spec.targets)}

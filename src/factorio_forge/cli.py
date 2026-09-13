@@ -666,6 +666,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
         return 0 if result.ready else 1
 
     print(f"game state: {result.environment_note}")
+    print(f"surface: {result.surface or 'not chosen'}")
     for heading, entries in (
         ("problems -- fix before designing", result.problems),
         ("ask the player", result.questions),
