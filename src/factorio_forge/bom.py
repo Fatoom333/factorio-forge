@@ -140,6 +140,20 @@ class Request:
     def effects_for(self, category: str) -> Effects:
         return self.effects.get(category, self.effects.get("*", Effects()))
 
+    def productivity_for(self, recipe: str) -> float:
+        """Module productivity for the recipe's category, plus researched recipe productivity.
+
+        The researched part comes from the companion mod's export
+        (`Bonuses.recipe_productivity`) when an environment is given. The sum
+        is capped at the recipe's own `maximum_productivity`, as the game caps
+        it (+300% unless the recipe says otherwise).
+        """
+        entry = recipe_data.raw[recipe]
+        total = self.effects_for(entry.get("category", "crafting")).productivity
+        if self.environment is not None and self.environment.bonuses is not None:
+            total += self.environment.bonuses.recipe_productivity.get(recipe, 0.0)
+        return min(total, float(entry.get("maximum_productivity", 3.0)))
+
 
 # --------------------------------------------------------------------------
 # output
@@ -338,14 +352,25 @@ def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity 
             f"no machine in the active data can craft category {category!r} (needed for {recipe_name!r})"
         )
 
+    # With an export of the player's game, the fastest machine they can
+    # actually build -- not the fastest the mod set has, which a mid-game base
+    # rarely owns. If none is buildable, say so rather than pretend.
+    locked_note = ""
+    if request.environment is not None:
+        buildable = [name for name in candidates if request.environment.can_build(name)]
+        if buildable:
+            candidates = buildable
+        else:
+            locked_note = "; none of these can be built with the recipes the export shows enabled"
+
     chosen = max(candidates, key=lambda name: entity_data.raw[name]["crafting_speed"])
-    if len(candidates) == 1:
+    if len(candidates) == 1 and not locked_note:
         return chosen, None
     return chosen, Ambiguity(
         subject=category,
         kind="machine",
         candidates=tuple(candidates),
-        detail=f"picked {chosen!r} (fastest); override via machine_choices",
+        detail=f"picked {chosen!r} (fastest){locked_note}; override via machine_choices",
     )
 
 
@@ -678,12 +703,7 @@ def _solve_rates(chain: _Chain, request: Request) -> dict[str, float]:
         return {}
     index = {recipe: i for i, recipe in enumerate(chain.recipes)}
 
-    productivity = {
-        recipe: request.effects_for(
-            recipe_data.raw[recipe].get("category", "crafting")
-        ).productivity
-        for recipe in chain.recipes
-    }
+    productivity = {recipe: request.productivity_for(recipe) for recipe in chain.recipes}
 
     constrained = sorted(chain.produced)
     matrix = [
@@ -739,7 +759,7 @@ def compute(request: Request) -> BillOfMaterials:
         outputs = {
             r["name"]: rate
             * _expected_amount(r)
-            * _productivity_multiplier(entry, r, effects.productivity)
+            * _productivity_multiplier(entry, r, request.productivity_for(recipe))
             for r in entry.get("results", [])
         }
         output_temperatures = {

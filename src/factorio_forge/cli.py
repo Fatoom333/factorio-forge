@@ -450,16 +450,17 @@ def _cmd_options(args: argparse.Namespace) -> int:
             stack_size=args.stack_size,
         )
 
+    hands, hand_note = rows.hand_sizes(spec([1], "mirror"))
     try:
         alone = layout.row_capacity(
             args.recipe, args.machine, args.belt, inserter=args.inserter,
             long_inserter=args.long_inserter, input_belts=args.input_belts,
-            stack_size=args.stack_size, speed_bonus=args.speed_bonus,
+            stack_size=hands, speed_bonus=args.speed_bonus,
         )
         shared = layout.row_capacity(
             args.recipe, args.machine, args.belt, inserter=args.inserter,
             long_inserter=args.long_inserter, input_belts=args.input_belts,
-            rows_per_input_belt=2, stack_size=args.stack_size, speed_bonus=args.speed_bonus,
+            rows_per_input_belt=2, stack_size=hands, speed_bonus=args.speed_bonus,
         )
     except layout.LayoutError as exc:
         print(str(exc), file=sys.stderr)
@@ -475,7 +476,7 @@ def _cmd_options(args: argparse.Namespace) -> int:
         "limit": {"own_input_belts": alone.limit, "input_belts_shared": shared.limit},
         "input_lanes": alone.input_lanes,
         "inserters_per_machine": alone.inserters,
-        "notes": alone.notes,
+        "notes": ([hand_note] if hand_note else []) + alone.notes,
         "stacks": {},
         "suggestions": [],
     }
@@ -524,7 +525,7 @@ def _cmd_options(args: argparse.Namespace) -> int:
         print("input lanes: " + "  |  ".join(" + ".join(lanes) for lanes in alone.input_lanes))
     if alone.inserters:
         print("inserters per machine: " + ", ".join(f"{k} x{n}" for k, n in alone.inserters.items()))
-    for note in alone.notes:
+    for note in report["notes"]:
         print(f"  note: {note}")
     print()
     for stack, info in report["stacks"].items():
@@ -597,6 +598,102 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_find(args: argparse.Namespace) -> int:
+    """The player's words matched to prototype names, with names in their language."""
+    from . import bom, environment, names
+
+    found, why = environment.for_active_profile()
+    kinds = tuple(args.kind) if args.kind else names.KINDS
+    raw = bom._mined_items() | bom._PUMPED_FLUIDS
+    text = " ".join(args.words)
+    results = names.find(text, kinds=kinds, limit=args.limit, environment=found, raw=raw)
+    for phrase, missing, note in names.absent_slang(text):
+        print(f"«{phrase}» is known slang for {missing}, which this mod set does not have" + (f" ({note})" if note else ""))
+    if not results:
+        print("nothing matches; try fewer or other words, English, or the internal name")
+        return 1
+    for c in results:
+        state = {True: "unlocked", False: "LOCKED", None: ""}[c.unlocked]
+        titles = " / ".join(t for t in (c.titles.get("ru"), c.titles.get("en")) if t)
+        print(f"{c.name:44s} {'+'.join(c.kinds):22s} {state:9s} {titles}")
+        if c.via:
+            print(f"{'':44s} ^ {c.via}")
+    if found is None:
+        print(f"\n(unlocked state unknown: {why})")
+    return 0
+
+
+def _cmd_available(args: argparse.Namespace) -> int:
+    """What the player has to build with, and the bonuses that change the numbers."""
+    from . import environment, request
+
+    found, why = environment.for_active_profile()
+    print(f"game state: {why}")
+    roles = [args.role] if args.role else list(request.ROLES)
+    for role in roles:
+        print(f"\n{role}:")
+        for option in request.options(role, found):
+            if option.unlocked is False and not args.all:
+                continue
+            state = {True: "", False: "  LOCKED", None: "  (unknown)"}[option.unlocked]
+            print(f"  {option.name:36s} {option.detail}{state}")
+    if found is not None and found.bonuses is not None:
+        print("\nbonuses:")
+        for name, value in sorted(found.bonuses.force.items()):
+            if value:
+                print(f"  {name}: {value:g}")
+        for recipe, value in sorted(found.bonuses.recipe_productivity.items()):
+            print(f"  productivity of {recipe}: +{value:.0%}")
+    elif found is not None:
+        print("\nbonuses: not in this export (companion mod before 0.7.0); export again")
+    return 0
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    """Step 1: check a request against the player's game before designing anything."""
+    import json
+
+    from . import request
+
+    try:
+        spec = request.load(Path(args.request))
+    except request.RequestError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    result = request.review(spec)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        return 0 if result.ready else 1
+
+    print(f"game state: {result.environment_note}")
+    for heading, entries in (
+        ("problems -- fix before designing", result.problems),
+        ("ask the player", result.questions),
+        ("assumed -- say so, or confirm", result.assumptions),
+    ):
+        if entries:
+            print(f"\n{heading}:")
+            for entry in entries:
+                print(f"  - {entry}")
+    if result.tiers:
+        print("\ntiers: " + ", ".join(f"{role} {name}" for role, name in result.tiers.items()))
+    if result.bill is not None:
+        print("\nbill of materials:")
+        for line in result.bill.lines:
+            outputs = ", ".join(f"{k} {v:.4g}/s" for k, v in line.outputs.items())
+            print(f"  {line.machines:4d} x {line.machine} on {line.recipe} -> {outputs}")
+        if result.bill.raw_materials:
+            print("  from outside: " + ", ".join(f"{k} {v:.4g}/s" for k, v in sorted(result.bill.raw_materials.items())))
+        print(f"  power: {result.bill.total_power / 1e6:.3g} MW")
+    if not result.ready:
+        print("\nnot ready: fix the problems first")
+    elif result.questions:
+        print("\nno problems; ask the questions, or say what you assume, before designing")
+    else:
+        print("\nready to design")
+    return 0 if result.ready else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="factorio-forge",
@@ -663,6 +760,22 @@ def build_parser() -> argparse.ArgumentParser:
     show_style.add_argument("profile", help="the profile to show")
     show_style.set_defaults(func=_cmd_show_style)
 
+    find = sub.add_parser("find", help="match the player's words to item, fluid, recipe and entity names")
+    find.add_argument("words", nargs="+")
+    find.add_argument("--kind", action="append", choices=("item", "fluid", "recipe", "entity"))
+    find.add_argument("--limit", type=int, default=12)
+    find.set_defaults(func=_cmd_find)
+
+    available = sub.add_parser("available", help="belts, inserters and poles the player has, and their bonuses")
+    available.add_argument("role", nargs="?", choices=("belt", "inserter", "long_inserter", "pole"))
+    available.add_argument("--all", action="store_true", help="include locked ones")
+    available.set_defaults(func=_cmd_available)
+
+    review = sub.add_parser("review", help="step 1: check a request against the player's game")
+    review.add_argument("request", help="a request JSON file (see factorio_forge/request.py)")
+    review.add_argument("--json", action="store_true")
+    review.set_defaults(func=_cmd_review)
+
     options = sub.add_parser(
         "options", help="the numbers to decide a row layout with: capacity, limits, pitch, sizes"
     )
@@ -673,7 +786,9 @@ def build_parser() -> argparse.ArgumentParser:
     options.add_argument("--long-inserter", help="serves a second input belt, further out")
     options.add_argument("--pole")
     options.add_argument("--input-belts", type=int)
-    options.add_argument("--stack-size", type=int, default=1, help="inserter hand size from research")
+    options.add_argument(
+        "--stack-size", type=int, help="inserter hand size (default: from the companion mod's export of research)"
+    )
     options.add_argument("--speed-bonus", type=float, default=0.0, help="module/beacon speed, 0.5 = +50%%")
     options.add_argument("--machines", type=int, help="also suggest row splits for this many machines")
     options.add_argument("--stack", choices=("mirror", "repeat"), default="mirror")

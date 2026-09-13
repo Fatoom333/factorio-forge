@@ -143,6 +143,22 @@ def inserter_reach(inserter: str) -> int:
     return max(1, round(math.hypot(*pickup)))
 
 
+def inserter_hand_size(inserter: str, bonuses) -> int:
+    """Items an inserter carries per swing, for a force with these bonuses.
+
+    One, plus what the prototype has built in (`stack_size_bonus`), plus the
+    force's capacity bonus -- the bulk one for a prototype marked `bulk`, the
+    ordinary one otherwise. The force's number already includes bonuses that
+    do not come from capacity research (the bulk inserter technology adds one),
+    which is why it is read from the game rather than summed from technologies.
+    """
+    entry = _entity(inserter)
+    if entry.get("type") != "inserter":
+        raise LayoutError(f"{inserter!r} is not an inserter in the active data")
+    key = "bulk_inserter_capacity_bonus" if entry.get("bulk") else "inserter_stack_size_bonus"
+    return 1 + int(entry.get("stack_size_bonus") or 0) + int(bonuses.get(key, 0))
+
+
 def inserter_rate(inserter: str, stack_size: int = 1) -> float:
     """Items per second at best: one swing per stack, chest to chest.
 
@@ -284,7 +300,7 @@ def row_capacity(
     long_inserter: str | None = None,
     input_belts: int | None = None,
     rows_per_input_belt: int = 1,
-    stack_size: int = 1,
+    stack_size: int | dict[str, int] = 1,
     speed_bonus: float = 0.0,
 ) -> RowCapacity:
     """The most machines one row can keep fed and emptied, and what binds it.
@@ -292,8 +308,13 @@ def row_capacity(
     `rows_per_input_belt` is 2 when mirrored rows share their input belts
     between them, which halves each row's share. Output needs no such
     parameter: every row fills exactly one lane of its output belt, shared or
-    not.
+    not. `stack_size` is one hand size for every inserter, or a hand size per
+    inserter name (see `inserter_hand_size`).
     """
+
+    def hand(name: str) -> int:
+        return stack_size.get(name, 1) if isinstance(stack_size, dict) else stack_size
+
     per_machine = solid_flows(recipe, machine, 1, speed_bonus)
     fluids = fluid_flows(recipe, machine, 1, speed_bonus)
     inputs = {f.item: f.rate for f in per_machine if f.direction == "in"}
@@ -355,9 +376,9 @@ def row_capacity(
         if inserter is None:
             notes.append("no inserter chosen, so inserter throughput was not checked")
         else:
-            reach_rate = {1: inserter_rate(inserter, stack_size)}
+            reach_rate = {1: inserter_rate(inserter, hand(inserter))}
             if long_inserter is not None:
-                reach_rate[2] = inserter_rate(long_inserter, stack_size)
+                reach_rate[2] = inserter_rate(long_inserter, hand(long_inserter))
             for index, belt_lanes in enumerate(lanes, start=1):
                 # The inserter on this belt carries every ingredient on it. An
                 # ingredient split over two belts is counted on both, which

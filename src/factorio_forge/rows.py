@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from draftsman.data import entities as entity_data
 from draftsman.data import recipes as recipe_data
 
+from . import environment
 from . import fluids as fluid_rules
 from . import layout
 from .layout import LayoutError
@@ -87,7 +88,7 @@ class RowBlockSpec:
     align: str = "start"  # or "center": shorter rows centred, for non-rectangular plots
     input_belts: int | None = None
     speed_bonus: float = 0.0
-    stack_size: int = 1
+    stack_size: int | None = None  # None: each inserter's hand from the player's research
 
 
 @dataclass(frozen=True)
@@ -633,6 +634,27 @@ def _place_poles(pole: str, electric: list, candidates: set) -> tuple[list[tuple
     return poles, pieces, notes
 
 
+def hand_sizes(spec: RowBlockSpec) -> tuple[int | dict[str, int], str]:
+    """How many items each chosen inserter carries, and where that came from.
+
+    A number in the plan wins. Otherwise the hand sizes come from the bonuses
+    the companion mod exported for this very mod set; failing that, one item,
+    said out loud -- a hand of one is the pessimistic answer, and it makes
+    fast recipes ask for more inserters than a researched base needs.
+    """
+    if spec.stack_size is not None:
+        return spec.stack_size, ""
+    names = [n for n in (spec.inserter, spec.long_inserter) if n]
+    found, why = environment.for_active_profile()
+    if found is not None and found.bonuses is not None:
+        sizes = {name: layout.inserter_hand_size(name, found.bonuses) for name in names}
+        shown = ", ".join(f"{name} {size}" for name, size in sizes.items())
+        return sizes, f"inserter hands from research ({why}): {shown}"
+    if found is not None:
+        why = "the export predates bonuses (companion mod 0.7.0); export again"
+    return 1, f"inserter hands assumed 1 item: {why}"
+
+
 # --------------------------------------------------------------------------
 # the block
 # --------------------------------------------------------------------------
@@ -663,6 +685,8 @@ def build_block(spec: RowBlockSpec) -> Block:
     spec.pipe_to_ground = spec.pipe_to_ground or _default_pipe("pipe-to-ground")
     ptg_reach = _ptg_reach(spec.pipe_to_ground)
 
+    hands, hand_note = hand_sizes(spec)
+
     def capacity_for(share: int) -> layout.RowCapacity:
         if not solids:
             return layout.row_capacity(spec.recipe, spec.machine, spec.belt or "", speed_bonus=spec.speed_bonus)
@@ -670,10 +694,12 @@ def build_block(spec: RowBlockSpec) -> Block:
             spec.recipe, spec.machine, spec.belt,
             inserter=spec.inserter, long_inserter=spec.long_inserter,
             input_belts=spec.input_belts, rows_per_input_belt=share,
-            stack_size=spec.stack_size, speed_bonus=spec.speed_bonus,
+            stack_size=hands, speed_bonus=spec.speed_bonus,
         )
 
     alone = capacity_for(1)
+    if solids and hand_note:
+        alone.notes.insert(0, hand_note)
     shared = capacity_for(2) if alone.input_lanes else alone
     # Arms on a pair of shared input belts each take from the other row's
     # nearer belt too, so size every input arm for the busier belt.

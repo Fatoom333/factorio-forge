@@ -28,6 +28,7 @@ cd <factorio-forge>
 ```
 factorio-forge list-profiles        # which save profiles exist, which is active
 factorio-forge activate-profile NAME
+factorio-forge available            # belts, inserters, poles the player has; bonuses
 factorio-forge show-style NAME      # measured spacing, alignment, symmetry, orientation
 ```
 
@@ -35,48 +36,118 @@ Every number below comes from the active profile. A blueprint designed against
 the wrong profile is wrong in ways nothing will flag. If the player's save has
 no profile yet: `factorio-forge create-profile <save>`.
 
+What the player has *unlocked*, and the bonuses research has given them
+(inserter hand size, recipe productivity, mining productivity), only the
+running game knows. The companion mod (0.7.0 or later) exports it: the player
+runs `/forge-export` in that save, or presses Export in its window. The tools
+use the export only when its mod set matches the active profile, and say when
+it does not. Without it, ask about tiers instead of guessing, and treat
+inserter hands as 1.
+
 ## 1. Pin down the request
 
-Before any layout, have answers to:
+The player's words are yours to read; the toolkit checks your reading.
 
-- **Target**: which item, at what rate (per second).
-- **Boundary**: what arrives from outside (train, bus, another block) and is
-  not to be made here. In a city block this is usually plates and fluids.
-- **Plot**: free area, and its shape. The player's base may use hexagonal or
-  rectangular city blocks on a rail grid; a row that runs into a diagonal edge
-  is shorter than the one in the middle.
-- **Tiers**: belt, inserters, pole the player has researched, and the
-  inserter hand size (stack bonus). If you do not know the stack bonus, ask or
-  say what you assumed -- with a hand of 1, fast inserters often cannot keep
-  up with fast recipes, and the tools will tell you so.
+**Turn every thing they name into a prototype name**, never from memory --
+mods rename things (Krastorio 2's red science is a "tech card"):
 
-Ask when something that changes the design is missing. Do not ask about what
-the tools can compute.
+```
+factorio-forge find красные колбы
+factorio-forge find --kind item автоматизационный исследовательский пакет
+```
+
+Pass the player's words as they said them. It tries three ways at once and
+says under each candidate why it was found:
+
+- **slang** from `src/factorio_forge/slang.py` -- "красные колбы", "синие
+  схемы", "мазут", "качалка", "green belt", "prod modules" and about a hundred
+  more, in Russian and English;
+- **the name shown in this mod set**;
+- **the base game's name**, when a mod renamed the thing: "matched the base
+  game's name «…»; this mod set shows it as «…»". Tell the player the name
+  their game uses.
+
+A vague phrase ("колбы", "ленты", "ассемблеры") lists every option with
+"which …?" -- ask. A phrase with a note (like "аккумуляторы": players mean the
+accumulator block, the base game's Russian «Аккумулятор» is the battery) is
+ambiguous -- ask. "known slang for X, which this mod set does not have" means
+the thing is gone (Factorio 2.0 removed the rocket control unit), not that
+the player misspoke.
+
+When `find` has nothing and you know what the player meant, search by the
+internal name, and **add the phrase to `slang.py`** (a phrase list, the base
+game's internal names, a note only if it is ambiguous) so the next request
+does not have to work it out again. The test suite checks every name there
+against the game's own files.
+
+**Write the request** as JSON -- only `targets` is required:
+
+```json
+{
+  "said": "the player's words, verbatim",
+  "targets": [{"item": "battery", "per_second": 2}],
+  "boundary": ["iron-plate", "copper-plate", "sulfuric-acid"],
+  "tiers": {"belt": "fast-transport-belt", "inserter": "fast-inserter",
+            "long_inserter": "long-handed-inserter", "pole": "medium-electric-pole"},
+  "machine_choices": {"chemistry": "chemical-plant"},
+  "recipe_choices": {},
+  "effects": {"*": {"speed": 0, "productivity": 0, "consumption": 0}},
+  "plot": {"width": 120, "height": 40},
+  "style": ["mirrored rows like their copper block"]
+}
+```
+
+- **targets**: rate `per_second` or `per_minute`. "Одна полная лента" is a rate:
+  convert with `available belt`.
+- **boundary**: what arrives from outside (train, bus, another block) and is
+  not made here. In a city block usually plates and fluids.
+- **tiers**: leave out what the player did not say; the review fills in the
+  best they have unlocked, and lists it.
+- **machine_choices** (by crafting category), **recipe_choices** (by item):
+  only what the player asked for.
+- **effects**: modules and beacons per crafting category, as bonus fractions.
+- **plot**: the space and its shape; a hexagonal city block is not a
+  rectangle.
+- **style**: what they said about looks, in their words.
+
+**Review it**:
+
+```
+factorio-forge review request.json
+```
+
+It reports three lists and the bill of materials:
+
+- **problems** -- unknown names (with suggestions), locked targets, tiers or
+  machines. Fix them, usually by asking.
+- **ask the player** -- what only they can answer: missing plot, what arrives
+  from outside when nothing does, tiers when there is no export.
+- **assumed** -- tiers filled in, the machine picked per category (the
+  fastest they can build), researched productivity applied. Say these to the
+  player in one short list; do not make them confirm each.
+
+Ask everything that is missing in **one message**, with a sensible default
+beside each question, so the player can answer "yes" or correct one line. Do
+not ask what the tools can compute. When the review has no problems and the
+answers are in, the bill of materials it printed is step 2 done.
 
 ## 2. How many machines
 
-Bill of materials (Python, no CLI yet):
+`review` already ran it. In Python, for more:
 
 ```python
-from factorio_forge import bom
-result = bom.compute(bom.Request(
-    targets=(bom.Target("battery", 2.0),),
-    boundary=frozenset({"iron-plate", "copper-plate", "sulfuric-acid"}),
-))
-for line in result.lines:
+from factorio_forge import bom, environment, request
+found, why = environment.for_active_profile()
+spec = request.load("request.json")
+result = request.review(spec)       # result.bill is a bom.BillOfMaterials
+for line in result.bill.lines:
     print(line.recipe, line.machine, line.machines, line.inputs, line.outputs)
-print(result.ambiguities)   # choices it made for you
 ```
-
-It picks the fastest machine for each crafting category and says so in
-`ambiguities`. The player may not have that machine; pin it with
-`machine_choices={"chemistry": "chemical-plant"}` (keyed by category), and a
-recipe with `recipe_choices={"item": "recipe"}`.
 
 ## 3. The numbers for each block
 
 ```
-factorio-forge options <recipe> <machine> --belt B --inserter I --long-inserter L --pole P [--stack-size N] [--machines M]
+factorio-forge options <recipe> <machine> --belt B --inserter I --long-inserter L --pole P [--machines M]
 ```
 
 Without `--belt`/`--inserter`/`--pole` it lists the choices with their
@@ -100,7 +171,7 @@ throughput, reach and supply area. With them it reports:
      "rows": [10, 10, 10, 10],
      "belt": "fast-transport-belt", "inserter": "fast-inserter",
      "long_inserter": "long-handed-inserter", "pole": "medium-electric-pole",
-     "stack_size": 2, "stack": "mirror", "align": "start",
+     "stack": "mirror", "align": "start",
      "at": [0, 0], "rotate": 0}
   ],
   "entities": [
@@ -112,7 +183,7 @@ throughput, reach and supply area. With them it reports:
 Block fields: `recipe`, `machine`, `rows` (list of machine counts, or `rows` +
 `per_row`), `belt`, `inserter` (nearer belt and output), `long_inserter`
 (second input belt), `pole`, optional `pipe`, `pipe_to_ground`,
-`input_belts`, `stack_size`, `speed_bonus`, `stack` (`mirror`|`repeat`),
+`input_belts`, `stack_size` (inserter hand; default from the export), `speed_bonus`, `stack` (`mirror`|`repeat`),
 `align` (`start`|`center`), `at` [x, y] (top-left tile), `rotate`
 (0/90/180/270, clockwise). In a block before rotation, rows run west to east,
 inputs enter at the west end, outputs leave at the east end.
