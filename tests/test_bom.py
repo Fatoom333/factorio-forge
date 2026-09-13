@@ -575,3 +575,103 @@ class TestNoTargets:
     def test_is_a_named_error(self) -> None:
         with pytest.raises(bom.BillOfMaterialsError, match="no targets"):
             bom.compute(bom.Request(targets=()))
+
+
+# --------------------------------------------------------------------------
+# what the solver may pick from, and what counts as raw
+# --------------------------------------------------------------------------
+
+
+class TestHiddenRecipes:
+    """Space Age's recycling recipes are hidden, and "make" every component
+    back out of whatever contains it; offered to the solver they blew the chain
+    for a barrel up to 470 recipes."""
+
+    def test_a_hidden_recipe_is_not_offered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        recipes = dict(RECIPES)
+        recipes["recycle-gear"] = {
+            "name": "recycle-gear", "category": "crafting", "energy_required": 0.01, "hidden": True,
+            "ingredients": [{"type": "item", "name": "ore", "amount": 1}],
+            "results": [{"type": "item", "name": "plate", "amount": 100}],
+        }
+        monkeypatch.setattr(bom.recipe_data, "raw", recipes)
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),)))
+        assert not any(line.recipe == "recycle-gear" for line in result.lines)
+
+    def test_unless_a_machine_runs_it_by_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        recipes = dict(RECIPES)
+        recipes["reactor-plate"] = {
+            "name": "reactor-plate", "category": "crafting", "energy_required": 1, "hidden": True,
+            "ingredients": [], "results": [{"type": "item", "name": "plate", "amount": 1}],
+        }
+        entities = dict(ENTITIES)
+        entities["reactor"] = {"name": "reactor", "type": "assembling-machine", "fixed_recipe": "reactor-plate",
+                               "crafting_categories": ["crafting"], "crafting_speed": 1, "energy_usage": 1}
+        monkeypatch.setattr(bom.recipe_data, "raw", recipes)
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+        assert "reactor-plate" in bom._build_result_index()["plate"]
+
+
+class TestRawSources:
+    def test_a_fluid_a_tile_offers_and_no_recipe_makes_is_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bom.tile_data, "raw", {"lava": {"fluid": "lava"}, "oil-sea": {"fluid": "output-a"}})
+        raw = bom._mined_items()
+        assert "lava" in raw
+        # output-a is made by crack-oil, so a sea of it somewhere does not make it free.
+        assert "output-a" not in raw
+
+    def test_what_a_boiler_outputs_is_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entities = dict(ENTITIES)
+        entities["boiler"] = {"name": "boiler", "type": "boiler", "output_fluid_box": {"filter": "steam"}}
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+        assert "steam" in bom._mined_items()
+
+
+class TestSolverUnderStrain:
+    """Recipe amounts in a real chain run from 0.007 to 10 000. The first
+    solver let its tableau drift on such a chain and declared a problem with
+    non-negative costs unbounded -- which it cannot be. These programs are
+    random, denser and nastier than any real chain, and have a known feasible
+    point by construction."""
+
+    @staticmethod
+    def program(seed: int):
+        import random
+
+        rng = random.Random(seed)
+        rows, columns = rng.randint(8, 30), rng.randint(10, 60)
+
+        def magnitude() -> float:
+            return 10 ** rng.uniform(-2.2, 4)
+
+        matrix = [
+            [(magnitude() * rng.choice((1, -1)) if rng.random() < 0.25 else 0.0) for _ in range(columns)]
+            for _ in range(rows)
+        ]
+        known = [rng.random() * 3 for _ in range(columns)]
+        made = [sum(a * x for a, x in zip(row, known)) for row in matrix]
+        # Flip every row the known point makes negative, and never ask more
+        # than it makes: the known point satisfies every constraint.
+        matrix = [row if m >= 0 else [-a for a in row] for row, m in zip(matrix, made)]
+        rhs = [abs(m) * rng.random() if rng.random() < 0.3 else 0.0 for m in made]
+        cost = [magnitude() for _ in range(columns)]
+        return cost, matrix, rhs, known
+
+    def test_an_answer_is_never_wrong_and_nearly_every_program_is_answered(self) -> None:
+        solved = 0
+        for seed in range(300):
+            cost, matrix, rhs, known = self.program(seed)
+            try:
+                solution = bom._simplex(cost, matrix, rhs)
+            except bom.BillOfMaterialsError as exc:
+                assert "unbounded" not in str(exc) and "no set of crafting rates" not in str(exc), (seed, exc)
+                continue
+            solved += 1
+            for row, need in zip(matrix, rhs):
+                assert sum(a * x for a, x in zip(row, solution)) >= need - 1e-6 * max(1.0, need), seed
+            assert all(x >= 0 for x in solution), seed
+            best_known = sum(c * x for c, x in zip(cost, known))
+            assert sum(c * x for c, x in zip(cost, solution)) <= best_known * (1 + 1e-6) + 1e-9, seed
+        # 298 when this was written. The previous solver answered 52, two of them
+        # wrongly -- short of the demand, returned as if it were a bill.
+        assert solved >= 285

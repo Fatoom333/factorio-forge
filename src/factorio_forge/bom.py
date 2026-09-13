@@ -76,6 +76,7 @@ from draftsman.data import entities as entity_data
 from draftsman.data import items as item_data
 from draftsman.data import recipes as recipe_data
 from draftsman.data import resources as resource_data
+from draftsman.data import tiles as tile_data
 
 from .environment import Environment
 
@@ -290,15 +291,29 @@ def _build_result_index() -> dict[str, list[str]]:
       same problem for any fluid, vanilla or modded: unbarrelling technically
       "produces" the fluid it releases.
 
+    - `hidden: true`, unless some machine runs it as its `fixed_recipe`. A
+      hidden recipe is one no player can set in a machine: Space Age's 310
+      recycling recipes (which "produce" every component back out of the thing
+      made from it, and blew the chain for a barrel up to 470 recipes), loaders,
+      infinity chests, stack packing, Krastorio 2's item voiding. A machine
+      that runs a hidden recipe by itself is the one exception.
+
     An explicit override in `Request.recipe_choices` is validated against a
     recipe's own results directly (see `_candidate_recipes`), not this index, so
     a caller who genuinely wants such a recipe is never blocked by it.
     """
+    fixed = {
+        entity.get("fixed_recipe")
+        for entity in entity_data.raw.values()
+        if isinstance(entity, dict) and entity.get("fixed_recipe")
+    }
     index: dict[str, list[str]] = defaultdict(list)
     for name, recipe in recipe_data.raw.items():
         if recipe.get("allow_as_intermediate", True) is False:
             continue
         if recipe.get("subgroup") in _BARREL_SUBGROUPS:
+            continue
+        if recipe.get("hidden") and name not in fixed:
             continue
         for result in recipe.get("results", []):
             index[result["name"]].append(name)
@@ -412,8 +427,33 @@ def _mined_items() -> frozenset[str]:
     it, not instead of it: a profile extracted before `resources.pkl` existed
     has nothing here until it is re-extracted, and the two signals should
     agree wherever both are present anyway.
+
+    Two sources that are neither a recipe nor a resource entity are read from
+    the data too, both needed for Space Age, where without them molten iron,
+    fusion and every chain through steam came out "cannot be produced":
+
+    - a fluid some tile offers to a pump (`tile.fluid`: water, and in Space Age
+      lava, ammoniacal solution, heavy oil), **when no recipe makes it**. Lava
+      is raw; heavy oil, which oil processing makes, is not -- treating it as a
+      free supply because Fulgora has a heavy oil sea would tell a Nauvis base
+      to bring it in from outside. Water stays raw regardless (see
+      `_PUMPED_FLUIDS`);
+    - what a boiler-type entity outputs from its fixed input (`output_fluid_box.
+      filter`: steam, from a boiler or heat exchanger). Space Age also has a
+      recipe making steam from sulfuric acid and calcite, which is not how
+      anybody gets steam.
     """
     mined: set[str] = set(_PUMPED_FLUIDS)
+    made_by_recipe = set(_build_result_index())
+    for tile in tile_data.raw.values():
+        fluid = tile.get("fluid") if isinstance(tile, dict) else None
+        if fluid and fluid not in made_by_recipe:
+            mined.add(fluid)
+    for entity in entity_data.raw.values():
+        if isinstance(entity, dict) and entity.get("type") == "boiler":
+            output = (entity.get("output_fluid_box") or {}).get("filter")
+            if output:
+                mined.add(output)
     for resource in resource_data.raw.values():
         minable = resource.get("minable") or {}
         if "result" in minable:
@@ -564,7 +604,29 @@ def _signed_amount(recipe: dict, item: str, productivity: float) -> float:
     return net
 
 
+_PIVOT_TOLERANCE = 1e-7
+_FEASIBILITY_SLACK = 1e-9
+_REFRESH_EVERY = 25
+
+
 def _simplex(cost: list[float], matrix: list[list[float]], rhs: list[float]) -> list[float]:
+    try:
+        return _solve(cost, matrix, rhs, careful=False)
+    except _PrecisionLost:
+        # Once more from the start, rebuilding the tableau every few pivots
+        # and choosing columns by Bland's rule throughout: slower, and only
+        # for the rare chain the quick pass could not keep exact.
+        try:
+            return _solve(cost, matrix, rhs, careful=True)
+        except _PrecisionLost as exc:
+            raise BillOfMaterialsError(str(exc)) from None
+
+
+class _PrecisionLost(Exception):
+    pass
+
+
+def _solve(cost: list[float], matrix: list[list[float]], rhs: list[float], careful: bool) -> list[float]:
     """Minimise `cost` . x subject to `matrix` . x >= `rhs` and x >= 0.
 
     Two-phase simplex on a dense tableau: phase one drives artificial
@@ -578,101 +640,254 @@ def _simplex(cost: list[float], matrix: list[list[float]], rhs: list[float]) -> 
     them to run backwards. With `>=`, an unneeded recipe sits at zero and a
     surplus byproduct is allowed to go to waste, which is what a real factory
     does.
+
+    ## Staying numerically honest
+
+    The first version updated its tableau pivot by pivot and trusted it. On a
+    chain of a few hundred recipes whose amounts run from 0.007 to 10 000 the
+    objective row drifted -- 235 pivots in, a column showed a reduced cost of
+    -1.24e7 where recomputing gave +1.44e6 -- and it declared unbounded a
+    problem that cannot be: every recipe costs non-negative machine-seconds.
+    On random programs of that kind it solved about one in ten. Now:
+
+    - rows, columns and costs are scaled so the largest coefficient of each
+      is 1;
+    - only rows that demand something get an artificial variable;
+    - the ratio test is Harris's two-pass one: among rows that bind within a
+      hair of the smallest step, the largest pivot wins, because dividing a
+      row by 5e-8 is exactly where the tableau stopped matching its own
+      equations;
+    - the objective row is recomputed every few pivots, and before believing
+      "optimal" or "unbounded"; after a run of pivots without progress,
+      Bland's rule, which cannot cycle;
+    - artificial variables left basic at zero are pivoted out, or their row
+      dropped as redundant;
+    - the answer is checked against the original constraints. If it falls
+      short, the tableau is rebuilt from the original rows for the basis
+      reached and phase two resumes; if that fails, the whole solve runs again
+      rebuilding every ten pivots. What still falls short is reported as the
+      solver's failure, never returned as a bill.
+
+    On 300 random programs of that shape (see `tests/test_bom.py`) this
+    answers 298 and none wrongly; the first version answered 52, two of them
+    short of the demand without saying so.
     """
     constraint_count = len(matrix)
     variable_count = len(cost)
     if constraint_count == 0:
         return [0.0] * variable_count
 
+    row_scale = []
+    for row in matrix:
+        largest = max((abs(v) for v in row), default=0.0)
+        row_scale.append(1.0 / largest if largest > 0 else 1.0)
+    column_scale = []
+    for j in range(variable_count):
+        largest = max((abs(matrix[i][j]) * row_scale[i] for i in range(constraint_count)), default=0.0)
+        column_scale.append(1.0 / largest if largest > 0 else 1.0)
+    scaled_cost = [cost[j] * column_scale[j] for j in range(variable_count)]
+    cost_scale = max((abs(v) for v in scaled_cost), default=0.0) or 1.0
+    scaled_cost = [v / cost_scale for v in scaled_cost]
+
+    demanding = [i for i in range(constraint_count) if rhs[i] * row_scale[i] > _PIVOT_TOLERANCE]
     surplus_at = variable_count
     artificial_at = variable_count + constraint_count
-    width = variable_count + 2 * constraint_count
+    width = artificial_at + len(demanding)
+    artificial_of = {row: artificial_at + k for k, row in enumerate(demanding)}
 
     tableau: list[list[float]] = []
+    basis: list[int] = []
     for i in range(constraint_count):
         row = [0.0] * (width + 1)
-        row[:variable_count] = matrix[i]
+        for j in range(variable_count):
+            row[j] = matrix[i][j] * row_scale[i] * column_scale[j]
         row[surplus_at + i] = -1.0
-        row[artificial_at + i] = 1.0
-        row[width] = rhs[i]
-        if row[width] < 0:  # the right-hand side has to stay non-negative
+        row[width] = rhs[i] * row_scale[i]
+        if i in artificial_of:
+            row[artificial_of[i]] = 1.0
+            basis.append(artificial_of[i])
+        else:
+            # a . x - s = b with b <= 0 is feasible on s alone: -a . x + s = -b.
             row = [-value for value in row]
-            row[artificial_at + i] = 1.0
-            tableau.append(row)
-            continue
+            basis.append(surplus_at + i)
         tableau.append(row)
-    basis = [artificial_at + i for i in range(constraint_count)]
+
+    original = [list(row) for row in tableau]
+    row_of = list(range(constraint_count))  # tableau row -> constraint
+
+    def reinvert() -> bool:
+        # Rebuild the tableau for the current basis from the untouched rows,
+        # choosing the largest available pivot for each basic column.
+        fresh = [list(original[r]) for r in row_of]
+        free = list(range(len(fresh)))
+        placed: list[tuple[int, int]] = []
+        for column in basis:
+            best = max(free, key=lambda r: abs(fresh[r][column]), default=None)
+            if best is None or abs(fresh[best][column]) < 1e-12:
+                return False
+            free.remove(best)
+            divisor = fresh[best][column]
+            fresh[best] = [v / divisor for v in fresh[best]]
+            for r in range(len(fresh)):
+                if r != best and fresh[r][column]:
+                    factor = fresh[r][column]
+                    fresh[r] = [v - factor * p for v, p in zip(fresh[r], fresh[best])]
+            placed.append((best, column))
+        order = [r for r, _ in placed]
+        tableau[:] = [fresh[r] for r in order]
+        row_of[:] = [row_of[r] for r in order]
+        basis[:] = [c for _, c in placed]
+        return True
+
+    def reduced_costs(costs: list[float]) -> list[float]:
+        objective = [costs[j] if j < width else 0.0 for j in range(width + 1)]
+        for i, basic in enumerate(basis):
+            weight = costs[basic]
+            if weight:
+                row = tableau[i]
+                for j in range(width + 1):
+                    if row[j]:
+                        objective[j] -= weight * row[j]
+        return objective
+
+    def pivot(leaving: int, entering: int, objective: list[float]) -> None:
+        pivot_row = tableau[leaving]
+        value = pivot_row[entering]
+        pivot_row = [v / value for v in pivot_row]
+        pivot_row = [0.0 if abs(v) < 1e-14 else v for v in pivot_row]
+        tableau[leaving] = pivot_row
+        nonzero = [j for j, v in enumerate(pivot_row) if v]
+        for i in range(len(tableau)):
+            if i == leaving:
+                continue
+            factor = tableau[i][entering]
+            if factor:
+                row = tableau[i]
+                for j in nonzero:
+                    row[j] -= factor * pivot_row[j]
+                    if abs(row[j]) < 1e-14:
+                        row[j] = 0.0
+                row[entering] = 0.0
+        factor = objective[entering]
+        if factor:
+            for j in nonzero:
+                objective[j] -= factor * pivot_row[j]
+        basis[leaving] = entering
 
     def run(costs: list[float], forbidden: set[int]) -> None:
-        objective = [0.0] * (width + 1)
-        for j in range(width + 1):
-            value = costs[j] if j < width else 0.0
-            for i, basic in enumerate(basis):
-                value -= costs[basic] * tableau[i][j]
-            objective[j] = value
+        objective = reduced_costs(costs)
+        stalled = 0
+        limit = max(5000, 50 * (len(tableau) + width))
+        for step in range(limit):
+            if careful and step and step % 10 == 0 and reinvert():
+                objective = reduced_costs(costs)
+            elif step and step % _REFRESH_EVERY == 0:
+                objective = reduced_costs(costs)
+            candidates = [j for j in range(width) if j not in forbidden and objective[j] < -_PIVOT_TOLERANCE]
+            if not candidates:
+                objective = reduced_costs(costs)
+                candidates = [j for j in range(width) if j not in forbidden and objective[j] < -_PIVOT_TOLERANCE]
+                if not candidates:
+                    return
+            if careful or stalled > 50:
+                entering = min(candidates)  # Bland: cannot cycle
+            else:
+                entering = min(candidates, key=lambda j: objective[j])
 
-        for _ in range(5000):
-            entering = -1
-            best = -1e-9
-            for j in range(width):
-                if j not in forbidden and objective[j] < best:
-                    best = objective[j]
-                    entering = j
-            if entering < 0:
-                return
-
-            leaving = -1
-            best_ratio = None
-            for i in range(constraint_count):
-                if tableau[i][entering] > 1e-9:
-                    ratio = tableau[i][width] / tableau[i][entering]
-                    if best_ratio is None or ratio < best_ratio - 1e-12:
-                        best_ratio = ratio
-                        leaving = i
+            # Harris's two-pass ratio test. The first pass finds how far the
+            # entering variable may move if every basic variable may go a hair
+            # below zero; the second picks, among the rows that bind within
+            # that step, the one with the largest pivot. A tiny pivot divides
+            # the whole row by almost nothing, and that is where the tableau
+            # stopped matching its own equations.
+            column = [row[entering] for row in tableau]
+            limit_step = None
+            for i, size in enumerate(column):
+                if size > _PIVOT_TOLERANCE:
+                    step_here = (max(tableau[i][width], 0.0) + _FEASIBILITY_SLACK) / size
+                    if limit_step is None or step_here < limit_step:
+                        limit_step = step_here
+            leaving, best_ratio, best_size = -1, None, 0.0
+            if limit_step is not None:
+                for i, size in enumerate(column):
+                    if size > _PIVOT_TOLERANCE:
+                        ratio = max(tableau[i][width], 0.0) / size
+                        if ratio <= limit_step:
+                            better = size > best_size if stalled <= 50 else (leaving < 0 or basis[i] < basis[leaving])
+                            if leaving < 0 or better:
+                                best_ratio, best_size, leaving = ratio, size, i
             if leaving < 0:
-                raise BillOfMaterialsError(
-                    "the production chain has no bounded solution: a recipe could run "
-                    "arbitrarily fast without the demand ever being met"
-                )
-
-            pivot = tableau[leaving][entering]
-            tableau[leaving] = [value / pivot for value in tableau[leaving]]
-            for i in range(constraint_count):
-                if i != leaving and tableau[i][entering]:
-                    factor = tableau[i][entering]
-                    tableau[i] = [
-                        value - factor * pivot_value
-                        for value, pivot_value in zip(tableau[i], tableau[leaving])
-                    ]
-            if objective[entering]:
-                factor = objective[entering]
-                for j in range(width + 1):
-                    objective[j] -= factor * tableau[leaving][j]
-            basis[leaving] = entering
+                fresh = reduced_costs(costs)
+                if fresh[entering] < -_PIVOT_TOLERANCE:
+                    raise BillOfMaterialsError(
+                        "the production chain has no bounded solution: a recipe could run "
+                        "arbitrarily fast without the demand ever being met"
+                    )
+                objective = fresh  # the drift was the problem, not the chain
+                continue
+            stalled = stalled + 1 if best_ratio <= 1e-12 else 0
+            pivot(leaving, entering, objective)
         raise BillOfMaterialsError("the production chain did not converge to a solution")
 
-    phase_one_cost = [0.0] * width
-    for i in range(constraint_count):
-        phase_one_cost[artificial_at + i] = 1.0
-    run(phase_one_cost, forbidden=set())
-
-    leftover = sum(
-        tableau[i][width] for i, basic in enumerate(basis) if basic >= artificial_at
-    )
-    if leftover > 1e-6:
-        raise BillOfMaterialsError(
-            "no set of crafting rates can meet this demand: something asked for "
-            "cannot be produced in the amounts wanted from what is available"
-        )
+    if demanding:
+        phase_one_cost = [0.0] * width
+        for column in artificial_of.values():
+            phase_one_cost[column] = 1.0
+        run(phase_one_cost, forbidden=set())
+        leftover = sum(tableau[i][width] for i, basic in enumerate(basis) if basic >= artificial_at)
+        if leftover > 1e-7:
+            raise BillOfMaterialsError(
+                "no set of crafting rates can meet this demand: something asked for "
+                "cannot be produced in the amounts wanted from what is available"
+            )
+        # Artificials still basic sit at zero: swap each for any real column
+        # in its row, or drop the row -- it repeats the others.
+        for i in reversed(range(len(tableau))):
+            if basis[i] < artificial_at:
+                continue
+            swap = next((j for j in range(artificial_at) if abs(tableau[i][j]) > 1e-7), None)
+            if swap is None:
+                del tableau[i]
+                del basis[i]
+                del row_of[i]
+            else:
+                pivot(i, swap, [0.0] * (width + 1))
 
     phase_two_cost = [0.0] * width
-    phase_two_cost[:variable_count] = cost
-    run(phase_two_cost, forbidden=set(range(artificial_at, width)))
+    phase_two_cost[:variable_count] = scaled_cost
 
-    solution = [0.0] * variable_count
-    for i, basic in enumerate(basis):
-        if basic < variable_count:
-            solution[basic] = max(tableau[i][width], 0.0)
+    def extract() -> list[float]:
+        values = [0.0] * variable_count
+        for i, basic in enumerate(basis):
+            if basic < variable_count:
+                values[basic] = max(tableau[i][width], 0.0) * column_scale[basic]
+        return values
+
+    def shortfall(values: list[float]) -> tuple[int, float] | None:
+        for i in range(constraint_count):
+            made = sum(matrix[i][j] * values[j] for j in range(variable_count) if matrix[i][j])
+            if made < rhs[i] - 1e-6 * max(1.0, abs(rhs[i])):
+                return i, made
+        return None
+
+    run(phase_two_cost, forbidden=set(range(artificial_at, width)))
+    solution = extract()
+    # Drift that got past the ratio test: rebuild the tableau from the
+    # original rows for the basis reached, and let phase two finish from there.
+    for _ in range(3):
+        if shortfall(solution) is None or not reinvert():
+            break
+        run(phase_two_cost, forbidden=set(range(artificial_at, width)))
+        solution = extract()
+
+    for i in range(constraint_count):
+        made = sum(matrix[i][j] * solution[j] for j in range(variable_count) if matrix[i][j])
+        if made < rhs[i] - 1e-6 * max(1.0, abs(rhs[i])):
+            raise _PrecisionLost(
+                "the solver lost precision on this chain and its answer does not meet the "
+                f"demand ({made:.6g} made where {rhs[i]:.6g} is needed); this is a bug in "
+                "factorio-forge, not a property of the recipes"
+            )
     return solution
 
 
