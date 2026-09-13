@@ -675,3 +675,12 @@ class TestSolverUnderStrain:
         # 298 when this was written. The previous solver answered 52, two of them
         # wrongly -- short of the demand, returned as if it were a bill.
         assert solved >= 285
+
+
+class TestAsteroidChunks:
+    def test_what_a_collector_gathers_is_raw(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bom, "_asteroid_chunks", lambda: {
+            "metallic-asteroid-chunk": {"minable": {"result": "metallic-asteroid-chunk"}},
+            "parameter-0": {"minable": None},  # Space Age's placeholders have nothing to gather
+        })
+        assert "metallic-asteroid-chunk" in bom._mined_items()

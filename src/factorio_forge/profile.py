@@ -642,6 +642,14 @@ class Profile:
                 f"profile {self.name!r} has no extracted data; run extract_data() first"
             )
         target = self._draftsman_data_dir()
+        ours = {pickle.name for pickle in self.data_dir.glob("*.pkl")}
+        # A category this profile has no file for must not keep the previous
+        # profile's: one extracted before resources or asteroid chunks were
+        # extracted at all would otherwise read another mod set's, silently.
+        # Missing is what each loader already treats as "none".
+        for stale in target.glob("*.pkl"):
+            if stale.name not in ours:
+                stale.unlink()
         for pickle in self.data_dir.glob("*.pkl"):
             shutil.copy2(pickle, target / pickle.name)
         # Leave a marker so a later run can tell whose data is loaded without

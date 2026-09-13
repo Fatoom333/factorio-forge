@@ -408,6 +408,15 @@ def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity 
 _PUMPED_FLUIDS = frozenset({"water"})
 
 
+def _asteroid_chunks() -> dict:
+    """Space Age's asteroid chunk prototypes, or none under an older draftsman fork."""
+    try:
+        from draftsman.data import asteroid_chunks
+    except ImportError:
+        return {}
+    return asteroid_chunks.raw
+
+
 def _mined_items() -> frozenset[str]:
     """Every item/fluid a resource entity's `minable` block actually yields.
 
@@ -454,7 +463,9 @@ def _mined_items() -> frozenset[str]:
             output = (entity.get("output_fluid_box") or {}).get("filter")
             if output:
                 mined.add(output)
-    for resource in resource_data.raw.values():
+    # Space Age's asteroid chunks are gathered by a collector, not crafted;
+    # their only recipes turn chunks into chunks.
+    for resource in list(resource_data.raw.values()) + list(_asteroid_chunks().values()):
         minable = resource.get("minable") or {}
         if "result" in minable:
             mined.add(minable["result"])

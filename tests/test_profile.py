@@ -463,3 +463,25 @@ class TestStyle:
 
         self.write_reference_blueprint(profile, "region-2.txt")
         assert profile.new_reference_blueprints() == ["region-2.txt"]
+
+
+class TestActivate:
+    def test_a_category_the_profile_lacks_does_not_keep_the_last_profiles_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Draftsman's data directory is shared by the whole machine, so the
+        # test points activation at a directory of its own.
+        target = tmp_path / "draftsman-data"
+        target.mkdir()
+        (target / "entities.pkl").write_bytes(b"previous profile")
+        (target / "asteroid_chunks.pkl").write_bytes(b"previous profile's chunks")
+        monkeypatch.setattr(Profile, "_draftsman_data_dir", staticmethod(lambda: target))
+
+        profile = Profile.from_save(make_save())
+        profile.write()
+        (profile.data_dir / "entities.pkl").write_bytes(b"this profile")
+
+        profile.activate()
+
+        assert (target / "entities.pkl").read_bytes() == b"this profile"
+        assert not (target / "asteroid_chunks.pkl").exists()
