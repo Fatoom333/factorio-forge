@@ -325,9 +325,16 @@ def _product(recipe: str) -> str:
 
 class TestReview:
     def test_everything_unlocked_fills_tiers_and_runs_the_bill(self) -> None:
+        # The ingredients arrive from outside, so the bill is this one recipe:
+        # the test is about the review, not about whichever chain the first
+        # recipe of this shape happens to pull in under a given mod set.
         recipe, _ = prototypes.crafting_setup(1, 0, 1, 0)
         found = Environment("2.0", 1, "player", recipes_enabled=tuple(real_recipes.raw), bonuses=Bonuses())
-        spec = request.parse({"targets": [{"item": _product(recipe), "per_second": 1}], "plot": {}, "style": ["x"]})
+        boundary = [i["name"] for i in real_recipes.raw[recipe]["ingredients"]]
+        spec = request.parse({
+            "targets": [{"item": _product(recipe), "per_second": 1}],
+            "boundary": boundary, "plot": {}, "style": ["x"],
+        })
         result = request.review(spec, found, "made up for the test")
         assert result.problems == []
         assert set(result.tiers) >= {"belt", "inserter", "pole"}
