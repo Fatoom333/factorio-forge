@@ -20,21 +20,14 @@ dependencies = [
     # Blueprint string codec, entity prototypes, collision boxes and the
     # `draftsman update` data lifecycle that resolves an installed mod set.
     #
-    # This points at a fork, temporarily, because no released version can build
-    # game data for the mod sets we care about:
-    #
-    #   * 4.0.0 cannot run `update` at all -- it loads
-    #     `compatibility/defines/<major>.<minor>.lua`, which the published wheel
-    #     does not contain (upstream issue #227).
-    #   * 3.3.1 runs, but `require` returns a fresh copy of a module on every
-    #     call, which breaks any mod whose files share a table -- a common
-    #     layout -- and it reads a Space Age prototype without checking whether
-    #     the expansion is loaded, which fails for every mod set without it.
-    #
-    # The fork is upstream 3.3.1 plus those last two fixes and nothing else;
-    # both are reported upstream. See its FORK.md. Once they are released this
-    # goes back to a plain version specifier.
-    "factorio-draftsman @ git+https://github.com/Fatoom333/factorio-draftsman@3.3.1-forge",
+    # This points at a fork of upstream `main`, because no release can build
+    # game data for the mod sets we care about: 4.0.0 cannot run `update` at
+    # all (upstream issue #227, fixed in `main`, not released). The fork adds
+    # three fixes reported upstream and not merged yet (#235, #237, #238) and
+    # extracts resources, asteroid chunks and surfaces, which draftsman leaves
+    # out. See its FORK.md. The fixes go once they are released; the
+    # extraction stays.
+    "factorio-draftsman @ git+https://github.com/Fatoom333/factorio-draftsman@main-forge",
     # Decodes a prototype's own icon so the renderer can draw it in its real
     # colour instead of a family-level guess. See render._dominant_icon_colour.
     "pillow>=10",

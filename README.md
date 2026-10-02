@@ -58,13 +58,12 @@ pip install -e ".[dev]"
 ```
 
 > **Note.** This installs `factorio-draftsman` from
-> [a fork](https://github.com/Fatoom333/factorio-draftsman/tree/3.3.1-forge)
+> [a fork](https://github.com/Fatoom333/factorio-draftsman/tree/main-forge)
 > rather than from PyPI. No released version can extract game data for the mod
-> sets this project targets; the fork is upstream 3.3.1 plus five fixes and
-> nothing else, all reported upstream. See
-> [docs/draftsman-notes.md](docs/draftsman-notes.md) for what each one is and
-> [FORK.md](https://github.com/Fatoom333/factorio-draftsman/blob/3.3.1-forge/FORK.md)
-> for the diffs. When they are released this goes back to a plain dependency.
+> sets this project targets; the fork is upstream `main` plus three fixes
+> reported upstream and the extraction of resources, asteroid chunks and
+> surfaces. See [docs/draftsman-notes.md](docs/draftsman-notes.md) and
+> [FORK.md](https://github.com/Fatoom333/factorio-draftsman/blob/main-forge/FORK.md).
 
 Then check that the game was found:
 

@@ -60,14 +60,13 @@ pip install -e ".[dev]"
 ```
 
 > **Примечание.** Это ставит `factorio-draftsman` из
-> [форка](https://github.com/Fatoom333/factorio-draftsman/tree/3.3.1-forge), а не
+> [форка](https://github.com/Fatoom333/factorio-draftsman/tree/main-forge), а не
 > с PyPI. Ни одна выпущенная версия не умеет извлекать игровые данные для тех
-> сборок, ради которых существует проект; форк — это апстримный 3.3.1 плюс пять
-> исправлений и больше ничего, все они заведены в апстриме. Что это за
-> исправления — в [docs/draftsman-notes.ru.md](docs/draftsman-notes.ru.md),
-> сами патчи — в
-> [FORK.md](https://github.com/Fatoom333/factorio-draftsman/blob/3.3.1-forge/FORK.md).
-> После их выпуска зависимость станет обычной.
+> сборок, ради которых существует проект; форк — это апстримный `main` плюс три
+> исправления, заведённые в апстриме, и извлечение ресурсов, астероидных
+> кусков и поверхностей. Подробности — в
+> [docs/draftsman-notes.ru.md](docs/draftsman-notes.ru.md) и
+> [FORK.md](https://github.com/Fatoom333/factorio-draftsman/blob/main-forge/FORK.md).
 
 Дальше проверка того, что игра найдена:
 

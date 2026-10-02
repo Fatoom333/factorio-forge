@@ -122,8 +122,9 @@ _RULES: list[_Rule] = [
             f"It looked for the constants file for Factorio {m.group(1)} and did "
             "not find it. Version 4.0.0 of factorio-draftsman has this fault for "
             "every version: the published package omits the directory entirely.",
-            "Install factorio-draftsman 3.3.1, which ships the file the loader "
-            "expects.",
+            "Install the factorio-draftsman this project depends on (the "
+            "`main-forge` fork in pyproject.toml), which ships the file the "
+            "loader expects.",
         ),
     ),
     _rule(

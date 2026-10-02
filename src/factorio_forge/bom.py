@@ -79,6 +79,7 @@ from draftsman.data import resources as resource_data
 from draftsman.data import tiles as tile_data
 
 from . import surface as surface_rules
+from .categories import crafts, primary_category
 from .environment import Environment
 
 SPEED_FLOOR = -0.8
@@ -157,7 +158,7 @@ class Request:
         it (+300% unless the recipe says otherwise).
         """
         entry = recipe_data.raw[recipe]
-        total = self.effects_for(entry.get("category", "crafting")).productivity
+        total = self.effects_for(primary_category(entry)).productivity
         if self.environment is not None and self.environment.bonuses is not None:
             total += self.environment.bonuses.recipe_productivity.get(recipe, 0.0)
         return min(total, float(entry.get("maximum_productivity", 3.0)))
@@ -361,12 +362,11 @@ def _watts(value) -> float:
 def _machines_for(recipe_name: str, surface: str | None) -> list[str]:
     """Machines that can run a recipe -- on a surface, if one is given."""
     recipe = recipe_data.raw[recipe_name]
-    category = recipe.get("category", "crafting")
     ingredient_count = len(recipe.get("ingredients", []))
     return sorted(
         name
         for name, data in entity_data.raw.items()
-        if category in (data.get("crafting_categories") or ())
+        if crafts(data, recipe)
         and data.get("crafting_speed")
         and (data.get("ingredient_count") is None or data["ingredient_count"] >= ingredient_count)
         and (surface is None or surface_rules.allows(data.get("surface_conditions"), surface))
@@ -375,7 +375,7 @@ def _machines_for(recipe_name: str, surface: str | None) -> list[str]:
 
 def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity | None]:
     recipe = recipe_data.raw[recipe_name]
-    category = recipe.get("category", "crafting")
+    category = primary_category(recipe)
 
     override = request.machine_choices.get(category)
     if override is not None:
@@ -965,7 +965,7 @@ def _machine_seconds(recipe: str, chain: _Chain, request: Request) -> float:
     """
     entry = recipe_data.raw[recipe]
     machine = entity_data.raw[chain.machine[recipe]]
-    effects = request.effects_for(entry.get("category", "crafting"))
+    effects = request.effects_for(primary_category(entry))
     speed = machine["crafting_speed"] * (1 + max(effects.speed, SPEED_FLOOR))
     return float(entry.get("energy_required", 0.5) or 0.5) / speed
 
@@ -1047,7 +1047,7 @@ def compute(request: Request) -> BillOfMaterials:
             continue
         used.add(recipe)
         entry = recipe_data.raw[recipe]
-        category = entry.get("category", "crafting")
+        category = primary_category(entry)
         machine_name = chain.machine[recipe]
         machine = entity_data.raw[machine_name]
         effects = request.effects_for(category)
@@ -1098,7 +1098,7 @@ def compute(request: Request) -> BillOfMaterials:
     # pulls in every alternative route so the solver can price them, which
     # means most of what it considered never runs -- reporting those would
     # bury the handful of picks a reader can actually act on.
-    used_categories = {recipe_data.raw[r].get("category", "crafting") for r in used}
+    used_categories = {primary_category(recipe_data.raw[r]) for r in used}
     reported: list[Ambiguity] = []
     for ambiguity in chain.ambiguities:
         if ambiguity.kind == "recipe":

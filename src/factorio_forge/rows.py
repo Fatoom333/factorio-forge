@@ -63,6 +63,7 @@ from draftsman.data import recipes as recipe_data
 from . import environment
 from . import fluids as fluid_rules
 from . import layout
+from .categories import crafts, primary_category
 from .layout import LayoutError
 
 EAST = 4
@@ -668,8 +669,9 @@ def build_block(spec: RowBlockSpec) -> Block:
     machine_entry = entity_data.raw.get(spec.machine)
     if machine_entry is None or "crafting_speed" not in machine_entry:
         raise LayoutError(f"{spec.machine!r} is not a crafting machine in the active data")
-    category = recipe_data.raw[spec.recipe].get("category", "crafting")
-    if category not in (machine_entry.get("crafting_categories") or ()):
+    recipe_entry = recipe_data.raw[spec.recipe]
+    if not crafts(machine_entry, recipe_entry):
+        category = primary_category(recipe_entry)
         raise LayoutError(f"{spec.machine} does not craft {category!r} recipes like {spec.recipe}")
     if spec.stack not in ("mirror", "repeat") or spec.align not in ("start", "center"):
         raise LayoutError("stack is 'mirror' or 'repeat'; align is 'start' or 'center'")

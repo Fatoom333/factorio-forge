@@ -2,8 +2,9 @@
 
 What we rely on from the library, and what was verified by hand rather than
 assumed. Everything below was checked on **Factorio 2.0.77**, against
-**draftsman 3.3.1** and the fork of it described below, except where 4.0.0 is
-named explicitly.
+**draftsman 3.3.1** and the fork of it, except where 4.0.0 is named explicitly.
+Forge now runs on a fork of upstream `main` (see below); notes not re-checked
+on 4.x are still the 3.3.1 findings.
 
 [Русская версия](draftsman-notes.ru.md)
 
@@ -98,8 +99,21 @@ file shuffling and it keeps the profiles genuinely independent.
 ## Why the dependency points at a fork
 
 No released version can build game data for the mod sets this project exists to
-serve, so the dependency is temporarily a fork of upstream 3.3.1 carrying five
-fixes. Six separate defects are involved.
+serve, so the dependency is a fork: the `main-forge` branch, cut from upstream
+`main` (unreleased 4.0.1, Factorio 2.1.17 vanilla data). It carries three fixes
+reported upstream and not merged yet -- the `mod-settings.dat` encoder (#235,
+PR #236), the global `unpack` (#237), fractional amounts in `parse_energy`
+(#238) -- and extracts resources, asteroid chunks and surfaces, which draftsman
+leaves out. See its FORK.md.
+
+Until 2026-10-02 the fork was cut from 3.3.1 and carried the fixes described
+below. All of them are now in upstream `main` (#227-#233) and the fork takes
+upstream's own form; they are kept here for the reasoning. Two differ from
+what the fork did: `get_order` has no fallback for a missing item, and an
+inserter's unknown pickup or drop position is `None`, not `(0, 0)`.
+
+Upstream's vanilla data is now 2.1, where a recipe states `categories` (a list)
+instead of `category`; forge reads both through `factorio_forge.categories`.
 
 Four of them share a shape worth naming, because it predicts where the next one
 will be: the code trusts prototype data to take one particular form when
@@ -110,8 +124,8 @@ until a mod does something equally legal and different.
 **4.0.0 cannot run `update` at all.** It loads
 `compatibility/defines/<major>.<minor>.lua`, and the published wheel does not
 contain that directory, so every run dies on a missing file regardless of game
-version or mods. Reported as upstream issue #227. This rules out the 4.x line,
-which is also why the fork branches from the `3.3.1` tag rather than `main`.
+version or mods. Reported as upstream issue #227 and fixed in `main`, which is
+why the fork is now cut from `main` rather than from a release.
 
 **`require` does not return the cached module.** `compatibility/interface.lua`
 clears `package.loaded` after every call, so requiring the same file twice

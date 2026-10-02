@@ -45,6 +45,7 @@ from draftsman.data import items as item_data
 from draftsman.data import recipes as recipe_data
 
 from . import paths, slang
+from .categories import recipe_categories
 
 KINDS = ("item", "fluid", "recipe", "entity")
 
@@ -352,7 +353,7 @@ def find(
         for name, data in _raw(kind).items():
             if not isinstance(data, dict):
                 continue
-            if kind == "recipe" and data.get("category") == "recycling":
+            if kind == "recipe" and "recycling" in recipe_categories(data):
                 continue
             held = found.get(name)
             titles = {lang: t for lang in languages if (t := title(kind, name, lang, locale))}

@@ -20,6 +20,8 @@ import pytest
 
 from draftsman.data import entities, items, recipes
 
+from factorio_forge.categories import crafts, recipe_categories
+
 
 def _buildable() -> set[str]:
     """Entities some item places, which is what a player can actually build.
@@ -324,7 +326,7 @@ def crafting_setup(solids_in: int, fluids_in: int, solids_out: int, fluids_out: 
     )
     for name in sorted(recipes.raw):
         recipe = recipes.raw[name]
-        if not recipe or recipe.get("category") == "recycling":
+        if not recipe or "recycling" in recipe_categories(recipe):
             continue
         parts = lambda key, fluid: [  # noqa: E731
             p for p in recipe.get(key, []) if (p.get("type") == "fluid") == fluid
@@ -339,13 +341,12 @@ def crafting_setup(solids_in: int, fluids_in: int, solids_out: int, fluids_out: 
             continue
         if any("amount" not in p for p in recipe.get("results", [])):
             continue
-        category = recipe.get("category", "crafting")
         for machine in machines:
             data = entities.raw[machine]
             boxes = data.get("fluid_boxes") or []
             inputs = sum(1 for b in boxes if b.get("production_type") == "input")
             outputs = sum(1 for b in boxes if b.get("production_type") == "output")
-            if category not in data["crafting_categories"]:
+            if not crafts(data, recipe):
                 continue
             if fluids_in and (inputs < fluids_in or inputs % fluids_in):
                 continue

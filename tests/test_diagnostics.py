@@ -72,7 +72,7 @@ class TestRecognisedFailures:
         result = diagnostics.diagnose(MISSING_DEFINES)
         assert result.category == "library-game-version-mismatch"
         assert "2.0" in result.detail
-        assert "3.3.1" in result.remedy
+        assert "main-forge" in result.remedy
 
     def test_game_path_pointing_at_the_wrong_directory(self) -> None:
         result = diagnostics.diagnose(WRONG_GAME_PATH)
