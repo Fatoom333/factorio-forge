@@ -31,6 +31,8 @@ whatever is out there.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Iterable, Iterator
@@ -569,10 +571,11 @@ def entities_without_power(layout: Layout) -> Iterator[Finding]:
         reach = _raw(pole).get("supply_area_distance") or 0
         px = pole.tile_position.x + pole.tile_width / 2
         py = pole.tile_position.y + pole.tile_height / 2
-        span = int(reach)
-        for dx in range(-span, span + 1):
-            for dy in range(-span, span + 1):
-                covered.add((int(px + dx), int(py + dy)))
+        # Every tile the supply square touches; floor, not int(): int() rounds
+        # toward zero and shifted the square by a tile at negative coordinates.
+        for tx in range(math.floor(px - reach), math.ceil(px + reach)):
+            for ty in range(math.floor(py - reach), math.ceil(py + reach)):
+                covered.add((tx, ty))
 
     for entity in layout.entities:
         if not _needs_electricity(entity):

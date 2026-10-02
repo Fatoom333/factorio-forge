@@ -557,7 +557,11 @@ class Profile:
             "1" if verbose else "0",
         ]
 
-        result = subprocess.run(command, capture_output=True, text=True)
+        # Mod Lua errors can carry text in the system code page; replacing what
+        # does not decode keeps the error readable instead of losing it.
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
         if result.returncode == 0:
             self._store_extracted_data()
             self.data_fingerprint = self.measure_data()

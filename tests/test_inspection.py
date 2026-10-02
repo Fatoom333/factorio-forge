@@ -319,6 +319,35 @@ class TestCombinatorsAndPower:
                            recipe=recipe())
         assert "unpowered" not in codes(bp)
 
+    def test_supply_reaches_as_far_west_as_east_at_negative_coordinates(self) -> None:
+        """int() rounds toward zero, which shifted the supply square by a tile
+        once coordinates went negative: a machine at the western edge of the
+        area was called unpowered while its mirror image to the east was not."""
+        import math
+
+        from draftsman.data import entities as data
+
+        def width(name: str) -> int:
+            (x0, _), (x1, _) = data.raw[name]["collision_box"]
+            return math.ceil(x1 - x0)
+
+        # an odd-sized pole: its centre is a half tile, where int() went wrong
+        odd = [name for name, raw in data.raw.items()
+               if raw.get("type") == "electric-pole" and raw.get("supply_area_distance")
+               and width(name) % 2 == 1 and "player-creation" in raw.get("flags", [])]
+        if not odd:
+            pytest.skip("no odd-sized electric pole in the active game data")
+        p, a = odd[0], assembler()
+        reach = data.raw[p]["supply_area_distance"]
+        px = -50 + width(p) / 2                      # centre of the pole
+        west_edge = math.floor(px - reach)           # last tile the area touches
+        east_edge = math.ceil(px + reach) - 1
+        for machine_x in (west_edge - width(a) + 1, east_edge):
+            bp = Blueprint()
+            bp.entities.append(p, tile_position=(-50, -50))
+            bp.entities.append(a, tile_position=(machine_x, -51), recipe=recipe())
+            assert "unpowered" not in codes(bp), machine_x
+
     def test_a_pole_out_of_reach_of_the_others(self) -> None:
         bp = Blueprint()
         bp.entities.append(pole(), tile_position=(0, 0))

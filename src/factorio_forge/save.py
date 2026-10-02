@@ -1,10 +1,15 @@
 """Read what a Factorio save was made with, without launching the game.
 
 A save is a zip whose real contents (``level.dat*``) are Factorio's internal
-serialisation: undocumented, version-specific and not worth parsing. The header
-in ``level-init.dat`` is a different matter. It begins with the game version and
-the exact list of mods and their versions that the save requires, in a simple
+serialisation: undocumented, version-specific and not worth parsing. Their
+header is a different matter. It begins with the game version and the exact
+list of mods and their versions that the save requires, in a simple
 length-prefixed layout that has been stable for a long time.
+
+The header comes from ``level.dat0`` (zlib-compressed in 2.0). ``level-init.dat``
+has the same layout but records the map as it was *created*: a mod added to the
+save later is missing there, so it is only the fallback for saves whose
+``level.dat0`` does not parse.
 
 That header is all we need to tell one of the player's saves from another and to
 assemble the right mod set for it, so this module reads it and nothing else. For
@@ -24,6 +29,7 @@ from __future__ import annotations
 
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -218,11 +224,47 @@ def _try_parse_mod_table(data: bytes, offset: int) -> tuple[ModRef, ...] | None:
 # --------------------------------------------------------------------------
 
 
+def _level_dat0_head(archive: zipfile.ZipFile) -> bytes | None:
+    """The start of ``level.dat0``, decompressed when it is compressed."""
+    entry = next((n for n in archive.namelist() if n.endswith("/level.dat0")), None)
+    if entry is None:
+        return None
+    with archive.open(entry) as handle:
+        raw = handle.read(256 * 1024)
+    try:
+        return zlib.decompressobj().decompress(raw, 64 * 1024)
+    except zlib.error:
+        return raw[: 64 * 1024]
+
+
+def _parse_current_header(save_path: Path, head: bytes | None) -> SaveInfo | None:
+    """The save's current version and mods from ``level.dat0``, if they parse."""
+    if head is None or len(head) < 16:
+        return None
+    version = (
+        int.from_bytes(head[0:2], "little"),
+        int.from_bytes(head[2:4], "little"),
+        int.from_bytes(head[4:6], "little"),
+    )
+    if version < MIN_PARSEABLE:
+        return None
+    for offset in range(8, min(_SEARCH_LIMIT, len(head))):
+        mods = _try_parse_mod_table(head, offset)
+        if mods is not None:
+            return SaveInfo(
+                path=save_path, name=save_path.stem, game_version=version, mods=mods
+            )
+    return None
+
+
 def read_save_info(save_path: Path) -> SaveInfo:
     """Read the game version and mod set a save requires."""
     save_path = Path(save_path)
     try:
         with zipfile.ZipFile(save_path) as archive:
+            current = _parse_current_header(save_path, _level_dat0_head(archive))
+            if current is not None:
+                return current
             entry = next(
                 (n for n in archive.namelist() if n.endswith("level-init.dat")), None
             )

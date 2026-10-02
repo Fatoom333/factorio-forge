@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import struct
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,20 @@ class TestReadSaveInfo:
         assert len(info.mods) == 3
         assert info.mod_names == {"base", "Krastorio2", "flib"}
         assert save.ModRef("Krastorio2", (2, 0, 19)) in info.mods
+
+    def test_mods_added_after_creation_come_from_level_dat0(self, tmp_path: Path) -> None:
+        """level-init.dat keeps the mods the map was created with.
+
+        A mod added to the save later is only in the compressed level.dat0, so
+        a player who added Factorissimo to their save got a profile without it.
+        """
+        created = build_header(mods=[("base", (2, 0, 77))])
+        current = build_header(mods=[("base", (2, 0, 77)), ("factorissimo", (3, 11, 19))])
+        path = tmp_path / "Grown.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("Grown/level-init.dat", created + b"\x00" * 512)
+            archive.writestr("Grown/level.dat0", zlib.compress(current + b"\x00" * 512))
+        assert save.read_save_info(path).mod_names == {"base", "factorissimo"}
 
     def test_name_comes_from_the_filename(self, tmp_path: Path) -> None:
         path = write_save(tmp_path, build_header(), name="Мой сейв")

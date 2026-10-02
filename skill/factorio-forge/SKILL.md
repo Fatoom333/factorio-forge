@@ -248,6 +248,31 @@ straight runs, underground belts or pipes to cross a line, a splitter to
 share. Rebuild; the same checks run over hand-placed entities. Keep two
 different fluids' pipes from touching -- `fluids-mixed` catches it.
 
+### Grid-snapped sections (walls, lines of modules)
+
+For a book of sections the player places side by side ("быстро разворачивать"):
+
+- Blueprint keys `snap-to-grid: {x, y}` and `absolute-snapping: true`; the grid
+  cell is (0,0)..(x,y) in blueprint coordinates (confirmed in game).
+- Draw every section for one side only (e.g. outside to the north) and let the
+  player turn it with R. Rotation keeps a clockwise belt ring clockwise;
+  mirroring reverses it -- say "rotate, do not flip".
+- Make the cell a whole number of modules and of any repeating pattern's
+  period along the line, so modules and pattern continue across joints.
+- A corner meets two differently turned neighbours: anything that runs across
+  the joints (a maze pattern, belts, a pipe chain) must continue both. Split a
+  pattern along the diagonal: one side's pattern above it, the other side's
+  below. A corner drawn for one position fails in the other three.
+- Check by assembling a test ring from turned copies, not each section alone:
+  belts closed and each feeder reaching its ring, one pipe network with only
+  the intended inlet, power, roboport coverage, the pattern carried a few tiles
+  into each neighbour. Check power by the blueprints' wires, not by distance.
+- Poles built from a blueprint do **not** connect to neighbours by themselves,
+  even within reach (seen in game), and a blueprint cannot wire to another
+  blueprint. Put one pole straddling each joint in *both* neighbouring
+  sections at the same spot, wired inside each section: the second paste
+  lands on the first one's pole and its wires attach to it.
+
 ## 7. Hand over
 
 - Give the blueprint as a **file**, not pasted into chat: long strings pasted
@@ -256,6 +281,26 @@ different fluids' pipes from touching -- `fluids-mixed` catches it.
   capacity, belts in and out with rates, what arrives from outside.
 - Say what was assumed (stack bonus, recipe choices from `ambiguities`) and
   what is not checked (below).
+
+## Factory buildings (Factorissimo)
+
+When the mod set has Factorissimo 3 (`factory-1/2/3`), a design inside a
+building is several blueprints: the exterior (it carries only `tags.id`, not
+the floor), the floor inside, and the floor of each nested building. Hand
+them over separately with the order to place them.
+
+- Ports: a normal-quality `factory-3` has 8 per side; each belt port is one
+  full belt. Everything that enters or leaves goes through the outermost
+  building's 32 ports, so nesting adds room, not throughput.
+- The floor is powered everywhere; the exterior needs a pole whose area
+  touches the building (the checker does not flag it).
+- Keep the door (middle of the south wall) clear; cross it underground.
+- Details and port coordinates: `CONTEXT.md`, "Factorissimo и песок".
+
+Beacons are placed by hand for now. A beacon's effect falls as 1/sqrt(n)
+with the number of beacons on a machine, and a machine more than two tiles
+from a beacon's edge is out of reach. "Researched" in the export is not
+"produced": ask which module tier the player actually makes.
 
 ## When the tools refuse
 
