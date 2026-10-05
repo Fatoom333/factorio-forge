@@ -16,12 +16,32 @@ a plan of blocks, build it, read the report, look at the drawing, revise.
 Placing entities by hand is for the short connections between blocks, and
 those are checked too.
 
-All commands run from the factorio-forge checkout with its environment:
+All commands run with the Python environment inside the player's
+factorio-forge checkout (the cloned repository, with a `.venv` folder made by
+its README's setup). Find the checkout once per conversation:
+
+1. The working directory, or a folder above it, if it holds `pyproject.toml`
+   with `name = "factorio-forge"` and a `.venv` folder.
+2. If this skill's folder is a link into the checkout (the README installs it
+   that way), follow it: the link points at `skill/factorio-forge`, two levels
+   below the checkout. PowerShell: `(Get-Item "$env:USERPROFILE\.claude\skills\factorio-forge").Target`;
+   bash: `readlink -f ~/.claude/skills/factorio-forge`.
+3. Otherwise ask the player where they cloned factorio-forge. If they have
+   not, point them to the README's setup; do not install it yourself unasked.
+
+Then run every command with that checkout's Python:
 
 ```
-cd <factorio-forge>
-.\.venv\Scripts\python.exe -m factorio_forge.cli <command>
+# Windows
+& "<checkout>\.venv\Scripts\python.exe" -m factorio_forge.cli <command>
+# Linux, macOS
+"<checkout>/.venv/bin/python" -m factorio_forge.cli <command>
 ```
+
+`factorio-forge <command>` below is short for this. Start with `paths`: it
+shows where the game, its saves and its mods were found. Relative file paths
+(`request.json`, `plan.json`, `src/factorio_forge/slang.py`) are relative to
+your working directory, so working inside the checkout keeps them simple.
 
 ## 0. Know which game you are designing for
 
