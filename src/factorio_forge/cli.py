@@ -143,6 +143,28 @@ def _cmd_activate_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_notes(args: argparse.Namespace) -> int:
+    from .profile import Profile, ProfileError
+
+    name = args.profile or Profile.active_profile_name()
+    if not name:
+        print("no active profile — name one, or activate it first", file=sys.stderr)
+        return 1
+    try:
+        profile = Profile.load(name)
+    except ProfileError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"profile:   {profile.directory}")
+    print(f"notes:     {profile.notes_path}" + ("" if profile.notes_path.exists() else " (missing)"))
+    reference = profile.directory / "reference"
+    if reference.is_dir():
+        files = sorted(p.name for p in reference.iterdir() if p.is_file())
+        print(f"reference: {reference}" + (f" ({len(files)} files)" if files else " (empty)"))
+    return 0
+
+
 def _cmd_list_profiles(_: argparse.Namespace) -> int:
     from .profile import Profile
 
@@ -579,10 +601,23 @@ def _cmd_build(args: argparse.Namespace) -> int:
             print(f"  row {row['index'] + 1}: {row['machines']}{limit}")
         for port in block.ports:
             items = " | ".join(i or "-" for i in port["items"])
-            print(f"  {port['io']:3s} {port['kind']:4s} ({port['x']}, {port['y']}) flowing {port['direction']}: "
-                  f"{items} at {port['rate']:.4g}/s")
+            print(f"  [{port['index']}] {port['io']:3s} {port['kind']:4s} ({port['x']}, {port['y']}) "
+                  f"flowing {port['direction']}: {items} at {port['rate']:.4g}/s")
         for note in block.notes:
             print(f"  note: {note}")
+    if result.routes:
+        print("\nroutes:")
+        for r in result.routes:
+            if not r.ok:
+                print(f"  route {r.id}: FAILED - {r.reason}")
+                continue
+            line = f"  route {r.id}: {r.kind} {_plural(r.length, 'tile', 'tiles')}"
+            if r.hops:
+                line += f", {_plural(r.hops, 'underground pair', 'underground pairs')}"
+            line += f", {_plural(r.turns, 'turn', 'turns')}"
+            if r.lanes:
+                line += f", {'lanes' if r.kind == 'belt' else 'carries'} " + "|".join(i or "-" for i in r.lanes)
+            print(line)
     shown = [f for f in result.findings if f.severity.value != "note"]
     if shown:
         print(f"\n{_plural(len(shown), 'finding', 'findings')}:")
@@ -729,6 +764,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "list-profiles", help="list every profile, and which one is active"
     ).set_defaults(func=_cmd_list_profiles)
+
+    notes = sub.add_parser(
+        "notes", help="show where a profile's folder, notes.md and reference blueprints are"
+    )
+    notes.add_argument("profile", nargs="?", help="the profile (default: the active one)")
+    notes.set_defaults(func=_cmd_notes)
 
     draw = sub.add_parser("render", help="draw a blueprint string as an HTML page")
     draw.add_argument("blueprint", help="a blueprint string, or a file containing one")

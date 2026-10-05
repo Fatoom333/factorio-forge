@@ -104,6 +104,27 @@ class TestPersistence:
             Profile.load("nothing-here")
 
 
+class TestNotesCommand:
+    def test_prints_the_notes_and_reference_paths(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from factorio_forge import cli
+
+        profile = Profile.from_save(make_save())
+        profile.write()
+        (profile.directory / "reference").mkdir()
+        (profile.directory / "reference" / "layout.txt").write_text("0e", encoding="utf-8")
+
+        assert cli.main(["notes", profile.name]) == 0
+        out = capsys.readouterr().out
+        assert str(profile.notes_path) in out
+        assert "(1 files)" in out
+
+    def test_an_absent_profile_is_an_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from factorio_forge import cli
+
+        assert cli.main(["notes", "nothing-here"]) == 1
+        assert "no profile" in capsys.readouterr().err
+
+
 class TestFromSave:
     def test_carries_the_save_across(self) -> None:
         profile = Profile.from_save(make_save())

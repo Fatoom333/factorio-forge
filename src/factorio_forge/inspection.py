@@ -186,7 +186,8 @@ def _resolve(part):
 
 
 def _raw(entity) -> dict:
-    return entity_data.raw.get(entity.name, {})
+    """The prototype data of an entity, or of a prototype given by name."""
+    return entity_data.raw.get(entity if isinstance(entity, str) else entity.name, {})
 
 
 def underground_reach(entity) -> int | None:
@@ -198,7 +199,7 @@ def underground_reach(entity) -> int | None:
     undergrounds reaching thirty and forty.
 
     Belts state it plainly; pipes bury it in their fluid box, which is a
-    different place for the same idea.
+    different place for the same idea. Takes an entity or a prototype name.
     """
     raw = _raw(entity)
     plain = raw.get("max_distance")

@@ -25,6 +25,7 @@ exact geometry, and compiler and checker feedback comes back to the model.
 | `rows.py` | Where every machine, inserter, belt, pipe and pole of a block of rows goes |
 | `fluids.py` | Which fluid a recipe puts in which fluid box; which pipes form one network |
 | `plan.py` | A plan of blocks and hand-placed entities in, a blueprint and a report out |
+| `route.py` | The belts and pipes between ports: a search that obeys the game's rules, or the reason it cannot |
 
 ## Capacity: lanes, not belts
 
@@ -86,6 +87,103 @@ boxes and two fluids -- the first two boxes get the first fluid). An uneven
 split is refused rather than guessed. Results are assumed to follow the same
 rule.
 
+## Connecting blocks
+
+A plan lists `connections`, each joining an out port (or a point) to an in
+port (or a point). `route.py` finds the pieces; nothing is drawn by hand.
+
+```json
+"connections": [
+  {"id": "feed", "from": {"block": 0, "port": 3, "items": ["<item>"]},
+   "to": {"block": 1, "port": 0},
+   "belt": "<belt>", "underground": "<underground belt>",
+   "via": [[x, y]], "turn_cost": 1.0, "hop_cost": 2.0},
+  {"kind": "pipe", "from": {"at": [x, y], "direction": 4, "items": ["<fluid>"], "rate": 20},
+   "to": {"block": 1, "port": 2}, "pipe": "<pipe>", "pipe_to_ground": "<pipe-to-ground>"}
+],
+"routing": {"margin": 3, "max_nodes": 200000, "reserve": [[x0, y0, x1, y1]]}
+```
+
+- **Ports** are named by their index in the block's report (`[j]` in the
+  build output). An optional `items` on a port reference guards against
+  renumbering: the build refuses if the port carries something else.
+- **Points** say where the first piece goes and which way things flow (as
+  `from`), or where the last piece goes and which way it faces (as `to`; the
+  tile past it is left open, and no piece of the route stands there). If
+  something already stands on that tile, the route must continue it
+  straight: a belt, underground entrance or splitter carrying the same way
+  (not a curve, which the route would straighten into a side-load), or for a
+  pipe a fluid connection facing back; anything else is `route-failed`. A
+  belt point's `items` are `[left, right]`, one item for both lanes.
+- **Prototypes** not named come from the blocks at either end: their belt,
+  pipe and pipe-to-ground. The underground belt is the one the belt prototype
+  names in `related_underground_belt`, else the only one of its speed;
+  `false` forbids hops.
+- `via` tiles are covered in order by surface pieces; `reserve` keeps tiles
+  free for later (undergrounds may pass beneath); `margin` is how far past
+  everything in the plan the search may go.
+
+**Joins and lanes.** A route leaves an out port straight from its last tile
+and enters an in port with a straight join into its first tile. A straight
+belt, a curve fed by one plain belt and an underground pair all keep the left
+lane on the left, and the route never curves right after an underground exit
+(still to be confirmed in the game), so it delivers the source's lanes
+unchanged. Lanes that do not match the destination are a problem; swapped
+lanes are said to be swapped -- a route cannot swap them. A destination
+naming one item for both lanes (a block's single-ingredient input) takes it
+from either lane, so a source with that item on one lane -- a block's output
+-- fits; `route-belt-slow` judges whether one lane is enough.
+
+**Reach** is read per prototype: `max_distance` of an underground belt,
+`max_underground_distance` of a pipe-to-ground's underground connection. It
+is the largest difference, in tiles along the axis, between the two ends, so
+at most reach - 1 tiles lie between them -- the same `range(1, reach + 1)` the
+checker walks. Which way a pipe-to-ground faces at each end comes from the
+direction of its underground connection, not from an assumption.
+
+**Rules every piece obeys.**
+
+- No piece on an occupied, reserved or out-of-area tile.
+- A belt piece never stands where something already pushes items (a belt or
+  underground exit pointing at the tile, a splitter, a loader, a drill's drop)
+  or where an inserter takes or drops. Each piece points into the next free
+  tile, so a route never side-loads into a foreign belt either.
+- A pipe piece is refused if one of its connections meets a foreign
+  connection pointing back with a category in common -- the rule
+  `fluids.networks` joins pieces by. Only the first piece may join what stands
+  behind the start, and only the last what stands where it points. A
+  pipe-to-ground has no side connections, which is why it is the generic way
+  past a pipe of another fluid.
+- An underground hop may not pass an end of the same prototype on its line
+  and axis, end inside an existing pair of that prototype, or come within
+  reach of a lone end of it: any of these would pair with the wrong partner.
+  Other prototypes and crossings at right angles are free.
+
+**Order.** Every connection is resolved before any is routed, so a malformed
+plan is refused whole. Routes then go one by one in plan order, each an
+obstacle for the next; no route is ripped up for another. The one rip-up is
+within a route: when `via` tiles make the cheapest path come back over its
+own earlier tiles, those tiles are kept out of the later part and the search
+runs again (a few times at most; otherwise `route-failed` says where the path
+crossed itself). After routing, the
+general checks run over everything, so `belts-head-on`,
+`underground-unpaired`, `overlap` and `fluids-mixed` independently catch a
+router mistake.
+
+**Findings.** `route-failed` (nothing of that route is placed; the reason
+names the blocked start, goal or via tile, the tile the search came closest
+from and what blocked it, or the exhausted budget), `route-lanes`,
+`route-belt-slow`, and notes `route-lanes-unknown`, `route-short-supply`,
+`route-no-underground`, `route-underground-speed`, `route-tiles-unchecked`.
+The report has a `routes` list with each route's pieces, length, turns,
+underground pairs, lanes and reason.
+
+**Out of scope** in v1: splitters, merges, one source to several
+destinations, balancers, lane swaps, deliberate side-loading, joining a belt
+mid-line; ripping up one route for another; map terrain (water, cliffs, ore, an existing
+base -- `reserve` stands in); pipe throughput and pumps; pieces larger than one
+tile; rails and robots. A port used twice is refused.
+
 ## Checks in a build
 
 `factorio-forge build` runs the general checker (`docs/checking.md`) and
@@ -111,4 +209,4 @@ with a substation.
 - Inserter pickup from a moving belt (the rate is an upper bound).
 - Pipe throughput over long runs.
 - Modules and beacons as entities; `speed_bonus` only changes numbers.
-- Routing between blocks, train stations, bus composition.
+- Splitting and merging, train stations, bus composition.
