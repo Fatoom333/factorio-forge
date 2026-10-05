@@ -6,10 +6,12 @@ mod set and the way *you* build.
 [Русская версия](README.ru.md)
 
 > **Status: early development.** Reading saves, building profiles, extracting
-> game data and drawing a blueprint all work — every distinct mod set in a real
-> save folder of a hundred saves builds, and any blueprint string can be
-> rendered. What is not written yet is the part that *produces* blueprints: the
-> companion mod, style measurement and the generators.
+> game data, drawing and checking a blueprint, reviewing a request against your
+> game, counting machines, laying out rows of them and routing belts and pipes
+> from one block's port to another's all work, and a companion mod exports what
+> only the running game knows. Generators for whole blocks, splitters and
+> balancers between blocks, and trains are not written yet; those parts are done
+> by hand with the tool's checks.
 
 ## What it is
 
@@ -31,11 +33,12 @@ blueprints you already use — and generating inside that profile's conventions.
   [`factorio-draftsman`](https://github.com/redruin1/factorio-draftsman), which
   runs Factorio's real Lua data lifecycle over your installed mods. Mod
   interactions are resolved by the game's own rules rather than guessed.
-- **Your base and its research state** will come from a small companion mod that
+- **Your base and its research state** come from a small companion mod that
   exports them from inside the game, where the game itself acts as the parser.
-  *(Not written yet.)*
 - **Your building style** is measured from reference blueprints rather than
-  asked for in a questionnaire. *(Not written yet.)*
+  asked for in a questionnaire, and kept with the profile.
+- **Your preferences and corrections** accumulate in the profile's `notes.md`,
+  in your own words, and are read back when designing.
 
 ## Requirements
 
@@ -104,6 +107,9 @@ on the drawing. See [docs/checking.md](docs/checking.md).
 
 - [Profiles](docs/profiles.md) — what a profile is, how mod sets are resolved,
   and why extraction happens once
+- [The request](docs/request.md) — step 1: what is asked for, and what the game
+  knows
+- [Layout](docs/layout.md) — from a decision to a checked blueprint
 - [Rendering](docs/rendering.md) — how a blueprint is drawn, and what is
   deliberately left out
 - [Checking](docs/checking.md) — what is reported, why nothing is corrected,

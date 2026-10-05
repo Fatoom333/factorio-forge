@@ -28,6 +28,7 @@ cd <factorio-forge>
 ```
 factorio-forge list-profiles        # which save profiles exist, which is active
 factorio-forge activate-profile NAME
+factorio-forge notes [NAME]         # where the profile's notes.md and reference blueprints are
 factorio-forge available            # belts, inserters, poles the player has; bonuses
 factorio-forge show-style NAME      # measured spacing, alignment, symmetry, orientation
 ```
@@ -35,6 +36,20 @@ factorio-forge show-style NAME      # measured spacing, alignment, symmetry, ori
 Every number below comes from the active profile. A blueprint designed against
 the wrong profile is wrong in ways nothing will flag. If the player's save has
 no profile yet: `factorio-forge create-profile <save>`.
+
+**Read the profile's `notes.md` before designing.** Every profile has one: the
+base's accumulated preferences in the player's own words -- conventions to
+follow, things to avoid, corrections made to earlier designs. What the notes
+say beats the generic defaults in this skill. When the player corrects a
+design, or states a standing preference about their base, append it to that
+file (one dated line, in their words), not to this skill: the skill is for
+every player, the notes are for this base only.
+
+`factorio-forge notes [NAME]` prints where it is, with the profile's folder
+and its `reference/` folder if there is one: the player's own blueprints the
+notes were measured from. A note tagged with a `reference/` file holds only
+for that blueprint; when the player gives a new version, replace the file and
+re-measure every note that names it.
 
 What the player has *unlocked*, and the bonuses research has given them
 (inserter hand size, recipe productivity, mining productivity), only the
@@ -49,7 +64,7 @@ inserter hands as 1.
 The player's words are yours to read; the toolkit checks your reading.
 
 **Turn every thing they name into a prototype name**, never from memory --
-mods rename things (Krastorio 2's red science is a "tech card"):
+mods rename things (a mod may give red science another name altogether):
 
 ```
 factorio-forge find красные колбы
@@ -107,8 +122,8 @@ against the game's own files.
 - **machine_choices** (by crafting category), **recipe_choices** (by item):
   only what the player asked for.
 - **effects**: modules and beacons per crafting category, as bonus fractions.
-- **plot**: the space and its shape; a hexagonal city block is not a
-  rectangle.
+- **plot**: the space and its shape; give the outline of a non-rectangular
+  plot, not its bounding box.
 - **style**: what they said about looks, in their words.
 - **surface**: the planet or platform it is built on. It decides what is free
   to mine, pump or collect there and which recipes and machines work (Space
@@ -200,13 +215,14 @@ inputs enter at the west end, outputs leave at the east end.
 Design rules, with the reason for each:
 
 - **Never plan a row longer than its capacity.** An overfed row looks built
-  and runs at a fraction; the player's own base does this twenty times.
-  More machines than one row holds means more rows.
+  and runs at a fraction, and players' own bases are full of them. More
+  machines than one row holds means more rows.
 - **Fill rows toward capacity** when the plot allows: a short row wastes a
   belt's worth of corridor.
 - **Mirror by default.** Neighbouring rows share their output belt (each fills
   one lane) and their input belts (each gets half), and fluid-only rows share
-  their pipe. It is also how the player builds.
+  their pipe. It is also a common way to build; `show-style` says whether this
+  player does.
 - **An inserter drops on one lane.** A lone row's output belt is half full at
   best; two mirrored rows fill it.
 - **Two ingredients on one belt get one lane each.** If one of them is much
@@ -243,14 +259,33 @@ whether a player would build it this way. Revise the plan, not the output.
 
 ## 6. Connect blocks
 
-Use port coordinates to lay the connecting belts and pipes in `entities`:
-straight runs, underground belts or pipes to cross a line, a splitter to
-share. Rebuild; the same checks run over hand-placed entities. Keep two
-different fluids' pipes from touching -- `fluids-mixed` catches it.
+Write `connections` from the port indices the build report prints (`[j]`
+under each block): `{"from": {"block": 0, "port": 3, "items": [...]}, "to":
+{"block": 1, "port": 0}}`. A point (`{"at": [x, y], "direction": d, "items":
+[...], "rate": r}`) stands for a blueprint edge or anything outside the plan.
+Put `items` on port references: if a block change renumbers its ports, the
+build refuses instead of joining the wrong ones. Belt, underground,
+pipe and pipe-to-ground default to the blocks' own; name them to override,
+`"underground": false` to stay on the surface.
+
+The router finds the pieces and obeys what the game would: no side-loading,
+nothing in an inserter's reach, no pipe touching another fluid (it goes
+underground to squeeze past), no hop that steals another pair. Underground
+reach comes from the active profile's prototypes, so mods that change it are
+followed. It joins ports straight and keeps lanes as the source has them; it
+cannot swap lanes. Routes go in plan order and each blocks the next, so put
+the hardest connection first. On `route-failed`, read the reason and the tile
+it names, then steer: a `via` tile, a larger `routing.margin`, a moved or
+rotated block, a different order, undergrounds allowed. Keep doors and
+future corridors free with `routing.reserve`.
+
+Hand-place in `entities` only what the router cannot do: splitters, merges,
+one source to several destinations, lane swaps, joins into the middle of a
+belt. The same checks run over hand-placed entities.
 
 ### Grid-snapped sections (walls, lines of modules)
 
-For a book of sections the player places side by side ("быстро разворачивать"):
+For a book of sections the player places side by side, to deploy quickly:
 
 - Blueprint keys `snap-to-grid: {x, y}` and `absolute-snapping: true`; the grid
   cell is (0,0)..(x,y) in blueprint coordinates (confirmed in game).
@@ -260,7 +295,7 @@ For a book of sections the player places side by side ("быстро разво�
 - Make the cell a whole number of modules and of any repeating pattern's
   period along the line, so modules and pattern continue across joints.
 - A corner meets two differently turned neighbours: anything that runs across
-  the joints (a maze pattern, belts, a pipe chain) must continue both. Split a
+  the joints (a repeating pattern, belts, a pipe chain) must continue both. Split a
   pattern along the diagonal: one side's pattern above it, the other side's
   below. A corner drawn for one position fails in the other three.
 - Check by assembling a test ring from turned copies, not each section alone:
@@ -289,18 +324,64 @@ building is several blueprints: the exterior (it carries only `tags.id`, not
 the floor), the floor inside, and the floor of each nested building. Hand
 them over separately with the order to place them.
 
-- Ports: a normal-quality `factory-3` has 8 per side; each belt port is one
-  full belt. Everything that enters or leaves goes through the outermost
-  building's 32 ports, so nesting adds room, not throughput.
+- Ports sit at fixed positions that depend on the building's size and quality;
+  read the mod's own layout code (`script/layout.lua` in its zip) for the
+  coordinates and counts instead of guessing. A belt port carries one full
+  belt, and the belt on it must face in (input) or out (output).
+- Everything that enters or leaves a nested design crosses the outermost
+  building's ports, so nesting adds room, not throughput.
 - The floor is powered everywhere; the exterior needs a pole whose area
   touches the building (the checker does not flag it).
 - Keep the door (middle of the south wall) clear; cross it underground.
-- Details and port coordinates: `CONTEXT.md`, "Factorissimo и песок".
 
-Beacons are placed by hand for now. A beacon's effect falls as 1/sqrt(n)
-with the number of beacons on a machine, and a machine more than two tiles
-from a beacon's edge is out of reach. "Researched" in the export is not
-"produced": ask which module tier the player actually makes.
+Beacons are placed by hand for now. A beacon's effect is not linear in the
+number of beacons on a machine: the prototype's `profile` array scales it
+(1/sqrt(n) in the base game; a mod can change it). Its reach is the prototype's
+`supply_area_distance`, measured from collision boxes, which are slightly
+smaller than the tiles a machine occupies, so a gap of exactly that many whole
+tiles is already out of reach (not yet confirmed in game). "Researched" in the
+export is not "produced": ask which module tier the player actually makes.
+
+## Lessons that hold for any base
+
+Mistakes that already happened once; check against them before handing over.
+
+- **Measure a plot by its true outline.** A bounding box, or "tiles with no
+  entity", counts the corners outside a non-rectangular plot as free and
+  invents room and split rows. Test every tile against the polygon itself
+  (point-in-polygon on the boundary you were given).
+- **Verify the numbers the player gives you.** Their base shows their style,
+  not correct capacities: recompute belt limits and row lengths for the recipe
+  at hand, and copy the grammar, not the figures.
+- **Look for the node in the player's own blueprints before inventing it.**
+  For a station, balancer, feeder or merge, find the same entities in what
+  they have shown you and copy the whole arrangement. If they have none, use a
+  standard community technique and say which, or ask. Their blueprints can be
+  unfinished too: check wires and power in them as in your own.
+- **Connected is not good.** A design can pass every connectivity check and
+  still feed one lane of a belt, or drain a chest group unevenly. Add the
+  quality checks (both lanes used, even draining) and say aloud any trade-off
+  you accept; never make one silently.
+- **Pasting over an existing build keeps its old wires.** The paste updates
+  entity settings and adds wires but never removes any, so a design that
+  removes or reroutes a wire can merge two circuit networks. Diff the wire
+  lists of old and new, name each removed wire before handing over, and offer
+  a paste-over-safe variant (a new signal on the other wire colour) or "delete
+  the old build first", and let the player choose.
+- **Water is not in a blueprint or a region export.** Only placeable tiles
+  (landfill, concrete) are carried; shoreline is not. A coastline taken from a
+  screenshot is a guess with an unknown edge: say so, keep anything that must
+  stay on land a couple of tiles from that edge, and remember that landfill in
+  a blueprint is harmless where the tile is already land.
+- **Check circuits by running them in the game.** What a combinator network does
+  lives in the engine, not in the data files; an external simulator can drift
+  silently. Use the companion mod to build and run it, and read what it records.
+- **Check what an entity really is before assuming its behaviour.** Prototype
+  `type` decides it, and mods change it: where a mod makes furnaces assembling
+  machines, a furnace needs a recipe, and "pick the recipe from the input"
+  does not apply.
+- **While iterating, look at a text tile map; render once, at the end.** Each
+  drawing costs a screenshot; one render of the final version is enough.
 
 ## When the tools refuse
 
@@ -320,4 +401,9 @@ from a beacon's edge is out of reach. "Researched" in the export is not
   lower.
 - Pipe throughput over long runs is not modelled.
 - Modules and beacons are not placed; `speed_bonus` only changes the numbers.
-- No automatic routing between blocks, no train stations; connect by hand.
+- Routing joins one port to one port only: no splitters, merges, balancers,
+  lane swaps or mid-belt joins, no rip-up and reroute across routes (they
+  are greedy in plan order), and no map terrain -- water, cliffs, ore and an
+  existing base are not obstacles unless reserved. No train stations.
+- Not yet confirmed in game: an underground pairing at exactly its reach, a
+  curve fed by an underground exit keeping both lanes.
