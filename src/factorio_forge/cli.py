@@ -103,6 +103,15 @@ def _cmd_create_profile(args: argparse.Namespace) -> int:
 
     report = profile.prepare_mods(force=args.force)
     print(f"mods: {report.summary()}")
+    for line in report.details():
+        print(f"  {line}")
+    if profile.mod_settings_source == "environment":
+        print("startup settings: from the companion mod's export, which matches this mod set")
+    else:
+        print(
+            "startup settings: the game's current mod-settings.dat "
+            "(no /forge-export with exactly this mod set yet)"
+        )
     if not report.ok:
         for mod in report.missing:
             print(f"  missing: {mod}", file=sys.stderr)

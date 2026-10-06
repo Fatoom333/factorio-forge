@@ -20,8 +20,10 @@ what exists today, not a plan.
 tests):
 
 - **Profiles from a save** — the save's mod set is read from the save file's
-  header; each profile gets its own mod folder of hard-linked archives; newer
-  mod versions are used and recorded, older or missing ones are refused
+  header; each profile gets its own mod folder of hard-linked archives
+  (copied when the profiles are on another drive, see
+  [Where things are stored](#where-things-are-stored)); newer mod versions
+  are used and recorded, older or missing ones are refused
   (`create-profile`, `activate-profile`, `list-profiles`,
   [docs/profiles.md](docs/profiles.md)).
 - **Game data extraction** through
@@ -115,15 +117,22 @@ blueprints you already use — and generating inside that profile's conventions.
 
 ## Setup
 
+The checkout can live in any folder; the skill and the commands only need its
+path.
+
 **Windows (PowerShell):**
 
 ```powershell
 git clone https://github.com/Fatoom333/factorio-forge
 cd factorio-forge
-py -3.12 -m venv .venv
+py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\factorio-forge.exe paths
 ```
+
+`py -3` takes the newest Python 3 installed, which has to be 3.10 or newer.
+`py -0p` lists the installed versions and where they are; to use a particular
+one, name it: `py -3.11 -m venv .venv`.
 
 The commands call the environment's programs by path, so nothing needs
 activating. To type plain `factorio-forge` instead, activate it with
@@ -141,6 +150,9 @@ python3 -m venv .venv
 .venv/bin/factorio-forge paths
 ```
 
+`python3 --version` has to say 3.10 or newer. If it is older, name a newer
+one that is installed: `python3.12 -m venv .venv`.
+
 > **Note.** This installs `factorio-draftsman` from
 > [a fork](https://github.com/Fatoom333/factorio-draftsman/tree/main-forge)
 > rather than from PyPI. No released version can extract game data for the mod
@@ -156,6 +168,14 @@ installs and all three platforms. Nothing needs configuring unless detection
 fails. If it finds no game, start Factorio once so it writes that log, or
 set `FACTORIO_PATH` (see [Where things are stored](#where-things-are-stored)).
 
+Next to each path it found on its own, `paths` says where the path came from:
+an environment variable, the config file, the platform's default location, or
+the game's log, with that log's date. If there are two game data folders (one
+left over from an earlier install, say) and the wrong one was picked, the old
+date gives it away; set `FACTORIO_USER_DIR` to the right folder. When the log
+in the chosen folder says the game now writes somewhere else, `paths` says that
+too.
+
 `render` and `check` work right away against the base game's data bundled with
 draftsman. For anything modded, make a profile from your save and activate it
 (below, shown as plain `factorio-forge`; on Windows without activation that is
@@ -168,6 +188,8 @@ factorio-forge activate-profile my-save
 
 `create-profile` takes a save's name as the game lists it, or a path to the
 `.zip`, and prints the profile's name and the `activate-profile` line to run.
+It names every mod it could not simply link, and why: a repacked one had macOS
+junk (a `__MACOSX` folder) in its archive, copied ones sit on another drive.
 Every mod the save uses must be in the game's mod folder. Activating a profile
 replaces the game data of the draftsman installed in this environment; see
 [docs/profiles.md](docs/profiles.md).
@@ -218,9 +240,24 @@ put it into the mod folder that `factorio-forge paths` shows as `mods_dir`,
 and enable it in the game. The tools read the research export
 from version 0.7.0 on.
 
+To see which version you have, look at the game's Mods menu, or for the
+`factorio-forge-companion_<version>.zip` with the highest version in the mod
+folder: when there are several, the game loads the highest, so older zips can
+stay.
+
 In the save, type `/forge-export` in the console or press Export in the mod's
 window. Without the export the tools still work, but ask about tiers instead of
 knowing them and treat inserter hands as 1.
+
+The export can be made before or after `create-profile`. It is a single file
+that every export replaces, and the tools read research and bonuses from it
+each time they run, as long as its mod set is exactly the active profile's;
+after exporting from another save, export again from this one. Only the
+startup settings are taken once, by `create-profile`: from a matching export
+if there is one, otherwise from the game's current `mod-settings.dat`, which is
+the same unless you have changed startup settings since playing that save.
+`create-profile` says which it used; to switch to the export, export and run it
+again with `--force` (notes and reference blueprints stay).
 
 ## Drawing a blueprint
 
@@ -274,6 +311,17 @@ Code lives in the repository. Your data does not.
 Override the location with the `FACTORIO_FORGE_HOME` environment variable. The
 game's own location can be overridden with `FACTORIO_PATH` and `FACTORIO_USER_DIR`,
 though it is normally detected.
+
+A profile's mod archives are hard links to the ones in the game's mod folder
+(`mods_dir` in `paths`) and take no space. A hard link cannot cross drives,
+though: when the profiles and the mod folder are on different drives, the
+archives are copied, and one profile can take hundreds of megabytes (230 MB
+for a Space Age save with 42 mods); `create-profile` reports how much it
+copied. To keep hard links, point `FACTORIO_FORGE_HOME` at a folder on the mod
+folder's drive before creating profiles, on Windows for example
+`setx FACTORIO_FORGE_HOME "D:\factorio-forge"`, then open a new terminal (and
+restart Claude Code, so the skill sees it too). Profiles made before stay in
+the old folder; create them again.
 
 Extracted game data is generated on your machine and never committed: it depends
 on your game version and mod set, and it is not ours to redistribute.

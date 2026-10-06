@@ -135,3 +135,77 @@ class TestDiagnostics:
     def test_resolve_all_values_are_strings_or_none(self) -> None:
         for value in paths.resolve_all().values():
             assert value is None or isinstance(value, str)
+
+
+def write_log(user_dir: Path, install: Path, write_data: Path) -> Path:
+    """A factorio-current.log with the lines the game writes at the top."""
+    log = user_dir / paths.LOG_FILENAME
+    log.write_text(
+        "   0.001 2026-10-02 23:47:17; Factorio 2.0.77 (build 84539, win64, steam, space-age)\n"
+        f"   0.001 Read data path: {(install / 'data').as_posix()}\n"
+        f"   0.001 Write data path: {write_data.as_posix()} [133969/957793MB]\n"
+        f"   0.001 Binaries path: {(install / 'bin').as_posix()}\n",
+        encoding="utf-8",
+    )
+    return log
+
+
+class TestSources:
+    """`paths` says where each answer came from, so a wrong pick can be traced."""
+
+    @pytest.fixture
+    def game(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        install = tmp_path / "Factorio"
+        (install / "data" / "base").mkdir(parents=True)
+        (install / "data" / "base" / "info.json").write_text("{}", encoding="utf-8")
+        user_dir = tmp_path / "user"
+        user_dir.mkdir()
+        monkeypatch.setenv(paths.ENV_USER, str(user_dir))
+        return install, user_dir
+
+    def test_log_facts_are_read(self, tmp_path: Path) -> None:
+        log = write_log(tmp_path, Path("/games/Factorio"), Path("/data/Factorio"))
+        facts = paths.read_log(log)
+        assert facts["version"] == "2.0.77"
+        assert facts["write_data"] == "/data/Factorio"
+        assert facts["binaries"] == "/games/Factorio/bin"
+
+    def test_each_root_names_its_source(self, game: tuple[Path, Path]) -> None:
+        install, user_dir = game
+        write_log(user_dir, install, user_dir)
+
+        assert paths.factorio_install_dir() == install
+        sources = paths.resolve_sources()
+        assert sources["forge_home"] == f"set by {paths.ENV_HOME}"
+        assert sources["factorio_user_dir"] == f"set by {paths.ENV_USER}"
+        assert sources["factorio_install_dir"].startswith(
+            f"Binaries path from {paths.LOG_FILENAME} of "
+        )
+        assert sources["factorio_version"].startswith(f"from {paths.LOG_FILENAME} of ")
+
+    def test_default_user_dir_says_it_is_the_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        default = tmp_path / "Factorio"
+        (default / "saves").mkdir(parents=True)
+        monkeypatch.setattr(
+            paths, "_default_user_dirs", lambda: iter([(default, "default location, test")])
+        )
+        assert paths.factorio_user_dir() == default
+        assert paths.resolve_sources()["factorio_user_dir"] == "default location, test"
+
+    def test_a_log_pointing_elsewhere_is_reported(
+        self, game: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        install, user_dir = game
+        elsewhere = tmp_path / "other-drive" / "Factorio"
+        elsewhere.mkdir(parents=True)
+        write_log(user_dir, install, elsewhere)
+        assert paths.write_data_elsewhere() == elsewhere
+
+    def test_a_log_pointing_here_is_not(self, game: tuple[Path, Path]) -> None:
+        install, user_dir = game
+        write_log(user_dir, install, user_dir)
+        assert paths.write_data_elsewhere() is None

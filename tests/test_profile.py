@@ -336,6 +336,40 @@ class TestModLinking:
         assert report.official == ["base"]
         assert (profile.mods_dir / "Krastorio2_2.0.19.zip").is_file()
 
+    def test_a_repacked_mod_is_named_with_the_reason(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mods = tmp_path / "mods"
+        mods.mkdir()
+        with zipfile.ZipFile(mods / "Krastorio2_2.0.19.zip", "w") as zf:
+            zf.writestr("Krastorio2/info.json", '{"name": "Krastorio2"}')
+            zf.writestr("__MACOSX/Krastorio2/._info.json", b"\x00junk")
+        monkeypatch.setattr(paths, "mods_dir", lambda: mods)
+
+        profile = Profile.from_save(make_save())
+        profile.write()
+        report = profile.prepare_mods()
+
+        assert report.repacked == ["Krastorio2"]
+        assert report.junk == {"Krastorio2": ["__MACOSX"]}
+        assert "1 repacked" in report.summary()
+        (line,) = report.details()
+        assert line.startswith("repacked Krastorio2: ")
+        assert "__MACOSX (left behind by zipping on macOS)" in line
+
+    def test_a_plain_link_needs_no_explanation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        mods = tmp_path / "mods"
+        mods.mkdir()
+        with zipfile.ZipFile(mods / "Krastorio2_2.0.19.zip", "w") as zf:
+            zf.writestr("Krastorio2_2.0.19/info.json", '{"name": "Krastorio2"}')
+        monkeypatch.setattr(paths, "mods_dir", lambda: mods)
+
+        profile = Profile.from_save(make_save())
+        profile.write()
+        assert profile.prepare_mods().details() == []
+
     def test_no_mod_folder_is_a_named_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

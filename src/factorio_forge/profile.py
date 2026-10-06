@@ -115,6 +115,9 @@ class ModLinkReport:
     linked: list[str] = field(default_factory=list)
     copied: list[str] = field(default_factory=list)
     repacked: list[str] = field(default_factory=list)
+    # The junk folders each repacked archive had, by mod name.
+    junk: dict[str, list[str]] = field(default_factory=dict)
+    copied_bytes: int = 0
     substituted: list[Substitution] = field(default_factory=list)
     missing: list[ModRef] = field(default_factory=list)
     outdated: list[Substitution] = field(default_factory=list)
@@ -140,10 +143,34 @@ class ModLinkReport:
             parts.append(f"{len(self.missing)} MISSING")
         return ", ".join(parts)
 
+    def details(self) -> list[str]:
+        """Which mods were not simply linked, and why, one line each."""
+        lines = []
+        for name in self.repacked:
+            junk = ", ".join(
+                f"{folder} ({JUNK_ORIGIN.get(folder, 'not part of the mod')})"
+                for folder in self.junk.get(name, [])
+            )
+            lines.append(
+                f"repacked {name}: besides the mod its archive holds {junk or 'junk'}, "
+                "which can stop the mod from loading; the profile got a copy without "
+                "it, the archive in the game's mod folder is untouched"
+            )
+        if self.copied:
+            megabytes = self.copied_bytes / 1_000_000
+            lines.append(
+                f"copied {len(self.copied)} archive(s), {megabytes:.0f} MB, because hard "
+                "links were refused, usually as the profiles folder is on another drive "
+                f"than the game's mod folder ({paths.ENV_HOME} can move it there)"
+            )
+        return lines
+
 
 # Directories some archiving tools add at the root of a zip. Factorio ignores
 # them, but a loader that expects exactly one folder at the root does not.
 JUNK_TOP_LEVEL = frozenset({"__MACOSX"})
+# Where each kind of junk comes from, for the report.
+JUNK_ORIGIN = {"__MACOSX": "left behind by zipping on macOS"}
 
 # Mod archives are named `<name>_<version>.zip`, and mod names may themselves
 # contain underscores (AAI_Language_Pack_0.1.0.zip), so the split is on the last
@@ -172,6 +199,16 @@ def available_versions(mods_dir: Path, mod_name: str) -> list[tuple[int, int, in
 
 def _top_level_names(archive: zipfile.ZipFile) -> set[str]:
     return {name.split("/")[0] for name in archive.namelist() if name.strip("/")}
+
+
+def junk_folders(path: Path) -> list[str]:
+    """The junk folders at the root of an archive that `needs_repacking()`."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            tops = _top_level_names(archive)
+    except (OSError, zipfile.BadZipFile):
+        return []
+    return sorted(tops & JUNK_TOP_LEVEL)
 
 
 def needs_repacking(path: Path) -> bool:
@@ -439,6 +476,7 @@ class Profile:
             if needs_repacking(archive):
                 repack_without_junk(archive, target)
                 report.repacked.append(mod.name)
+                report.junk[mod.name] = junk_folders(archive)
                 continue
 
             try:
@@ -448,6 +486,7 @@ class Profile:
                 # Different volume, or a filesystem without hard links.
                 shutil.copy2(archive, target)
                 report.copied.append(mod.name)
+                report.copied_bytes += target.stat().st_size
 
         self._write_mod_list()
         self.mod_settings_source = self._copy_mod_settings(source)

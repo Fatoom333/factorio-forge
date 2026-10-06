@@ -18,7 +18,7 @@ lives under the forge home, which by default sits in the platform's user data
 directory, outside any checkout.
 
 Run ``python -m factorio_forge.paths`` for a report of what resolves to what on
-the current machine.
+the current machine, and where each answer came from.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -56,12 +57,16 @@ def _platform_data_root() -> Path:
     return Path(xdg) if xdg else Path.home() / ".local" / "share"
 
 
-def forge_home() -> Path:
-    """Root of all data this tool owns: profiles, cache and local config."""
+def _resolve_forge_home() -> tuple[Path, str]:
     override = os.environ.get(ENV_HOME)
     if override:
-        return Path(override).expanduser()
-    return _platform_data_root() / APP_DIRNAME
+        return Path(override).expanduser(), f"set by {ENV_HOME}"
+    return _platform_data_root() / APP_DIRNAME, "default location"
+
+
+def forge_home() -> Path:
+    """Root of all data this tool owns: profiles, cache and local config."""
+    return _resolve_forge_home()[0]
 
 
 def config_path() -> Path:
@@ -128,37 +133,45 @@ def _config_path_value(config: dict[str, Any], key: str) -> Path | None:
 # --------------------------------------------------------------------------
 
 
-def _default_user_dirs() -> Iterator[Path]:
+def _default_user_dirs() -> Iterator[tuple[Path, str]]:
+    """Where the game keeps its user data unless told otherwise, with a label."""
     if sys.platform == "win32":
         appdata = os.environ.get("APPDATA")
         if appdata:
-            yield Path(appdata) / "Factorio"
+            yield Path(appdata) / "Factorio", "default location, %APPDATA%\\Factorio"
     elif sys.platform == "darwin":
-        yield Path.home() / "Library" / "Application Support" / "factorio"
+        yield (
+            Path.home() / "Library" / "Application Support" / "factorio",
+            "default location, ~/Library/Application Support/factorio",
+        )
     else:
-        yield Path.home() / ".factorio"
+        yield Path.home() / ".factorio", "default location, ~/.factorio"
     # A standalone (non-Steam) install keeps its user data next to the binary.
     install = _config_path_value(load_config(), "factorio_install_dir")
     if install:
-        yield install
+        yield install, f"next to the standalone install remembered in {CONFIG_FILENAME}"
 
 
-def factorio_user_dir(config: dict[str, Any] | None = None) -> Path | None:
-    """Where Factorio writes saves, mods, script-output and its log."""
+def _resolve_user_dir(config: dict[str, Any] | None = None) -> tuple[Path | None, str | None]:
     override = os.environ.get(ENV_USER)
     if override:
         candidate = Path(override).expanduser()
-        return candidate if candidate.exists() else None
+        return (candidate, f"set by {ENV_USER}") if candidate.exists() else (None, None)
 
     config = load_config() if config is None else config
     remembered = _config_path_value(config, "factorio_user_dir")
     if remembered:
-        return remembered
+        return remembered, f"remembered in {CONFIG_FILENAME} by `init`"
 
-    for candidate in _default_user_dirs():
+    for candidate, label in _default_user_dirs():
         if (candidate / "saves").is_dir() or (candidate / "config").is_dir():
-            return candidate
-    return None
+            return candidate, label
+    return None, None
+
+
+def factorio_user_dir(config: dict[str, Any] | None = None) -> Path | None:
+    """Where Factorio writes saves, mods, script-output and its log."""
+    return _resolve_user_dir(config)[0]
 
 
 def saves_dir() -> Path | None:
@@ -182,6 +195,53 @@ def script_output_dir() -> Path | None:
 # --------------------------------------------------------------------------
 
 
+_LOG_FACTS = {
+    "version": re.compile(r"Factorio (\d+\.\d+\.\d+)"),
+    "binaries": re.compile(r"Binaries path:\s*(.+?)\s*$"),
+    # "Write data path: C:/Users/x/AppData/Roaming/Factorio [133969/957793MB]"
+    "write_data": re.compile(r"Write data path:\s*(.+?)(?:\s*\[[^\]]*\])?\s*$"),
+}
+
+
+def read_log(log: Path) -> dict[str, str]:
+    """The version and paths Factorio recorded at the top of one log file.
+
+    Keys are those of `_LOG_FACTS` that were found; an unreadable log gives an
+    empty dict.
+    """
+    facts: dict[str, str] = {}
+    try:
+        with log.open(encoding="utf-8", errors="replace") as handle:
+            for _, line in zip(range(200), handle):
+                for key, pattern in _LOG_FACTS.items():
+                    if key not in facts:
+                        match = pattern.search(line)
+                        if match:
+                            facts[key] = match.group(1)
+                if len(facts) == len(_LOG_FACTS):
+                    break
+    except OSError:
+        return {}
+    return facts
+
+
+def _log_file() -> Path | None:
+    user_dir = factorio_user_dir()
+    if not user_dir:
+        return None
+    log = user_dir / LOG_FILENAME
+    return log if log.is_file() else None
+
+
+def _log_label(log: Path) -> str:
+    """Which log an answer came from, dated so that a stale one stands out."""
+    try:
+        written = datetime.fromtimestamp(log.stat().st_mtime).strftime("%Y-%m-%d")
+    except OSError:
+        return f"from {log.name}"
+    return f"from {log.name} of {written}"
+
+
 def _log_paths() -> tuple[Path | None, str | None]:
     """Read the install directory and version out of Factorio's own log.
 
@@ -189,34 +249,17 @@ def _log_paths() -> tuple[Path | None, str | None]:
     beats guessing: it is correct for Steam libraries on any drive, for
     standalone installs and for platforms we have no probe list for.
     """
-    user_dir = factorio_user_dir()
-    if not user_dir:
+    log = _log_file()
+    if log is None:
         return None, None
-    log = user_dir / LOG_FILENAME
-    if not log.is_file():
-        return None, None
-
+    facts = read_log(log)
     install: Path | None = None
-    version: str | None = None
-    try:
-        with log.open(encoding="utf-8", errors="replace") as handle:
-            for _, line in zip(range(200), handle):
-                if version is None:
-                    match = re.search(r"Factorio (\d+\.\d+\.\d+)", line)
-                    if match:
-                        version = match.group(1)
-                if install is None:
-                    match = re.search(r"Binaries path:\s*(.+?)\s*$", line)
-                    if match:
-                        # ".../Factorio/bin" -> ".../Factorio"
-                        install = Path(match.group(1)).parent
-                if install is not None and version is not None:
-                    break
-    except OSError:
-        return None, None
-    if install is not None and not install.is_dir():
-        install = None
-    return install, version
+    if "binaries" in facts:
+        # ".../Factorio/bin" -> ".../Factorio"
+        install = Path(facts["binaries"]).parent
+        if not install.is_dir():
+            install = None
+    return install, facts.get("version")
 
 
 def _steam_library_roots() -> Iterator[Path]:
@@ -277,26 +320,31 @@ def _looks_like_install(path: Path) -> bool:
     return (path / "data" / "base" / "info.json").is_file()
 
 
-def factorio_install_dir(config: dict[str, Any] | None = None) -> Path | None:
-    """Root of the Factorio installation (the directory holding bin/ and data/)."""
+def _resolve_install_dir(config: dict[str, Any] | None = None) -> tuple[Path | None, str | None]:
     override = os.environ.get(ENV_GAME)
     if override:
         candidate = Path(override).expanduser()
-        return candidate if candidate.is_dir() else None
+        return (candidate, f"set by {ENV_GAME}") if candidate.is_dir() else (None, None)
 
     config = load_config() if config is None else config
     remembered = _config_path_value(config, "factorio_install_dir")
     if remembered:
-        return remembered
+        return remembered, f"remembered in {CONFIG_FILENAME} by `init`"
 
     from_log, _ = _log_paths()
     if from_log and _looks_like_install(from_log):
-        return from_log
+        log = _log_file()
+        return from_log, f"Binaries path {_log_label(log)}" if log else "from the game's log"
 
     for candidate in _probe_install_dirs():
         if _looks_like_install(candidate):
-            return candidate
-    return None
+            return candidate, "found in a Steam library or a standard install folder"
+    return None, None
+
+
+def factorio_install_dir(config: dict[str, Any] | None = None) -> Path | None:
+    """Root of the Factorio installation (the directory holding bin/ and data/)."""
+    return _resolve_install_dir(config)[0]
 
 
 def factorio_binary() -> Path | None:
@@ -355,15 +403,70 @@ def resolve_all() -> dict[str, str | None]:
     }
 
 
+def resolve_sources() -> dict[str, str]:
+    """Where each independently found entry of `resolve_all()` came from.
+
+    Only the roots are listed: everything else is derived from one of them
+    (saves_dir from factorio_user_dir, the binary from the install, ...).
+    """
+    sources: dict[str, str] = {"forge_home": _resolve_forge_home()[1]}
+    config = load_config()
+    _, user_source = _resolve_user_dir(config)
+    if user_source:
+        sources["factorio_user_dir"] = user_source
+    _, install_source = _resolve_install_dir(config)
+    if install_source:
+        sources["factorio_install_dir"] = install_source
+    log = _log_file()
+    if log and read_log(log).get("version"):
+        sources["factorio_version"] = _log_label(log)
+    return sources
+
+
+def _same_place(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
+def write_data_elsewhere() -> Path | None:
+    """The folder the game says it last wrote to, when that is not the one chosen.
+
+    Factorio records its user data folder ("Write data path") in the log it
+    keeps there. A log that names a different folder means the chosen one
+    holds a copy -- an old install, a moved profile -- and the game now plays
+    from somewhere else.
+    """
+    user_dir = factorio_user_dir()
+    log = _log_file()
+    if user_dir is None or log is None:
+        return None
+    written = read_log(log).get("write_data")
+    if not written:
+        return None
+    written_path = Path(written)
+    return None if _same_place(written_path, user_dir) else written_path
+
+
 def main() -> int:
     resolved = resolve_all()
+    sources = resolve_sources()
     width = max(len(key) for key in resolved)
     missing = 0
     for key, value in resolved.items():
         if value is None:
             missing += 1
             value = "NOT FOUND"
-        print(f"{key.ljust(width)}  {value}")
+        source = f"  ({sources[key]})" if key in sources else ""
+        print(f"{key.ljust(width)}  {value}{source}")
+    elsewhere = write_data_elsewhere()
+    if elsewhere is not None:
+        print(
+            f"\nThe game's log in factorio_user_dir says it last wrote its data to "
+            f"{elsewhere}. If that is where you play, set {ENV_USER} to it.",
+            file=sys.stderr,
+        )
     if missing:
         print(
             f"\n{missing} item(s) not found. Set {ENV_GAME} or {ENV_USER}, "
