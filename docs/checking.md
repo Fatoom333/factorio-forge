@@ -103,6 +103,75 @@ filtering off, a circuit or logistic condition on an entity no wire reaches, a
 combinator with no wires at all, a constant combinator holding no signals, an
 assembler with no recipe.
 
+## Lanes (in a build)
+
+`factorio-forge build` follows every belt lane of the build -- block belts,
+hand-placed belts and routed pieces alike (`lanes.py`) -- and checks what
+each lane carries against what takes from it. Left and right are seen in the
+direction of travel. Not yet run by `factorio-forge check`.
+
+**How a belt takes what is pushed into it** (Factorio 2.0):
+
+| Receiver | from behind | head-on | from a side |
+|---|---|---|---|
+| transport belt | joins straight | dead end | see below |
+| underground entrance | joins straight | into the hood: dead end | hood rule |
+| underground exit | into the hood: dead end | dead end | not tracked |
+| splitter half | joins that half | dead end | dead end |
+| loader, linked belt, anything else | exit: takes anything | | |
+| nothing | open end, except the tail of a block's input line | | |
+
+- A transport belt fed from behind, or from both sides, is straight: each
+  side feeder side-loads, both its lanes onto the near lane. Fed from one
+  side only by a plain belt it is a curve and keeps the lanes; fed from one
+  side only by an underground exit or a splitter it is not tracked.
+- **Hood rule**: onto the side of an underground entrance only the feeder's
+  lane on the entrance's open side gets through, onto the near lane; the
+  other lane is a dead end (`lanes.hood_passes`, still to be confirmed in
+  the game).
+- An underground pair keeps the lanes. A splitter sends each input's left
+  lane to the left lane of both outputs, and the same for the right; filter
+  and priority are not modelled (noted).
+- Items come on from a declared start (a route's point, or the plan's
+  `inputs`), from an inserter's drop (what the machine it takes from makes,
+  through its filter; what it takes off another belt; else unknown), a
+  drill's drop (unknown), and at a belt head at the edge of the build
+  (unknown). What an inserter takes from a belt is the recipe of the machine
+  it feeds, or anything for a chest, a lab or a furnace without a recipe.
+
+**Open and closed ends.** A belt pointing into an empty tile is open: it may
+go on in the world, as everywhere in the checker. Dead ends are closed, and
+so is the tail of a block's input line, which is meant to end there. At a
+closed end every item on the lane must be taken by something upstream on
+its way there, or it fills the lane.
+
+**The rules.**
+
+- R1, at each closed end: an item nothing upstream takes is *stranded*.
+  `lanes-not-taken` (problem) when it shares the lane with an item that is
+  used -- the lane fills and the used one stops arriving; (suspect) when it
+  is alone on the lane. `lanes-overflow` (note) instead when a splitter on
+  the way sends it all to another output where it is taken.
+  `lanes-mixed` (suspect) when two used items share the lane: unless they
+  arrive in the ratio they are used, one blocks the other.
+- R2, at each in port and each routed point goal that names items:
+  `lanes-missing` (problem) when an ingredient never arrives;
+  `lanes-unknown` (note) when it cannot be told because something undeclared
+  comes on; `lanes-swapped` (note) when a block's two ingredients arrive on
+  each other's lanes -- its inserters take from both, so it runs as built.
+  A point is ordered: `lanes-wrong` (problem) when its lanes do not match,
+  saying so when they are only swapped. `route-lanes-disagree` (problem)
+  when the router's belief about a route's lanes differs from the trace.
+- R3: `lanes-starved` (problem) when machines whose inserters all take from
+  belts carrying only known items never get an ingredient; not said again
+  where a port already reports it missing.
+- `lanes-unchecked` (note) for every spot past which lanes are not tracked.
+
+**Silence.** Unknown content never makes a finding on its own. An in port
+where nothing known arrives and no route ends is an unconnected fragment and
+is not judged, and a machine whose belts carry nothing known is not called
+starved.
+
 ## Nothing about an entity is hardcoded
 
 Mods change these numbers, often by multiples, so every one of them is read from

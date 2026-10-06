@@ -15,10 +15,10 @@ import pytest
 from draftsman.data import entities, recipes
 
 import prototypes
-from factorio_forge import cli, fluids, inspection, layout, plan, route, rows
+from factorio_forge import cli, fluids, inspection, lanes, layout, plan, route, rows
 from factorio_forge.categories import crafts, recipe_categories
 
-EAST, SOUTH = 4, 8
+NORTH, EAST, SOUTH, WEST = 0, 4, 8, 12
 
 
 # --------------------------------------------------------------------------
@@ -428,7 +428,7 @@ class TestBlocks:
         )
         (done,) = result.routes
         assert done.ok, done.reason
-        assert "route-lanes" not in codes(result)
+        assert not [c for c in codes(result) if c.startswith("lanes-")]
         # The blocks stand apart and nothing wires them together; power is not the route's job.
         # A block powered by a single pole (big machines) also shows as an isolated pole.
         assert_clean(result, expected=("power-split", "pole-isolated"))
@@ -440,42 +440,6 @@ class TestBlocks:
         assert [p["index"] for p in report["blocks"][0]["ports"]] == list(range(len(ports_of(result))))
         assert report["blocks"][0]["prototypes"]["belt"] == prototypes.fastest_belt()
         assert report["routes"] == []
-
-
-# --------------------------------------------------------------------------
-# lanes
-# --------------------------------------------------------------------------
-
-
-class TestLanes:
-    def test_swapped_lanes_are_a_problem_said_so(self) -> None:
-        belt, ug = belt_with_underground()
-        result = build([belt_route(point(0, 0, items=["a", "b"]), point(8, 0, items=["b", "a"]), belt, ug)])
-        (lanes,) = [f for f in result.findings if f.code == "route-lanes"]
-        assert "swapped" in lanes.detail
-
-    def test_unknown_lanes_are_noted(self) -> None:
-        belt, ug = belt_with_underground()
-        result = build([belt_route(point(0, 0), point(8, 0, items=["a"]), belt, ug)])
-        assert "route-lanes-unknown" in codes(result)
-        assert "route-lanes" not in codes(result)
-
-    @pytest.mark.parametrize("source", [["", "a"], ["a", ""]])
-    def test_one_item_for_both_lanes_takes_it_from_either(self, source) -> None:
-        belt, ug = belt_with_underground()
-        result = build([belt_route(point(0, 0, items=source), point(8, 0, items=["a"]), belt, ug)])
-        assert result.routes[0].ok
-        assert "route-lanes" not in codes(result)
-
-    def test_one_item_for_both_lanes_still_wants_that_item(self) -> None:
-        belt, ug = belt_with_underground()
-        result = build([belt_route(point(0, 0, items=["b", ""]), point(8, 0, items=["a"]), belt, ug)])
-        assert "route-lanes" in codes(result)
-
-    def test_a_mixed_lane_carries_both(self) -> None:
-        belt, ug = belt_with_underground()
-        result = build([belt_route(point(0, 0, items=["", "a+b"]), point(8, 0, items=["", "b"]), belt, ug)])
-        assert "route-lanes" not in codes(result)
 
 
 # --------------------------------------------------------------------------
@@ -636,6 +600,258 @@ class TestSteering:
             ],
         }
         assert plan.build(the_plan).blueprint.to_string() == plan.build(the_plan).blueprint.to_string()
+
+
+# --------------------------------------------------------------------------
+# splits, merges, lane joins
+# --------------------------------------------------------------------------
+
+
+def splitters_of(result) -> list:
+    return [e for e in result.blueprint.entities if e.type == "splitter"]
+
+
+def lane_findings(result) -> list[str]:
+    return [c for c in codes(result) if c.startswith("lanes-") or c == "route-lanes-disagree"]
+
+
+def chain_blocks(users: int):
+    """A maker block and `users` blocks eating its product, stacked to its right; the ports to join."""
+    (first_recipe, first_machine), (second_recipe, second_machine) = chained_recipes()
+    maker = block_spec(first_recipe, first_machine, [2])
+    alone = plan.build({"blocks": [maker]})
+    out_index = next(p["index"] for p in ports_of(alone) if p["io"] == "out")
+    user = block_spec(second_recipe, second_machine, [2])
+    user_alone = plan.build({"blocks": [user]})
+    in_index = next(p["index"] for p in ports_of(user_alone) if p["io"] == "in" and p["kind"] == "belt")
+    pitch = user_alone.blocks[0].height + 6
+    blocks = [maker] + [{**user, "at": [alone.blocks[0].width + 12, k * pitch]} for k in range(users)]
+    return blocks, out_index, in_index
+
+
+class TestSplits:
+    def test_one_out_port_to_two_in_ports(self) -> None:
+        blocks, out_index, in_index = chain_blocks(2)
+        belt = blocks[0]["belt"]
+        split = {"id": "share", "from": {"block": 0, "port": out_index},
+                 "to": [{"block": 1, "port": in_index}, {"block": 2, "port": in_index}]}
+        result = build([split], blocks=blocks)
+        assert [r.id for r in result.routes] == ["share/0", "share/1"]
+        assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
+        (splitter,) = splitters_of(result)
+        assert splitter.name == route.related_splitter(belt)
+        a, b = sorted(inspection.Layout.tiles_of(splitter))
+        dx, dy = inspection.STEP[int(splitter.direction)]
+        assert abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1 and (b[0] - a[0]) * dx + (b[1] - a[1]) * dy == 0
+        assert_clean(result, expected=("power-split", "pole-isolated"))
+        for block in result.blocks[1:]:
+            assert block.ports[in_index]["arrives"] is not None
+        assert not lane_findings(result)
+
+    def test_three_destinations_cascade(self) -> None:
+        blocks, out_index, in_index = chain_blocks(3)
+        split = {"from": {"block": 0, "port": out_index}, "to": [{"block": k, "port": in_index} for k in (1, 2, 3)]}
+        result = build([split], blocks=blocks)
+        assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
+        assert len(splitters_of(result)) == 2
+        assert "route-split-cascade" in codes(result)
+
+    @pytest.mark.parametrize("side", ["left", "right"])
+    def test_a_chosen_split_tile_is_honoured(self, side: str) -> None:
+        belt, ug, _ = prototypes.belt_set()
+        other = 6 if side == "right" else -6
+        split = {"kind": "belt", "belt": belt, "from": point(0, 0, items=["a"]),
+                 "to": [point(12, 0), point(12, other)], "split": [{"at": [4, 0], "side": side}]}
+        result = build([split])
+        assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
+        (splitter,) = splitters_of(result)
+        assert set(inspection.Layout.tiles_of(splitter)) == {(4, 0), (4, 1 if side == "right" else -1)}
+        assert result.routes[1].junction.tile == (4, 0) and result.routes[1].junction.side == side
+        # The route still reads as a path through its splitter.
+        straight = route.straight_pieces(result.routes[0])
+        assert 4 not in straight and 5 not in straight and 6 in straight
+        assert_clean(result)
+
+    def test_a_split_tile_off_the_straight_is_refused(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        split = {"kind": "belt", "belt": belt, "from": point(0, 0, items=["a"]),
+                 "to": [point(12, 0), point(12, 6)], "split": [{"at": [4, 3], "side": "right"}]}
+        result = build([split])
+        assert not any(r.ok for r in result.routes)
+        (failed, _) = [f for f in result.findings if f.code == "route-failed"]
+        assert "not a straight belt" in failed.summary
+
+    def test_no_room_for_the_second_half_places_nothing(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        walls = wall(-1, 13, -1, -1) + wall(-1, 13, 1, 1)
+        split = {"kind": "belt", "belt": belt, "underground": False, "from": point(0, 0, items=["a"]),
+                 "to": [point(12, 0), point(12, 4)]}
+        result = build([split], walls, routing={"margin": 1})
+        assert [r.ok for r in result.routes] == [False, False]
+        assert codes(result).count("route-failed") == 2
+        assert len(result.blueprint.entities) == len(build([], walls).blueprint.entities)
+
+    def test_no_splitter_of_the_belts_speed_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        belt, _, _ = prototypes.belt_set()
+        speed = entities.raw[belt]["speed"]
+        for name, data in list(entities.raw.items()):
+            if data.get("type") == "splitter" and data.get("speed") == speed:
+                monkeypatch.delitem(entities.raw, name)
+        with pytest.raises(plan.PlanError, match="'splitter'"):
+            build([{"kind": "belt", "belt": belt, "from": point(0, 0), "to": [point(12, 0), point(12, 6)]}])
+
+    def test_pipes_do_not_split(self) -> None:
+        pipe, _ = pipe_pair()
+        with pytest.raises(plan.PlanError, match="pipes join whatever they touch"):
+            build([{"kind": "pipe", "pipe": pipe, "from": point(0, 0), "to": [point(12, 0), point(12, 6)]}])
+
+
+def two_ingredient_block():
+    recipe, machine = prototypes.crafting_setup(2, 0, 1, 0)
+    block = block_spec(recipe, machine, [2])
+    port = next(p for p in ports_of(plan.build({"blocks": [block]})) if p["io"] == "in" and p["kind"] == "belt")
+    return block, port
+
+
+class TestMerges:
+    def test_onto_a_route_with_the_lane_chosen(self) -> None:
+        block, port = two_ingredient_block()
+        w0, w1 = port["items"]
+        dx, dy = inspection.STEP[port["direction"]]
+        start = point(port["x"] - 10 * dx, port["y"] - 10 * dy, port["direction"], items=[w0, ""])
+        side = point(port["x"] - 6 * dx - 4 * dy, port["y"] - 6 * dy - 4 * dx, port["direction"], items=[w1])
+        result = build([{"id": "main", "from": start, "to": {"block": 0, "port": port["index"]}},
+                        {"id": "side", "from": side, "onto": {"route": "main"}}], blocks=[block])
+        main, merged = result.routes
+        assert main.ok and merged.ok, (main.reason, merged.reason)
+        assert merged.junction.kind == "sideload"
+        assert not lane_findings(result)
+        tiles = [(p.x, p.y) for p in main.pieces]
+        at = tiles.index(merged.junction.tile)
+        assert at > 0 and main.pieces[at - 1].direction == main.pieces[at].direction
+        assert result.blocks[0].ports[port["index"]]["arrives"] == [w0, w1]
+        assert_clean(result)
+
+    def test_onto_a_port_means_the_route_ending_there(self) -> None:
+        block, port = two_ingredient_block()
+        w0, w1 = port["items"]
+        dx, dy = inspection.STEP[port["direction"]]
+        start = point(port["x"] - 10 * dx, port["y"] - 10 * dy, port["direction"], items=["", w1])
+        side = point(port["x"] - 6 * dx - 4 * dy, port["y"] - 6 * dy - 4 * dx, port["direction"], items=[w0])
+        target = {"block": 0, "port": port["index"]}
+        result = build([{"id": "main", "from": start, "to": target},
+                        {"id": "side", "from": side, "onto": target}], blocks=[block])
+        assert result.routes[1].ok and result.routes[0].merges
+        assert not lane_findings(result)
+        with pytest.raises(plan.PlanError, match="routed later"):
+            build([{"id": "side", "from": side, "onto": {"route": "main"}},
+                   {"id": "main", "from": start, "to": target}], blocks=[block])
+
+    def test_a_merge_lands_past_the_routes_splitter(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        split = {"id": "s", "kind": "belt", "belt": belt, "from": point(0, 0, items=["a", ""]),
+                 "to": [point(16, 0), point(16, 6)], "split": [{"at": [3, 0], "side": "right"}]}
+        merge = {"kind": "belt", "belt": belt, "from": point(1, -6, SOUTH, items=["b"]),
+                 "onto": {"route": "s/0", "lane": "left"}}
+        result = build([split, merge])
+        assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
+        base, branch, merged = result.routes
+        at = [(p.x, p.y) for p in base.pieces].index(merged.junction.tile)
+        assert at > [(p.x, p.y) for p in base.pieces].index((3, 0))
+        assert branch.delivered == ("a", "-")
+
+    def hand_line(self) -> tuple[list[dict], list[dict]]:
+        belt, _, _ = prototypes.belt_set()
+        return [{"name": belt, "position": [x, 0], "direction": EAST} for x in range(9)], \
+            [{"at": [0, 0], "items": ["a", ""]}]
+
+    def merge(self, onto, lane, items=("b",), extra=(), inputs=None) -> plan.BuildResult:
+        belt, _, _ = prototypes.belt_set()
+        line, declared = self.hand_line()
+        return plan.build({"entities": line + list(extra), "inputs": declared if inputs is None else inputs,
+                           "connections": [{"kind": "belt", "belt": belt, "from": point(4, -5, SOUTH, items=list(items)),
+                                            "onto": {"at": list(onto), "lane": lane}}]})
+
+    def test_onto_a_hand_belt_at_a_tile(self) -> None:
+        result = self.merge((4, 0), "left")
+        (done,) = result.routes
+        assert done.ok, done.reason
+        assert result.routes[0].delivered is not None
+        assert not lane_findings(result)
+
+    def test_onto_a_curve_or_a_head_is_refused(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        curve = [{"name": belt, "position": [9, 0], "direction": SOUTH}, {"name": belt, "position": [9, 1], "direction": SOUTH}]
+        result = self.merge((9, 0), "left", extra=curve)
+        assert not result.routes[0].ok and "nothing feeding it from behind" in result.routes[0].reason
+        result = self.merge((0, 0), "left")
+        assert not result.routes[0].ok and "nothing feeding it from behind" in result.routes[0].reason
+
+    def test_onto_an_entrance_through_the_hood(self) -> None:
+        belt, ug, _ = prototypes.belt_set()
+        reach = prototypes.underground_reach_of(ug)
+        exit_x = 4 + min(reach, 3)
+        line = [{"name": belt, "position": [x, 0], "direction": EAST} for x in range(4)]
+        line += [{"name": ug, "position": [4, 0], "direction": EAST, "io_type": "input"},
+                 {"name": ug, "position": [exit_x, 0], "direction": EAST, "io_type": "output"}]
+        blocked = "left" if lanes.hood_passes("left") == "right" else "right"
+        items = ["b", ""] if blocked == "left" else ["", "b"]
+        result = plan.build({"entities": line, "inputs": [{"at": [0, 0], "items": ["a", ""]}],
+                             "connections": [{"kind": "belt", "belt": belt, "from": point(4, -5, SOUTH, items=items),
+                                              "onto": {"at": [4, 0], "lane": "left"}}]})
+        assert not result.routes[0].ok and "hood" in result.routes[0].reason
+
+
+class TestLaneJoins:
+    def test_two_sources_onto_the_lanes_asked_for(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        join = {"kind": "belt", "belt": belt, "from": [point(0, 0, items=["a"]), point(12, 0, WEST, items=["b"])],
+                "to": point(6, 8, SOUTH, items=["b", "a"])}
+        result = build([join])
+        assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
+        assert result.routes[0].delivered == ("b", "a")
+        assert result.routes[0].junction.kind == "lane-join"
+        assert not lane_findings(result)
+        assert_clean(result)
+
+    def test_a_path_without_a_turn_is_refused(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        join = {"kind": "belt", "belt": belt, "from": [point(0, 0, items=["a"]), point(4, -4, SOUTH, items=["b"])],
+                "to": point(10, 0, items=["a", "b"])}
+        result = build([join])
+        assert not any(r.ok for r in result.routes)
+        assert "via" in result.routes[0].reason
+
+
+class TestJunctionsAgree:
+    def plan_(self) -> dict:
+        belt, ug, _ = prototypes.belt_set()
+        blocks, out_index, in_index = chain_blocks(2)
+        return {"label": "twice", "blocks": blocks, "entities": [], "connections": [
+            {"from": {"block": 0, "port": out_index}, "to": [{"block": 1, "port": in_index}, {"block": 2, "port": in_index}]},
+        ]}
+
+    def test_the_same_plan_builds_the_same_blueprint(self) -> None:
+        the_plan = self.plan_()
+        assert plan.build(the_plan).blueprint.to_string() == plan.build(the_plan).blueprint.to_string()
+
+    def test_a_wrong_hood_rule_is_caught(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        belt, ug, _ = prototypes.belt_set()
+        reach = prototypes.underground_reach_of(ug)
+        walls = wall(5, 5, -1, 1)
+        main = {"id": "main", "kind": "belt", "belt": belt, "underground": ug, "from": point(0, 0, items=["a", ""]),
+                "to": point(reach + 4, 0, items=["a", ""])}
+        base = build([main], walls, routing={"margin": 0})
+        entrance = next(p for p in base.routes[0].pieces if p.io_type == "input")
+        merge = {"kind": "belt", "belt": belt, "from": point(entrance.x, -5, SOUTH, items=["b", "c"]),
+                 "onto": {"at": [entrance.x, entrance.y], "lane": "left"}}
+        honest = build([main, merge], walls, routing={"margin": 0})
+        assert honest.routes[1].ok, honest.routes[1].reason
+        assert "route-lanes-disagree" not in codes(honest)
+        wrong = {"left": "left", "right": "right"}
+        monkeypatch.setattr(lanes, "hood_passes", lambda side: wrong[side])
+        seeded = build([main, merge], walls, routing={"margin": 0})
+        assert "route-lanes-disagree" in codes(seeded)
 
 
 def test_cli_build_prints_routes(tmp_path, capsys: pytest.CaptureFixture) -> None:

@@ -36,16 +36,29 @@ Belts and pipes fail in different ways, so they have different rules.
   is refused as well. Other prototypes, and crossings at right angles, are
   free.
 
+## Splits, merges, lane joins
+
+One source may go to several destinations: the route to the first is laid,
+and each further one branches off a splitter set in place of a straight belt
+of a route already laid (`straight_pieces`: fed straight from behind, carrying
+on straight, so neither the splitter's input nor its outputs make a curve).
+A merge points a source into the side of a straight belt of a route -- past
+that route's last splitter -- and side-loads it onto one lane. A lane join
+routes the first source to the goal, then points the second into the other
+side of one of its curves, which turns that curve into a T-junction: each
+source fills the lane on its own side. Every junction place is estimated
+first and the nearest few (`candidates`) are routed in full; the cheapest
+wins. A split or a join is all or nothing.
+
 ## Lanes
 
 A straight belt, a curve fed by one plain belt, and an underground pair all
-keep the left lane on the left. The route ends with a straight join into the
+keep the left lane on the left. A route ends with a straight join into the
 port, and turns only after a plain belt -- never right after an underground
-exit, which is still to be confirmed in the game -- so it delivers the
-source's lanes unchanged. A route cannot swap them. A destination that names
-one item for both lanes (a block's single-ingredient input) takes it from
-either lane, so a source with that item on one lane fits; only the
-throughput check sees the difference.
+exit or a splitter, which is still to be confirmed in the game -- so it
+delivers what it carries unchanged; `lanes_at` adds what merges put on. That
+is the router's belief: `lanes.py` traces the finished build and is the one
+that checks lanes, and says so when the two disagree.
 
 ## Reach
 
@@ -55,8 +68,9 @@ The checker walks the same `range(1, reach + 1)`.
 
 ## Not done
 
-Splitters, merges, one source to several destinations, lane swaps, ripping up
-other routes, map terrain, pipe throughput, pieces larger than one tile.
+Balancers, splitter priority and filters, swapping the lanes of a belt already
+laid, splitting or merging pipes, ripping up other routes, map terrain, pipe
+throughput, pieces larger than one tile (bar a two-tile splitter).
 Routes go greedily in plan order: an earlier one is an obstacle for a later
 one. The only rip-up is of a route's own path, when via tiles make it come
 back over itself (see `route`).
@@ -73,11 +87,13 @@ from draftsman.data import entities as entity_data
 
 from . import fluids, inspection, layout
 from .inspection import STEP, Finding, Severity
+from .lanes import hood_passes
 
 DEFAULT_MARGIN = 3  # search tuning only; no game data lives here
 DEFAULT_MAX_NODES = 200_000
 DEFAULT_TURN_COST = 1.0
 DEFAULT_HOP_COST = 2.0
+DEFAULT_CANDIDATES = 12  # search tuning only: junction places tried per destination
 
 OPPOSITE = fluids.OPPOSITE
 _BURIED = 1e-3  # tie-break only: see the hop cost in `route`
@@ -103,6 +119,7 @@ class Endpoint:
     rate: float | None = None
     port: tuple[int, int] | None = None  # (block index, port index); None for a point
     pipe_name: str | None = None  # the port's own pipe prototype
+    sideload: bool = False  # goal only: the last piece points into the side of the belt at goal_tile
 
     def describe(self) -> str:
         if self.port is not None:
@@ -158,6 +175,8 @@ class Piece:
     y: int
     direction: int  # belts: the way they carry; pipes and pipe-to-ground: the entity's own
     io_type: str | None = None  # "input" / "output" for underground belts
+    # A splitter's second tile; (x, y) is its half on the route's path, so the path reads on through it.
+    other: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +188,19 @@ class Tunnel:
     line: int  # the other coordinate
     lo: int
     hi: int
+
+
+@dataclass(frozen=True)
+class Junction:
+    """Where a sub-route attaches to the route it splits from or merges onto."""
+
+    kind: str  # "splitter" | "sideload" | "lane-join"
+    tile: tuple[int, int]  # splitter: its half on the parent path; sideload: target tile T; lane-join: head H
+    side: str  # splitter: the other half's side; sideload: the lane fed; lane-join: from[0]'s lane
+    direction: int
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "at": list(self.tile), "side": self.side, "direction": self.direction}
 
 
 @dataclass
@@ -185,11 +217,20 @@ class RouteResult:
     reason: str | None = None
     near: tuple[int, int] | None = None
     spec: RouteSpec | None = field(default=None, repr=False, compare=False)
+    connection: str = ""  # the plan connection id
+    junction: Junction | None = None  # where this sub-route attaches
+    # (piece index, lane, items) merged onto it, in the order they were routed.
+    merges: list[tuple[int, str, tuple[str, ...]]] = field(default_factory=list)
+    cost: float = 0.0  # length + turn_cost*turns + hop_cost*hops (+ the _BURIED tie-break)
+    delivered: tuple[str, str] | None = None  # the traced lanes at its last tile, filled in by the build
+    # Findings only the junction code can make (a split's cascade, a merge's lane rate).
+    notes: list[Finding] = field(default_factory=list, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         spec = self.spec
         return {
             "id": self.id,
+            "connection": self.connection or self.id,
             "kind": self.kind,
             "ok": self.ok,
             "from": spec.start.to_dict() if spec else None,
@@ -204,7 +245,57 @@ class RouteResult:
             "rate": self.rate,
             "reason": self.reason,
             "near": list(self.near) if self.near is not None else None,
+            "junction": self.junction.to_dict() if self.junction else None,
+            "merges": [{"at": i, "lane": lane, "items": list(items)} for i, lane, items in self.merges],
+            "delivered": list(self.delivered) if self.delivered is not None else None,
         }
+
+
+@dataclass(frozen=True)
+class SplitSpec:
+    """One source to several destinations, through splitters set into the route."""
+
+    id: str
+    kind: str  # "belt"
+    source: Endpoint
+    goals: tuple[Endpoint, ...]
+    vias: tuple[tuple[tuple[int, int], ...], ...]  # aligned with goals
+    fixed: tuple[tuple[tuple[int, int], str] | None, ...]  # aligned with goals[1:]: (tile, side) or None
+    surface: str
+    underground: str | None
+    splitter: str
+    turn_cost: float = DEFAULT_TURN_COST
+    hop_cost: float = DEFAULT_HOP_COST
+
+
+@dataclass(frozen=True)
+class MergeSpec:
+    """A source side-loaded onto one lane of an existing belt."""
+
+    id: str
+    source: Endpoint
+    onto_route: str | None
+    onto_tile: tuple[int, int] | None
+    lane: str  # "left" | "right" | "auto"
+    surface: str
+    underground: str | None
+    via: tuple[tuple[int, int], ...] = ()
+    turn_cost: float = DEFAULT_TURN_COST
+    hop_cost: float = DEFAULT_HOP_COST
+
+
+@dataclass(frozen=True)
+class JoinSpec:
+    """Two sources, each onto a lane of its own, at a turn of the first one's route."""
+
+    id: str
+    sources: tuple[Endpoint, Endpoint]
+    goal: Endpoint
+    surface: str
+    underground: str | None
+    via: tuple[tuple[int, int], ...] = ()
+    turn_cost: float = DEFAULT_TURN_COST
+    hop_cost: float = DEFAULT_HOP_COST
 
 
 # --------------------------------------------------------------------------
@@ -261,6 +352,26 @@ def related_underground(belt: str) -> str | None:
             "choose one with 'underground'"
         )
     return same[0] if same else None
+
+
+def related_splitter(belt: str) -> str | None:
+    """The splitter that goes with a belt: the only one of its speed, or None if there is none."""
+    speed = (entity_data.raw.get(belt) or {}).get("speed")
+    same = sorted(
+        name for name, data in entity_data.raw.items() if data.get("type") == "splitter" and data.get("speed") == speed
+    )
+    if len(same) > 1:
+        raise RouteError(f"several splitters share the speed of {belt}: {', '.join(same)}; choose one with 'splitter'")
+    return same[0] if same else None
+
+
+def check_splitter(name: str) -> None:
+    """Refuse a splitter prototype the router cannot place: v1 places two tiles across, one along."""
+    for direction in (0, 4):
+        w, h = layout.machine_size(name, direction)
+        across, along = (w, h) if direction == 0 else (h, w)
+        if (across, along) != (2, 1):
+            raise RouteError(f"{name} is {w}x{h}; only two-tile splitters split in v1")
 
 
 def _states_underground_mask(prototype: str) -> bool:
@@ -326,6 +437,14 @@ class Grid:
     # may point into.
     belt_entry: dict[tuple[int, int], int] = field(default_factory=dict, repr=False)
 
+    def copy(self) -> "Grid":
+        """A trial grid: changing it leaves this one alone."""
+        return Grid(
+            self.area, dict(self.occupied), set(self.reserved), dict(self.belt_fed), dict(self.hands),
+            {k: list(v) for k, v in self.fluid_targets.items()}, list(self.tunnels),
+            {k: set(v) for k, v in self.feeders.items()}, dict(self.fluid_owner), dict(self.belt_entry),
+        )
+
     def inside(self, tile: tuple[int, int]) -> bool:
         x0, y0, x1, y1 = self.area
         return x0 <= tile[0] <= x1 and y0 <= tile[1] <= y1
@@ -339,6 +458,15 @@ class Grid:
         pending: Piece | None = None
         for piece in pieces:
             tile = (piece.x, piece.y)
+            if piece.other is not None:
+                # A splitter: each half takes from behind and pushes ahead. The
+                # half itself is the source, so a branch starting past the
+                # other half is exempt exactly as a route past an out port is.
+                for half in (tile, piece.other):
+                    self.occupied[half] = piece.name
+                    self.belt_entry[half] = piece.direction
+                    self.feed(_step(half, piece.direction), half, piece.name)
+                continue
             self.occupied[tile] = piece.name
             kind = (entity_data.raw.get(piece.name) or {}).get("type")
             if kind == "transport-belt" or (kind == "underground-belt" and piece.io_type == "output"):
@@ -471,7 +599,10 @@ def _underground_ends(entities: list) -> list[Tunnel]:
             by_tile.setdefault(tile, []).append(index)
 
     ends: dict[int, tuple[str, str, int, int]] = {}  # index -> (name, axis, line, at)
-    pairs: set[tuple[int, int]] = set()
+    # Belts pair the way the lane tracker pairs them; pipes by their connections.
+    pairs: set[tuple[int, int]] = {
+        (min(a, b), max(a, b)) for a, b in inspection.underground_partners(entities).items()
+    }
     for index, entity in enumerate(entities):
         kind = getattr(entity, "type", "")
         tile = inspection.Layout.tile_of(entity)
@@ -479,18 +610,8 @@ def _underground_ends(entities: list) -> list[Tunnel]:
             direction = int(getattr(entity, "direction", 0) or 0)
             if direction not in STEP:
                 continue
-            reach = inspection.underground_reach(entity) or 0
             axis = _axis(direction)
             ends[index] = (entity.name, axis, *_along(tile, axis))
-            walk = direction if getattr(entity, "io_type", None) != "output" else OPPOSITE[direction]
-            for k in range(1, reach + 1):
-                other = next(
-                    (i for i in by_tile.get(_step(tile, walk, k), ()) if i != index and entities[i].name == entity.name),
-                    None,
-                )
-                if other is not None:
-                    pairs.add((min(index, other), max(index, other)))
-                    break
             continue
         for c in fluids.connections_of(index, entity):
             if not c.underground:
@@ -565,9 +686,12 @@ def grid_of(entities: list, area: tuple[int, int, int, int], reserved: set[tuple
 class _Rules:
     """Whether a piece may stand where the search wants it, for one route."""
 
-    def __init__(self, spec: RouteSpec, grid: Grid) -> None:
+    def __init__(self, spec: RouteSpec, grid: Grid, allow_tee: bool = False) -> None:
         self.spec = spec
         self.grid = grid
+        # A lane join's second source points into the side of the first one's
+        # curve, which has nothing behind it and becomes a T-junction.
+        self.allow_tee = allow_tee
         self.belt = spec.kind == "belt"
         self.start_tile = spec.start_tile
         self.last_tile = spec.last_tile
@@ -637,6 +761,8 @@ class _Rules:
         connection facing back.
         """
         spec, grid, tile = self.spec, self.grid, self.goal_tile
+        if spec.goal.sideload:
+            return self._sideload_conflict()
         if spec.goal.port is not None or tile not in grid.occupied:
             return None
         name = grid.occupied[tile]
@@ -660,6 +786,28 @@ class _Rules:
         towards = [c for c in connections_for(spec.surface, self.last_tile, 0) if c.direction == d]
         if not any(o.inner == tile for c in towards for o in grid.joins(c)):
             return f"holds {name}, which has no fluid connection facing the route there"
+        return None
+
+    def _sideload_conflict(self) -> str | None:
+        """Why the last piece may not point into the side of what stands at the goal tile, or None.
+
+        It must be a transport belt or underground entrance carrying across
+        the last piece, and a transport belt must be fed from behind: fed only
+        from the side it would be a curve, and the side-load would turn it.
+        """
+        grid, tile, d = self.grid, self.goal_tile, self.spec.goal.direction
+        name = grid.occupied.get(tile)
+        kind = (entity_data.raw.get(name) or {}).get("type") if name else None
+        entry = grid.belt_entry.get(tile)
+        if name is None or kind not in ("transport-belt", "underground-belt") or entry is None:
+            return f"holds {name or 'nothing'}; only a belt or an underground entrance takes items from its side"
+        if entry not in (CW[d], CCW[d]):
+            way = "the same way" if entry == d else "head-on"
+            return f"holds {name} carrying {way}, not across the last piece"
+        if kind == "transport-belt" and not self.allow_tee:
+            if _step(tile, OPPOSITE[entry]) not in grid.feeders.get(tile, ()):
+                return (f"holds {name} with nothing feeding it from behind; a belt pointing into its side would "
+                        "turn it into a curve")
         return None
 
     def surface_piece(self, tile, flow) -> Piece:
@@ -702,7 +850,7 @@ def _rate(spec: RouteSpec) -> float | None:
 MAX_ATTEMPTS = 8  # search tuning: how often a route may set its own earlier path aside and search again
 
 
-def route(spec: RouteSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES) -> RouteResult:
+def route(spec: RouteSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES, allow_tee: bool = False) -> RouteResult:
     """The cheapest path for one connection, or the reason there is none. Places nothing.
 
     The search state does not remember the path, so a path through via tiles
@@ -712,7 +860,7 @@ def route(spec: RouteSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES) -> Ro
     never of anything else. If that does not settle it, the first reason is
     reported.
     """
-    rules = _Rules(spec, grid)
+    rules = _Rules(spec, grid, allow_tee)
     start, last = spec.start_tile, spec.last_tile
 
     for label, tile in (("start", start), ("goal", last)):
@@ -738,7 +886,7 @@ def route(spec: RouteSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES) -> Ro
         pieces, stages = searched
         repeat = _first_repeat(pieces, stages)
         if repeat is None:
-            problem = validate(pieces, grid, spec)
+            problem = validate(pieces, grid, spec, allow_tee)
             if problem is None:
                 return _summarise(spec, pieces)
             first_problem = first_problem or problem
@@ -917,18 +1065,18 @@ def _summarise(spec: RouteSpec, pieces: list[Piece]) -> RouteResult:
         for i in range(len(pieces))
         if i not in in_hop and flows[i] != (flows[i - 1] if i else spec.start.direction)
     )
-    length = len(pieces) - len(in_hop) + sum(
-        _manhattan((pieces[a].x, pieces[a].y), (pieces[b].x, pieces[b].y)) + 1 for a, b in pairs
-    )
+    spans = [_manhattan((pieces[a].x, pieces[a].y), (pieces[b].x, pieces[b].y)) for a, b in pairs]
+    length = len(pieces) - len(in_hop) + sum(k + 1 for k in spans)
+    cost = length + spec.turn_cost * turns + spec.hop_cost * len(pairs) + _BURIED * sum(spans)
     return RouteResult(spec.id, spec.kind, True, pieces, length, turns, len(pairs), _lanes(spec), _rate(spec),
-                       spec=spec)
+                       spec=spec, cost=cost)
 
 
-def validate(pieces: list[Piece], grid: Grid, spec: RouteSpec) -> str | None:
+def validate(pieces: list[Piece], grid: Grid, spec: RouteSpec, allow_tee: bool = False) -> str | None:
     """Every rule, once more, against the finished path and its own pieces."""
     if not pieces:
         return "the path is empty"
-    rules = _Rules(spec, grid)
+    rules = _Rules(spec, grid, allow_tee)
     belt = spec.kind == "belt"
     flows = _flows(pieces, spec)
     tiles = [(p.x, p.y) for p in pieces]
@@ -995,6 +1143,404 @@ def validate(pieces: list[Piece], grid: Grid, spec: RouteSpec) -> str | None:
 
 
 # --------------------------------------------------------------------------
+# splits, merges, lane joins
+# --------------------------------------------------------------------------
+
+_SIDES = ("left", "right")
+
+
+def side_tile(tile, direction: int, side: str) -> tuple[int, int]:
+    """The tile beside `tile` on `side`, seen in the direction of travel."""
+    return _step(tile, CCW[direction] if side == "left" else CW[direction])
+
+
+def straight_pieces(result: RouteResult) -> list[int]:
+    """Indices of a route's plain belts fed straight from behind and carrying on straight.
+
+    Where a splitter half may replace the belt, or a side-load land on it,
+    without either making a curve: a splitter output pushing into the side of
+    a curve, or a side-load onto a belt fed only from the side, would change
+    what the game builds.
+    """
+    spec = result.spec
+    if spec is None or not result.ok:
+        return []
+    pieces, flows = result.pieces, _flows(result.pieces, spec)
+    taken = {i for i, _, _ in result.merges}
+    if result.junction is not None and result.junction.kind == "lane-join":
+        taken.update(i for i, p in enumerate(pieces) if (p.x, p.y) == result.junction.tile)
+    found = []
+    for i, piece in enumerate(pieces):
+        if piece.name != spec.surface or piece.io_type or piece.other is not None or i in taken:
+            continue
+        if i == 0:
+            fed = flows[0] == spec.start.direction
+        else:
+            before = pieces[i - 1]
+            fed = flows[i - 1] == flows[i] and (
+                (before.name == spec.surface and before.other is None) or before.io_type == "output"
+            )
+        onward = i == len(pieces) - 1 or flows[i + 1] == flows[i]
+        if fed and onward:
+            found.append(i)
+    return found
+
+
+def curve_pieces(result: RouteResult) -> list[int]:
+    """Indices of a route's curves, each fed by the plain belt before it."""
+    spec = result.spec
+    if spec is None or not result.ok:
+        return []
+    pieces, flows = result.pieces, _flows(result.pieces, spec)
+    return [
+        i for i in range(1, len(pieces))
+        if flows[i - 1] != flows[i] and pieces[i].name == spec.surface and not pieces[i].io_type
+        and pieces[i - 1].name == spec.surface and not pieces[i - 1].io_type and pieces[i - 1].other is None
+    ]
+
+
+def lanes_at(result: RouteResult, index: int) -> tuple[str, str]:
+    """What a route carries on each lane past its piece `index`: start lanes plus merges up to there."""
+    lanes = list(result.lanes or ("", ""))
+    if len(lanes) != 2:
+        lanes = [lanes[0], lanes[0]] if lanes else ["", ""]
+    for at, lane, items in result.merges:
+        if at <= index:
+            k = _SIDES.index(lane)
+            parts = _carries(lanes[k]) | {part for item in items for part in _carries(item)}
+            lanes[k] = "+".join(sorted(parts))
+    return lanes[0], lanes[1]
+
+
+def _items_of(point: Endpoint) -> set[str]:
+    return {part for lane in point.items for part in _carries(lane)}
+
+
+def _failed(ident: str, spec: RouteSpec, connection: str, reason: str, near) -> RouteResult:
+    result = _fail(RouteSpec(ident, spec.kind, spec.start, spec.goal, spec.surface, spec.underground, spec.via,
+                             spec.turn_cost, spec.hop_cost), reason, near)
+    result.connection = connection
+    return result
+
+
+def route_split(spec: SplitSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
+                candidates: int = DEFAULT_CANDIDATES) -> list[RouteResult]:
+    """One source to every goal, all or nothing; on success the grid holds every sub-route.
+
+    The route to the first goal goes first. Each further goal branches off a
+    splitter set in place of a straight belt of a route already laid -- the
+    nearest few places by estimate are routed in full, and the cheapest
+    branch wins. Nothing touches `grid` until every destination succeeds.
+    """
+    costs = dict(turn_cost=spec.turn_cost, hop_cost=spec.hop_cost)
+    known = [g.rate for g in spec.goals if g.rate is not None]
+    trunk = sum(known) if known else None
+    first = spec.goals[0]
+    if trunk is not None:
+        first = Endpoint(first.x, first.y, first.direction, first.items, trunk, first.port, first.pipe_name)
+    fixed_tiles = tuple(f[0] for f in spec.fixed if f is not None)
+    base_spec = RouteSpec(f"{spec.id}/0", "belt", spec.source, first, spec.surface, spec.underground,
+                          tuple(spec.vias[0]) + fixed_tiles, **costs)
+    branch_specs = [
+        RouteSpec(f"{spec.id}/{k}", "belt", spec.source, spec.goals[k], spec.surface, spec.underground,
+                  tuple(spec.vias[k]), **costs)
+        for k in range(1, len(spec.goals))
+    ]
+    all_specs = [base_spec] + branch_specs
+
+    def fail_all(reason: str, near) -> list[RouteResult]:
+        return [_failed(s.id, s, spec.id, reason, near) for s in all_specs]
+
+    trial = grid.copy()
+    base = route(base_spec, trial, max_nodes)
+    if not base.ok:
+        return fail_all(base.reason, base.near)
+    base.connection = spec.id
+    trial.add(base.pieces)
+    placed = [base]
+    every_via = {t for vias in spec.vias for t in vias}
+
+    for k in range(1, len(spec.goals)):
+        goal = spec.goals[k]
+        fixed = spec.fixed[k - 1]
+        if fixed is not None:
+            at, side = fixed
+            tiles = [(p.x, p.y) for p in base.pieces]
+            index = tiles.index(at) if at in tiles else None
+            if index is None or index not in straight_pieces(base):
+                return fail_all(f"split tile {_where(at)} is not a straight belt of the route", at)
+            options = [(0, index, side)]
+        else:
+            options = [(pos, i, side) for pos, r in enumerate(placed) for i in straight_pieces(r) for side in _SIDES]
+
+        kept, blocked = [], None
+        for pos, i, side in options:
+            piece = placed[pos].pieces[i]
+            tile, d = (piece.x, piece.y), piece.direction
+            o = side_tile(tile, d, side)
+            b = _step(o, d)
+            branch = RouteSpec(f"{spec.id}/{k}", "belt", Endpoint(*b, d, lanes_at(placed[pos], i), goal.rate),
+                               goal, spec.surface, spec.underground, tuple(spec.vias[k]), **costs)
+            rules = _Rules(branch, trial)
+            why = next(((t, r) for t in (o, b) for r in [rules.tile(t)] if r is not None), None)
+            if why is None and (o in every_via or b in every_via):
+                why = (o if o in every_via else b, "is a via tile")
+            if why is not None:
+                blocked = blocked or why
+                continue
+            kept.append(((_manhattan(b, branch.last_tile), pos, i, side == "right"), (pos, i, side, tile, o, branch)))
+        kept.sort(key=lambda c: c[0])
+        kept = kept[:candidates]
+
+        best, first_failure = None, None
+        for _, (pos, i, side, tile, o, branch) in kept:
+            d = placed[pos].pieces[i].direction
+            splitter = Piece(spec.splitter, *tile, d, other=o)
+            trial2 = trial.copy()
+            trial2.add([splitter])
+            result = route(branch, trial2, max_nodes)
+            if not result.ok:
+                first_failure = first_failure or result
+                continue
+            key = (result.cost, pos, i, side)
+            if best is None or key < best[0]:
+                best = (key, result, trial2, pos, i, splitter, tile, side, d)
+        if best is None:
+            if first_failure is not None:
+                near, why = first_failure.near, first_failure.reason
+            elif blocked is not None:
+                near, why = blocked[0], f"{_where(blocked[0])} {blocked[1]}"
+            else:
+                near, why = (spec.source.x, spec.source.y), "no straight belt to set it in"
+            return fail_all(
+                f"no straight belt of the route leaves room for a {spec.splitter}: tried {len(kept)} place(s); "
+                f"nearest blocked by {why}",
+                near,
+            )
+        _, result, trial2, pos, i, splitter, tile, side, d = best
+        placed[pos].pieces[i] = splitter
+        result.connection = spec.id
+        result.junction = Junction("splitter", tile, side, d)
+        trial2.add(result.pieces)
+        trial = trial2
+        placed.append(result)
+
+    if len(spec.goals) >= 3:
+        n = len(spec.goals)
+        base.notes.append(Finding(
+            Severity.NOTE, "route-split-cascade",
+            f"route {spec.id}: {n} destinations through {n - 1} splitters; until busy outputs back up, the first "
+            "branch gets half and later ones less",
+        ))
+    grid.__dict__.update(trial.__dict__)
+    return placed
+
+
+def _auto_lane(source: Endpoint, target: RouteResult, index: int) -> str | None:
+    """The lane a merge goes onto when the plan says "auto", or None if neither is free."""
+    items = _items_of(source)
+    wants = target.spec.goal.items if target.spec else ()
+    expected = None
+    if len(items) == 1 and len(wants) == 2:
+        (item,) = items
+        on = [k for k in (0, 1) if item in _carries(wants[k])]
+        if len(on) == 1:
+            expected = on[0]
+    current = lanes_at(target, index)
+    order = [expected, 1 - expected] if expected is not None else [0, 1]
+    for k in order:
+        if _carries(current[k]) <= items:
+            return _SIDES[k]
+    return None
+
+
+def route_merge(spec: MergeSpec, target: RouteResult | None, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
+                candidates: int = DEFAULT_CANDIDATES) -> RouteResult:
+    """Side-load a source onto one lane of a route (or of a belt at a tile); on success the grid holds it."""
+    costs = dict(turn_cost=spec.turn_cost, hop_cost=spec.hop_cost)
+    start_tile = RouteSpec(spec.id, "belt", spec.source, spec.source, spec.surface, None).start_tile
+    if spec.onto_tile is not None:
+        tile = spec.onto_tile
+        index = None
+        if target is not None:
+            index = next((i for i, p in enumerate(target.pieces) if (p.x, p.y) == tile), None)
+        places = [(index, tile, grid.belt_entry.get(tile, spec.source.direction))]
+    else:
+        # Past the route's last splitter, so the merged item goes only where the route ends.
+        after = max((i for i, p in enumerate(target.pieces) if p.other is not None), default=-1)
+        places = [(i, (target.pieces[i].x, target.pieces[i].y), target.pieces[i].direction)
+                  for i in straight_pieces(target) if i > after]
+
+    options, auto_failed = [], bool(places) and spec.lane == "auto"
+    for i, tile, d in places:
+        lane = spec.lane
+        if lane == "auto":
+            lane = _auto_lane(spec.source, target, i)
+            if lane is None:
+                continue
+            auto_failed = False
+        s = side_tile(tile, d, lane)
+        into = CW[d] if lane == "left" else CCW[d]
+        goal = Endpoint(*s, into, sideload=True)
+        sub = RouteSpec(spec.id, "belt", spec.source, goal, spec.surface, spec.underground, tuple(spec.via), **costs)
+        options.append(((_manhattan(start_tile, s), -1 if i is None else i), (i, tile, d, lane, sub)))
+    if auto_failed:
+        raise RouteError(f"lane auto: both lanes of {spec.onto_route} already carry items at every place; "
+                         "name 'lane'")
+    placeholder = RouteSpec(spec.id, "belt", spec.source, Endpoint(*start_tile, spec.source.direction),
+                            spec.surface, spec.underground, tuple(spec.via), **costs)
+    if not options:
+        return _failed(spec.id, placeholder, spec.id, "the route has no straight belt to merge onto", start_tile)
+
+    if spec.onto_tile is not None:
+        i, tile, d, lane, sub = options[0][1]
+        name = grid.occupied.get(tile)
+        kind = (entity_data.raw.get(name) or {}).get("type") if name else None
+        if kind == "underground-belt" and tile in grid.belt_entry:
+            passes = hood_passes(lane)
+            blocked = "left" if passes == "right" else "right"
+            lanes = spec.source.items or ("", "")
+            lanes = lanes * 2 if len(lanes) == 1 else lanes
+            on_pass, on_block = _carries(lanes[_SIDES.index(passes)]), _carries(lanes[_SIDES.index(blocked)])
+            if on_block and not on_pass:
+                return _failed(spec.id, sub, spec.id,
+                               f"the hood of the underground at {_where(tile)} lets only the source's {passes} lane "
+                               f"through, and {', '.join(sorted(on_block))} is on its {blocked} lane; feed it from "
+                               "the other side or onto a plain belt", tile)
+        elif kind == "transport-belt" and tile in grid.belt_entry:
+            if _step(tile, OPPOSITE[grid.belt_entry[tile]]) not in grid.feeders.get(tile, ()):
+                return _failed(spec.id, sub, spec.id,
+                               f"{_where(tile)} has nothing feeding it from behind; a belt pointing into its side "
+                               "would turn it into a curve", tile)
+        else:
+            return _failed(spec.id, sub, spec.id,
+                           f"{_where(tile)} holds {name or 'nothing'}; a merge goes onto a transport belt or an "
+                           "underground entrance", tile)
+
+    options.sort(key=lambda o: o[0])
+    best, first_failure = None, None
+    for _, (i, tile, d, lane, sub) in options[:candidates]:
+        result = route(sub, grid, max_nodes)
+        if not result.ok:
+            first_failure = first_failure or result
+            continue
+        key = (result.cost, -1 if i is None else i)
+        if best is None or key < best[0]:
+            best = (key, result, i, tile, d, lane)
+    if best is None:
+        failure = first_failure
+        result = _failed(spec.id, failure.spec, spec.id, failure.reason, failure.near)
+        return result
+    _, result, i, tile, d, lane = best
+    result.connection = spec.id
+    result.junction = Junction("sideload", tile, lane, d)
+    grid.add(result.pieces)
+    items = tuple(sorted(_items_of(spec.source)))
+    name = grid.occupied.get(tile)
+    if (entity_data.raw.get(name) or {}).get("type") == "underground-belt":
+        # Through an entrance's hood only one of the source's lanes gets on.
+        lanes = spec.source.items or ("", "")
+        lanes = lanes * 2 if len(lanes) == 1 else lanes
+        items = tuple(sorted(_carries(lanes[_SIDES.index(hood_passes(lane))])))
+    if target is not None and i is not None:
+        before = lanes_at(target, i)[_SIDES.index(lane)]
+        target.merges.append((i, lane, items))
+        supply = (spec.source.rate or 0.0) + ((target.rate or 0.0) if _carries(before) else 0.0)
+        try:
+            capacity = layout.lane_throughput(target.spec.surface)
+        except layout.LayoutError:
+            capacity = None
+        if capacity is not None and supply > capacity + 1e-9:
+            result.notes.append(Finding(
+                Severity.SUSPECT, "route-belt-slow",
+                f"route {spec.id}: the {lane} lane of route {target.id} would carry {supply:.4g}/s from "
+                f"{_where(tile)}, {target.spec.surface} carries {capacity:.4g}/s a lane",
+                "Choose a faster belt, or merge onto the other lane.",
+                tile,
+            ))
+    return result
+
+
+def route_join(spec: JoinSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
+               candidates: int = DEFAULT_CANDIDATES) -> list[RouteResult]:
+    """Two sources onto a lane each: the first routed to the goal, the second into the side of one of its turns.
+
+    At a turn the first source's belt is a curve fed from one side. Pointing
+    the second source into the other side makes it a T-junction: each side
+    side-loads onto its own lane, so the first source fills the lane on the
+    side it comes from and the second the other.
+    """
+    costs = dict(turn_cost=spec.turn_cost, hop_cost=spec.hop_cost)
+    a_src, b_src = spec.sources
+    base_spec = RouteSpec(f"{spec.id}/0", "belt", a_src, spec.goal, spec.surface, spec.underground,
+                          tuple(spec.via), **costs)
+    b_placeholder = RouteSpec(f"{spec.id}/1", "belt", b_src, spec.goal, spec.surface, spec.underground, (), **costs)
+
+    def fail_all(reason: str, near) -> list[RouteResult]:
+        return [_failed(s.id, s, spec.id, reason, near) for s in (base_spec, b_placeholder)]
+
+    base = route(base_spec, grid, max_nodes)
+    if not base.ok:
+        return fail_all(base.reason, base.near)
+    trial = grid.copy()
+    trial.add(base.pieces)
+    flows = _flows(base.pieces, base_spec)
+    a_items, b_items = _items_of(a_src), _items_of(b_src)
+    want = None
+    wants = spec.goal.items
+    if len(wants) == 2 and len(a_items) == 1 and len(b_items) == 1 and a_items != b_items:
+        (a_item,), (b_item,) = a_items, b_items
+        on_a = [k for k in (0, 1) if a_item in _carries(wants[k])]
+        on_b = [k for k in (0, 1) if b_item in _carries(wants[k])]
+        if len(on_a) == 1 and len(on_b) == 1 and on_a != on_b:
+            want = _SIDES[on_a[0]]
+    b_start = RouteSpec("", "belt", b_src, b_src, spec.surface, None).start_tile
+
+    options = []
+    for i in curve_pieces(base):
+        d = flows[i]
+        a_side = "left" if flows[i - 1] == CW[d] else "right"
+        if want is not None and a_side != want:
+            continue
+        other = "right" if a_side == "left" else "left"
+        head = (base.pieces[i].x, base.pieces[i].y)
+        o = side_tile(head, d, other)
+        into = CW[d] if other == "left" else CCW[d]
+        sub = RouteSpec(f"{spec.id}/1", "belt", b_src, Endpoint(*o, into, sideload=True), spec.surface,
+                        spec.underground, (), **costs)
+        options.append(((_manhattan(b_start, o), i), (i, head, d, a_side, sub)))
+    options.sort(key=lambda o: o[0])
+    best, first_failure = None, None
+    for _, (i, head, d, a_side, sub) in options[:candidates]:
+        result = route(sub, trial, max_nodes, allow_tee=True)
+        if not result.ok:
+            first_failure = first_failure or result
+            continue
+        key = (result.cost, i)
+        if best is None or key < best[0]:
+            best = (key, result, head, d, a_side)
+    if best is None:
+        why = f"; nearest blocked by {first_failure.reason}" if first_failure else ""
+        return fail_all(
+            f"no turn on the path from {a_src.describe()} where {b_src.describe()} could join from the other side; "
+            f"add a 'via' tile that makes it turn{why}",
+            first_failure.near if first_failure else (a_src.x, a_src.y),
+        )
+    _, joined, head, d, a_side = best
+    trial.add(joined.pieces)
+    lanes = ["+".join(sorted(a_items)), "+".join(sorted(b_items))]
+    if a_side == "right":
+        lanes.reverse()
+    junction = Junction("lane-join", head, a_side, d)
+    base.lanes = (lanes[0], lanes[1])
+    for result in (base, joined):
+        result.connection = spec.id
+        result.junction = junction
+    grid.__dict__.update(trial.__dict__)
+    return [base, joined]
+
+
+# --------------------------------------------------------------------------
 # findings
 # --------------------------------------------------------------------------
 
@@ -1015,37 +1561,6 @@ def findings(spec: RouteSpec, result: RouteResult) -> list[Finding]:
         found.append(Finding(Severity.PROBLEM, "route-failed", f"{label}: {result.reason}", _LEVERS, result.near))
 
     if spec.kind == "belt":
-        wants = spec.goal.items
-        if any(wants):
-            have = spec.start.items
-            shown = " | ".join(i or "-" for i in wants)
-            if not have:
-                found.append(Finding(
-                    Severity.NOTE, "route-lanes-unknown",
-                    f"{label}: lanes are whatever arrives at {_where((spec.start.x, spec.start.y))}: "
-                    f"the destination wants {shown}",
-                ))
-            else:
-                def fits(source) -> bool:
-                    if len(wants) == 2 and wants[0] and wants[0] == wants[1]:
-                        # One item on both lanes means "the belt carries it": the
-                        # inserters take from either lane, so one lane will do and
-                        # only throughput suffers (route-belt-slow says so).
-                        return all(w in _carries(source[0]) | _carries(source[1]) for w in _carries(wants[0]))
-                    return all(not w or w in _carries(s) for w, s in zip(wants, source))
-
-                if not fits(have):
-                    detail = ""
-                    if fits(tuple(reversed(have))):
-                        detail = ("the lanes are swapped; v1 cannot swap lanes -- feed the source the other "
-                                  "way round or hand-build a lane swap")
-                    found.append(Finding(
-                        Severity.PROBLEM, "route-lanes",
-                        f"{label}: {spec.goal.describe()} wants {shown} on its lanes, the route delivers "
-                        + " | ".join(i or "-" for i in have),
-                        detail, (spec.goal.x, spec.goal.y),
-                    ))
-
         supply, demand = spec.start.rate, spec.goal.rate
         need = max(r for r in (supply, demand, 0.0) if r is not None)
         lanes_used = [lane for lane in (spec.start.items or spec.goal.items) if lane]
@@ -1090,6 +1605,7 @@ def findings(spec: RouteSpec, result: RouteResult) -> list[Finding]:
             f"{label}: supplies {spec.start.rate:.4g}/s where the destination wants {spec.goal.rate:.4g}/s",
         ))
 
+    found.extend(result.notes)
     used = {p.name for p in result.pieces}
     masked = sorted(n for n in used if _states_underground_mask(n))
     if masked:

@@ -584,10 +584,16 @@ def _cmd_build(args: argparse.Namespace) -> int:
     from . import plan, render
 
     try:
-        result = plan.build(plan.load(Path(args.plan)))
+        data = plan.load(Path(args.plan))
+        planned, warned = None, []
+        if data.get("request"):
+            # Rates the request asks for, next to what the blocks can do at full load.
+            planned, warned = plan.planned_from_request(data, Path(args.plan))
+        result = plan.build(data, planned)
     except plan.PlanError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    result.warnings.extend(warned)
 
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", result.label).strip("-") or "layout"
     out = Path(args.output) if args.output else Path(args.plan).resolve().parent
@@ -602,16 +608,27 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     print(f"{result.label}: {_plural(len(result.blueprint.entities), 'entity', 'entities')}, "
           f"{_plural(result.power_networks, 'power network', 'power networks')}")
+    for warning in warned:
+        print(f"warning: {warning}")
     for block in result.blocks:
+        if block.planned_crafts_per_second is None:
+            rate = f"{block.crafts_per_second:.4g} crafts/s at full load"
+        else:
+            rate = f"{block.planned_crafts_per_second:.4g}/s planned of {block.crafts_per_second:.4g} crafts/s"
         print(f"\nblock {block.index}: {block.machines} x {block.machine} on {block.recipe}, "
-              f"{block.width}x{block.height} at {tuple(block.at)}, {block.crafts_per_second:.4g} crafts/s")
+              f"{block.width}x{block.height} at {tuple(block.at)}, {rate}")
         for row in block.rows:
             limit = f" of {row['capacity']}" if row["capacity"] else ""
             print(f"  row {row['index'] + 1}: {row['machines']}{limit}")
         for port in block.ports:
             items = " | ".join(i or "-" for i in port["items"])
+            if port.get("planned_rate") is None:
+                flow = f"{port['rate']:.4g}/s at full load"
+            else:
+                flow = f"{port['planned_rate']:.4g}/s planned ({port['rate']:.4g}/s at full load)"
+            arrives = f", arrives {' | '.join(port['arrives'])}" if port.get("arrives") else ""
             print(f"  [{port['index']}] {port['io']:3s} {port['kind']:4s} ({port['x']}, {port['y']}) "
-                  f"flowing {port['direction']}: {items} at {port['rate']:.4g}/s")
+                  f"flowing {port['direction']}: {items} at {flow}{arrives}")
         for note in block.notes:
             print(f"  note: {note}")
     if result.routes:
@@ -626,6 +643,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
             line += f", {_plural(r.turns, 'turn', 'turns')}"
             if r.lanes:
                 line += f", {'lanes' if r.kind == 'belt' else 'carries'} " + "|".join(i or "-" for i in r.lanes)
+            if r.junction:
+                line += f", {r.junction.kind} at {r.junction.tile}"
+            if r.delivered:
+                line += f", delivered {' | '.join(r.delivered)}"
             print(line)
     shown = [f for f in result.findings if f.severity.value != "note"]
     if shown:

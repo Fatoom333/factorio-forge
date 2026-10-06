@@ -735,20 +735,37 @@ def build_block(spec: RowBlockSpec) -> Block:
     gap = _pole_interval(spec.pole, row_type.width)
     if gap:
         intervals.append(gap)
-    tried: list[tuple[int, int, Block]] = []
+    tried: list[tuple[int, int, Block, int]] = []
     failure: LayoutError | None = None
+    why = ""  # why the block without gap columns was not good enough
     for order, interval in enumerate(intervals):
         try:
             block, pieces = _emit(spec, row_type, interval, alone, shared)
         except LayoutError as exc:
             failure = exc
+            if not interval:
+                why = str(exc)
             continue
-        tried.append((pieces, order, block))
+        tried.append((pieces, order, block, interval))
         if pieces <= 1:
             break
+        if not interval:
+            why = f"the pole network was in {pieces} pieces"
     if not tried:
         raise failure or LayoutError(f"{spec.pole} cannot power this row")
-    return min(tried, key=lambda t: t[:2])[2]
+    _, _, block, interval = min(tried, key=lambda t: t[:2])
+    if interval:
+        block.notes.append(_gap_note(spec.rows, interval, why))
+    return block
+
+
+def _gap_note(rows: list[int], interval: int, why: str) -> str:
+    """What the gap columns a block was built with are, said from what was built."""
+    inner = sum((n - 1) // interval for n in rows)
+    if inner == 0:
+        return f"poles stand in a column added at each end of the row(s), none between machines ({why} without them)"
+    return (f"poles needed gap columns: one at each end of every row and one after every {interval} "
+            f"machine(s), {inner} between machines in all ({why} without them)")
 
 
 def _emit(spec: RowBlockSpec, row_type: RowType, interval: int, alone, shared) -> tuple[Block, int]:
@@ -886,8 +903,6 @@ def _emit(spec: RowBlockSpec, row_type: RowType, interval: int, alone, shared) -
     for x, yp in spots:
         put(spec.pole, x, yp, width=pw, height=ph)
     notes.extend(pole_notes)
-    if interval:
-        notes.append(f"poles needed gap columns: one after every {interval} machine(s)")
 
     reports = []
     for row, n in enumerate(spec.rows):
