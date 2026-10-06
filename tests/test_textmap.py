@@ -7,6 +7,8 @@ the prototype claims, and that nothing placed goes missing from it.
 
 from __future__ import annotations
 
+import io
+import sys
 import warnings
 from pathlib import Path
 
@@ -128,3 +130,20 @@ def test_cli_map_reads_a_book_entry(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert cli.main(["map", str(path), "--index", "0"]) == 0
     out = capsys.readouterr().out
     assert ">" in out and belt() in out
+
+
+def test_cli_map_survives_a_console_without_arrows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Piped output on Windows gets the locale code page, which has no arrows."""
+    bp = Blueprint()
+    bp.entities.append(belt(), tile_position=(0, 0), direction=Direction.EAST)
+    bp.entities.append(inserter(), tile_position=(0, 1), direction=Direction.NORTH)
+    path = tmp_path / "bp.txt"
+    path.write_text(bp.to_string(), encoding="utf-8")
+
+    raw = io.BytesIO()
+    stdout = io.TextIOWrapper(raw, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    assert cli.main(["map", str(path)]) == 0
+    stdout.flush()
+    out = raw.getvalue().decode("utf-8")
+    assert "×" in out and textmap.mark_of(bp.entities[1]).symbol in out

@@ -48,13 +48,15 @@ axes and a legend naming every entity behind each symbol. Symbols go by what
 an entity does, so a modded belt reads as a belt:
 
 ```
-x 0..7, y 0..3 (8×4 tiles)
-   0
-   01234567
- 0 >>>>>>U.
- 1 .↓..⇓...
- 2 aaaP.aaa
- 3 aAa..aAa
+x 0..6, y 0..5 (7×6 tiles)
+  0
+  0123456
+0 >>>>>>U
+1 .↓...⇓.
+2 aaaP...
+3 aAa.aaa
+4 aaa.aAa
+5 ....aaa
 ```
 
 Belts are `^ > v <`; inserters `↑ → ↓ ←` (doubled `⇑ ⇒ ⇓ ⇐` for one that
@@ -63,6 +65,9 @@ belt's entrance and exit; `S` a splitter; a machine fills its footprint (taken
 from the prototype) with lower case and a capital at its centre, so two side by
 side still read as two. An entity the loaded data does not know is `?`, two on
 one tile `!`. From Python: `textmap.text_map(blueprint)`.
+
+The command writes UTF-8 even when its output is piped or captured, where
+Windows would otherwise pick a code page without these arrows.
 
 Use it while a layout is changing -- it is text, so it costs no screenshot --
 and render the HTML once, for the version that is handed over.

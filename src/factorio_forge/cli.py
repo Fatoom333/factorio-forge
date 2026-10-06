@@ -872,7 +872,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _speak_utf8() -> None:
+    """Write UTF-8 whatever the console's code page.
+
+    Output piped or captured on Windows gets the locale's code page (cp1252,
+    cp1251), which has no arrows for the text map and no dash for `check`;
+    printing them would crash rather than look odd.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _speak_utf8()
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args))
