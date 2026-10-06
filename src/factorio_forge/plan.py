@@ -350,6 +350,8 @@ def _survey(connections: list) -> _Routes:
         if not isinstance(conn, dict):
             continue
         ident = _ident(conn, index)
+        if "/" in ident:
+            raise PlanError(f"connection {index}: id {ident!r} has a '/'; those name a split's or join's branches")
         to, sources = conn.get("to"), conn.get("from")
         if isinstance(to, list):
             subs = [f"{ident}/{k}" for k in range(len(to))]
@@ -360,6 +362,10 @@ def _survey(connections: list) -> _Routes:
         else:
             subs = [ident]
             ends = [(to, ident)]
+        for name in dict.fromkeys([ident, *subs]):
+            if name in survey.index_of or name in survey.resolved:
+                raise PlanError(f"connection {index}: id {ident!r} is already used by connection "
+                                f"{survey.index_of[survey.resolved[name]]}")
         survey.resolved[ident] = subs[0]
         for sub in subs:
             survey.resolved[sub] = sub
@@ -746,7 +752,7 @@ def _inputs(plan: dict) -> list[lanes.Feed]:
 
 
 def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int]], routes: list[route.RouteResult],
-                 entities: list, known_recipes: dict[int, str]) -> list[inspection.Finding]:
+                 entities: list, known_recipes: dict[int, str], loose: set[int]) -> list[inspection.Finding]:
     """Trace every belt lane of the build, fill in what the report says arrives, and check it."""
     inputs = _inputs(plan)
     feeds = list(inputs)
@@ -760,7 +766,7 @@ def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int
     # Nothing enters a block's output line from behind: what it carries, its inserters put there.
     feeds.extend(lanes.Feed(tile, ("", "")) for tile in heads)
     in_ports = [(p["x"], p["y"]) for b in built for p in b.ports if p["kind"] == "belt" and p["io"] == "in"]
-    lane_map = lanes.trace(entities, feeds, in_ports, known_recipes)
+    lane_map = lanes.trace(entities, feeds, in_ports, known_recipes, loose)
 
     for feed in inputs:
         if feed.tile not in lane_map.nodes:
@@ -769,6 +775,11 @@ def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int
             source = lane_map.behind[feed.tile][0]
             name = entities[lane_map.nodes[source].entity].name
             raise PlanError(f"input at {list(feed.tile)} is fed from behind by {name} at {list(source)}; "
+                            "an input names what enters a belt head")
+        if lane_map.sides.get(feed.tile):
+            source = min(lane_map.sides[feed.tile].values())
+            name = entities[lane_map.nodes[source].entity].name
+            raise PlanError(f"input at {list(feed.tile)} is fed from its side by {name} at {list(source)}; "
                             "an input names what enters a belt head")
 
     ending = {r.spec.goal.port: r for r in routes if r.ok and r.spec and r.spec.goal.port is not None}
@@ -834,15 +845,19 @@ def planned_from_request(plan: dict, plan_path: Path) -> tuple[dict[str, float],
 def _plan_rates(built: list[BuiltBlock], wanted: dict[int, float], planned: dict[str, float] | None) -> None:
     """Each block's planned crafts per second, and each port's planned rate to match."""
     capacity: dict[str, float] = {}
+    remaining = dict(planned or {})
     for block in built:
         if block.index not in wanted:
             capacity[block.recipe] = capacity.get(block.recipe, 0.0) + block.crafts_per_second
+        elif block.recipe in remaining:
+            # A block's own 'planned' is its share; the rest of the recipe goes to the others.
+            remaining[block.recipe] = max(0.0, remaining[block.recipe] - wanted[block.index])
     for block in built:
         rate = wanted.get(block.index)
         if rate is None and planned:
             if block.recipe in planned:
                 share = capacity.get(block.recipe) or 0.0
-                rate = planned[block.recipe] * (block.crafts_per_second / share if share else 0.0)
+                rate = remaining[block.recipe] * (block.crafts_per_second / share if share else 0.0)
             else:
                 block.notes.append("not in the request's bill of materials")
         block.planned_crafts_per_second = rate
@@ -946,6 +961,8 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
                 entity.direction = p.direction
             if p.recipe:
                 entity.recipe = p.recipe
+        # The plan's own entities come right after the blocks', before any route piece.
+        loose = set(range(len(placements), len(placements) + len(plan.get("entities") or [])))
         for extra in plan.get("entities") or []:
             try:
                 name = extra["name"]
@@ -964,7 +981,7 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
     entities = list(blueprint.entities)
     report = inspection.inspect(blueprint)
     findings = (list(report.findings) + fluids.check(entities) + route_findings
-                + _check_lanes(plan, built, heads, routes, entities, known_recipes))
+                + _check_lanes(plan, built, heads, routes, entities, known_recipes, loose))
     for block in built:
         planned_rate = block.planned_crafts_per_second
         if planned_rate is not None and planned_rate > block.crafts_per_second + 1e-9:

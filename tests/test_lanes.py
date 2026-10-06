@@ -271,6 +271,27 @@ class TestFindings:
         with pytest.raises(plan.PlanError, match="fed from behind"):
             built(hand, [{"at": [x - 3, y], "items": ["a"]}], blocks=[block])
 
+    def test_a_side_fed_tile_takes_no_input(self) -> None:
+        placed = line(0, 2, 0) + column(3, -2, 0, NORTH)
+        with pytest.raises(plan.PlanError, match="fed from its side"):
+            built(placed, [{"at": [0, 0], "items": ["a", "b"]}, {"at": [3, 0], "items": ["c"]}])
+
+    def test_an_undeclared_hand_head_inside_the_build_is_unknown(self) -> None:
+        block, port = block_and_port(at=(10, 0))
+        x, y = port["x"], port["y"]
+        # A chest further out puts the head of the hand line inside the build.
+        hand = line(x - 4, x - 1, y) + [{"name": prototypes.small_chest(), "position": [x - 8, y]}]
+        result = built(hand, blocks=[block])
+        assert "lanes-unknown" in codes(result)
+        declared = built(hand, [{"at": [x - 4, y], "items": list(port["items"])}], blocks=[block])
+        assert lane_codes(declared) == []
+
+    def test_a_belt_into_a_pole_is_a_dead_end(self) -> None:
+        placed = line(0, 3, 0) + [{"name": prototypes.small_pole(), "position": [4, 0]}]
+        result = built(placed, [{"at": [0, 0], "items": ["a"]}])
+        stuck = [f for f in result.findings if f.code == "lanes-not-taken"]
+        assert {f.severity for f in stuck} == {inspection.Severity.SUSPECT} and len(stuck) == 2
+
     def test_an_open_end_is_quiet_and_a_block_line_tail_is_closed(self) -> None:
         result = built(line(0, 3, 0), [{"at": [0, 0], "items": ["a"]}])
         assert lane_codes(result) == []

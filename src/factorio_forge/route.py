@@ -1443,9 +1443,12 @@ def route_merge(spec: MergeSpec, target: RouteResult | None, grid: Grid, max_nod
         lanes = lanes * 2 if len(lanes) == 1 else lanes
         items = tuple(sorted(_carries(lanes[_SIDES.index(hood_passes(lane))])))
     if target is not None and i is not None:
-        before = lanes_at(target, i)[_SIDES.index(lane)]
+        # The route's own rate, shared evenly over the lanes its start fills.
+        own = lanes_at(target, -1)
+        busy = sum(1 for each in own if _carries(each))
+        on_lane = (target.rate or 0.0) / busy if busy and _carries(own[_SIDES.index(lane)]) else 0.0
         target.merges.append((i, lane, items))
-        supply = (spec.source.rate or 0.0) + ((target.rate or 0.0) if _carries(before) else 0.0)
+        supply = (spec.source.rate or 0.0) + on_lane
         try:
             capacity = layout.lane_throughput(target.spec.surface)
         except layout.LayoutError:
@@ -1455,7 +1458,8 @@ def route_merge(spec: MergeSpec, target: RouteResult | None, grid: Grid, max_nod
                 Severity.SUSPECT, "route-belt-slow",
                 f"route {spec.id}: the {lane} lane of route {target.id} would carry {supply:.4g}/s from "
                 f"{_where(tile)}, {target.spec.surface} carries {capacity:.4g}/s a lane",
-                "Choose a faster belt, or merge onto the other lane.",
+                "Choose a faster belt, or merge onto the other lane. The lane's load is an estimate: the route's "
+                "rate is split evenly over the lanes it fills.",
                 tile,
             ))
     return result

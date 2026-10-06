@@ -124,6 +124,16 @@ class TestPlannedRates:
         planned, _ = plan.planned_from_request(the_plan, tmp_path / "plan.json")
         assert "block-short" in codes(plan.build(the_plan, planned))
 
+    def test_a_blocks_own_planned_rate_is_its_share(self) -> None:
+        block, alone = one_block()
+        cps = alone.crafts_per_second
+        other = {**block, "at": [alone.width + 10, 0]}
+        result = plan.build({"blocks": [{**block, "planned": cps / 4}, other]}, {block["recipe"]: cps})
+        first, second = result.blocks
+        assert first.planned_crafts_per_second == pytest.approx(cps / 4)
+        assert second.planned_crafts_per_second == pytest.approx(cps * 3 / 4)
+        assert "block-short" not in codes(result)
+
     def test_a_block_the_bill_does_not_list(self) -> None:
         block, _ = one_block()
         result = plan.build({"blocks": [block]}, {"not-this-recipe": 1.0})

@@ -30,7 +30,8 @@ A splitter sends each input half's left lane to the left lane of both outputs,
 and the same for the right. Items come on from a `Feed` (a point start or a
 plan's `inputs`), from an inserter's drop -- what a machine makes, what it took
 off another belt, or something unknown -- from a drill, and as "unknown" at a
-belt head that starts at the edge of the build. Consumers are inserters that
+belt head that starts at the edge of the build or behind a loader, and at
+the head of a hand-placed belt anywhere. Consumers are inserters that
 take from a belt; what they take is the recipe of the machine they feed.
 
 Where something is not modelled the lanes past it become unknown and a
@@ -41,7 +42,9 @@ own: it can only stop one from being certain.
 
 A push into an empty tile is open -- the belt may go on in the world, the
 rule `inspection` uses for fragments -- except at the tail of a block's input
-line, which is meant to end there and is closed. Dead ends are closed too.
+line, which is meant to end there and is closed. Dead ends are closed too,
+and so is a belt pushing into anything that is not belt-like (a pole, a
+machine, a chest, an inserter).
 At a closed end every item must be taken somewhere upstream, or it fills the
 lane and stops what shares it.
 """
@@ -60,6 +63,8 @@ from . import fluids, inspection
 from .inspection import STEP, Finding, Severity
 
 LEFT, RIGHT = 0, 1
+# What a belt may push into without stopping; anything else in the way is a dead end.
+_BELT_LIKE = {"transport-belt", "underground-belt", "splitter", "loader", "loader-1x1", "linked-belt"}
 _SIDE = ("left", "right")
 CW = {0: 4, 4: 8, 8: 12, 12: 0}
 CCW = {0: 12, 4: 0, 8: 4, 12: 8}
@@ -150,10 +155,14 @@ class LaneMap:
     behind: dict[Tile, list[Tile]] = field(default_factory=dict)
     # A splitter half's other half.
     halves: dict[Tile, Tile] = field(default_factory=dict)
+    # Which tile feeds each transport belt from each side (LEFT/RIGHT).
+    sides: dict[Tile, dict[int, Tile]] = field(default_factory=dict)
     # Crafting machines with a recipe: index -> (recipe, name, tile), and the
     # inserters feeding each: (pickup tile if it is a belt tile else None, filter).
     machines: dict[int, tuple[str, str, Tile]] = field(default_factory=dict)
     fed_by: dict[int, list[tuple[Tile | None, Filter | None]]] = field(default_factory=dict)
+    # Heads of hand-placed belts nobody named the load of: what reaches a port from one is worth a note.
+    loose_heads: set[Tile] = field(default_factory=set)
 
     def at(self, tile) -> tuple[Content, Content] | None:
         tile = tuple(tile)
@@ -248,11 +257,13 @@ def _parts(lane: str) -> frozenset[str]:
 
 
 def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] = (),
-          recipes: Mapping[int, str] | None = None) -> LaneMap:
+          recipes: Mapping[int, str] | None = None, loose: frozenset[int] | set[int] = frozenset()) -> LaneMap:
     """Every belt lane's content in a finished build, and where items stop.
 
     `recipes` names the recipe of machines that store none but are known to
     run one -- a furnace in a block picks its recipe from what it is given.
+    `loose` are the indices of hand-placed entities: a head of one of their
+    belts carries something unknown unless a feed names it, wherever it is.
     """
     occupied: dict[Tile, list[int]] = {}
     for index, entity in enumerate(entities):
@@ -320,6 +331,11 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
             return exit_of.get(node.tile)
         return _step(node.tile, node.direction)
 
+    def blocked(tile: Tile) -> bool:
+        """Something that is not belt-like stands on `tile`: a belt pushing into it stops there."""
+        kinds = {getattr(entities[i], "type", "") for i in occupied.get(tile, ())}
+        return bool(kinds) and not kinds & _BELT_LIKE
+
     for tile in sorted(nodes):
         node = nodes[tile]
         if node.kind == "entrance":
@@ -330,6 +346,9 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
         target = _step(tile, node.direction)
         receiver = nodes.get(target)
         if receiver is None:
+            if blocked(target):
+                # Against a pole, a machine, a chest: a dead end like a head-on belt.
+                closed.update({(tile, LEFT), (tile, RIGHT)})
             continue
         p, r = node.direction, receiver.direction
         side = LEFT if p == CW[r] else RIGHT
@@ -349,6 +368,7 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
             closed.update({(tile, LEFT), (tile, RIGHT)})
 
     by_feed: dict[Tile, list[Feed]] = {}
+    loose_heads: set[Tile] = set()
     for feed in feeds:
         by_feed.setdefault(tuple(feed.tile), []).append(feed)
 
@@ -383,10 +403,14 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
             for lane in (LEFT, RIGHT):
                 inject((tile, lane), Content(_parts(feed.lanes[lane])))
         if not fed_behind and not from_side and tile not in by_feed:
-            # A head. From the edge of the build, or from a loader, anything may come on.
+            # A head. From the edge of the build, from a loader, or of a hand-placed
+            # belt nobody named the load of, anything may come on.
             back = _step(tile, OPPOSITE[node.direction])
             there = [getattr(entities[i], "type", "") for i in occupied.get(back, ())]
-            if outside(back) or any(k in ("loader", "loader-1x1", "linked-belt") for k in there):
+            if node.entity in loose:
+                loose_heads.add(tile)
+            if (outside(back) or node.entity in loose
+                    or any(k in ("loader", "loader-1x1", "linked-belt") for k in there)):
                 unknown_both(tile)
     for left, right in sorted(halves.items()):
         for lane in (LEFT, RIGHT):
@@ -465,7 +489,7 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
             if ahead in nodes and tile in behind.get(ahead, ()):
                 tile = ahead
                 continue
-            if ahead is not None and ahead not in occupied:
+            if ahead is None or ahead not in nodes and (ahead not in occupied or blocked(ahead)):
                 closed.update({(tile, LEFT), (tile, RIGHT)})
             break
 
@@ -492,7 +516,8 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
                     queued.add(dst)
 
     return LaneMap(nodes, carries, edges, consumers, closed, unchecked,
-                   {k: v for k, v in seeds.items() if k in carries}, behind, halves, machines, fed_by)
+                   {k: v for k, v in seeds.items() if k in carries}, behind, halves, sides, machines, fed_by,
+                   loose_heads)
 
 
 # --------------------------------------------------------------------------
@@ -623,7 +648,8 @@ def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation]) -> tup
         if lanes is None:
             continue
         left, right = lanes
-        if not (left.items or right.items) and not exp.routed:
+        from_hand = (left.unknown | right.unknown) & lane_map.loose_heads
+        if not (left.items or right.items) and not exp.routed and not from_hand:
             continue  # an unconnected fragment
         shown = f"{left.show()} | {right.show()}"
         unknown_tiles = sorted(left.unknown | right.unknown)

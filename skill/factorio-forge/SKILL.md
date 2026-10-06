@@ -275,7 +275,8 @@ findings marked) and `out/<label>.report.json`. Read the report:
   "request.json"` (the reviewed request, path from the plan's folder) in the
   plan and ports read `5/s planned (6/s at full load)`, routes are sized for
   the planned flow, and a block planned above its capacity is `block-short`.
-  A block's own `"planned"` (crafts/s) overrides the request. In ports also
+  A block's own `"planned"` (crafts/s) is its share of the request; the
+  other blocks of that recipe share the rest. In ports also
   say what `arrives`, lane by lane, once connected;
 - **notes**: overfed rows, extra inserters, gap columns for poles (said as
   built: at each end only, or how many between machines, and why).
@@ -331,6 +332,9 @@ Hand-place in `entities` only balancers, splitters with a priority or filter,
 and lane swaps of belts already laid. Declare what enters a hand-placed belt
 head with `"inputs": [{"at": [x, y], "items": ["<left>", "<right>"]}]` so its
 lanes are checked like the router's; the same checks run over everything.
+An undeclared hand-placed head carries something unknown, so the ports it
+reaches only get `lanes-unknown`. A belt that ends against a pole, a machine
+or a chest is a dead end: what nothing takes before it fills the lane.
 
 ### Grid-snapped sections (walls, lines of modules)
 

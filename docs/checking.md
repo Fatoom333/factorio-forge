@@ -118,7 +118,8 @@ direction of travel. Not yet run by `factorio-forge check`.
 | underground entrance | joins straight | into the hood: dead end | hood rule |
 | underground exit | into the hood: dead end | dead end | not tracked |
 | splitter half | joins that half | dead end | dead end |
-| loader, linked belt, anything else | exit: takes anything | | |
+| loader, linked belt | exit: takes anything | | |
+| anything else (pole, machine, chest, inserter ...) | dead end | dead end | dead end |
 | nothing | open end, except the tail of a block's input line | | |
 
 - A transport belt fed from behind, or from both sides, is straight: each
@@ -135,12 +136,16 @@ direction of travel. Not yet run by `factorio-forge check`.
 - Items come on from a declared start (a route's point, or the plan's
   `inputs`), from an inserter's drop (what the machine it takes from makes,
   through its filter; what it takes off another belt; else unknown), a
-  drill's drop (unknown), and at a belt head at the edge of the build
-  (unknown). What an inserter takes from a belt is the recipe of the machine
+  drill's drop (unknown), at a belt head at the edge of the build or behind
+  a loader (unknown), and at the head of a hand-placed belt anywhere that
+  `inputs` does not name (unknown, and a port it reaches gets
+  `lanes-unknown`). The head of a block's or a route's belt elsewhere carries
+  nothing. What an inserter takes from a belt is the recipe of the machine
   it feeds, or anything for a chest, a lab or a furnace without a recipe.
 
 **Open and closed ends.** A belt pointing into an empty tile is open: it may
-go on in the world, as everywhere in the checker. Dead ends are closed, and
+go on in the world, as everywhere in the checker. Dead ends are closed (a
+belt pointing into a pole, a machine or a chest is one), and
 so is the tail of a block's input line, which is meant to end there. At a
 closed end every item on the lane must be taken by something upstream on
 its way there, or it fills the lane.

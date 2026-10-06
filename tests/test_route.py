@@ -802,6 +802,24 @@ class TestMerges:
         assert not result.routes[0].ok and "hood" in result.routes[0].reason
 
 
+    def test_a_merge_counts_only_its_lanes_share_of_the_route(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        lane = layout.lane_throughput(belt)
+
+        def merged(extra: float) -> plan.BuildResult:
+            main = {"id": "main", "kind": "belt", "belt": belt, "from": point(0, 0, items=["a"], rate=lane),
+                    "to": point(16, 0)}
+            side = {"kind": "belt", "belt": belt, "from": point(6, -5, SOUTH, items=["b"], rate=extra),
+                    "onto": {"route": "main", "lane": "left"}}
+            result = build([main, side])
+            assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
+            return result
+
+        # 'a' on both lanes at one lane's rate is half a lane each: room for more.
+        assert "route-belt-slow" not in codes(merged(lane * 0.3))
+        assert "route-belt-slow" in codes(merged(lane * 0.6))
+
+
 class TestLaneJoins:
     def test_two_sources_onto_the_lanes_asked_for(self) -> None:
         belt, _, _ = prototypes.belt_set()
@@ -958,6 +976,15 @@ class TestRefusals:
 
     def index(self, ports, io, kind) -> int:
         return next(p["index"] for p in ports if p["io"] == io and p["kind"] == kind)
+
+    def test_an_id_used_twice(self) -> None:
+        belt, _, _ = prototypes.belt_set()
+        first = {"id": "x", "kind": "belt", "belt": belt, "from": point(0, 0), "to": point(8, 0)}
+        second = {**first, "from": point(0, 4), "to": point(8, 4)}
+        with pytest.raises(plan.PlanError, match="already used by connection 0"):
+            build([first, second])
+        with pytest.raises(plan.PlanError, match="has a '/'"):
+            build([{**first, "id": "x/0"}])
 
     def test_a_port_out_of_range(self, mixed) -> None:
         block, ports = mixed

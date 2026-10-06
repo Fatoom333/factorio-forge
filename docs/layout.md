@@ -104,6 +104,9 @@ port (or a point). `route.py` finds the pieces; nothing is drawn by hand.
 "routing": {"margin": 3, "max_nodes": 200000, "reserve": [[x0, y0, x1, y1]], "candidates": 12}
 ```
 
+- **Ids**: `id` names a connection (else `c<index>`); each is used once, and
+  none has a `/`, which names a split's or a lane join's sub-routes
+  (`<id>/0`, `<id>/1`). A plan with an id twice is refused.
 - **Ports** are named by their index in the block's report (`[j]` in the
   build output). An optional `items` on a port reference guards against
   renumbering: the build refuses if the port carries something else.
@@ -188,9 +191,11 @@ ends:
   port inside `onto` is not a use. Pipes do not split or merge: route to a
   point beside the pipe instead.
 
-**Inputs.** A hand-placed belt head (nothing feeding it from behind) is
-declared with `inputs`: `items` is `[left, right]`, one item for both lanes.
-Without it, a head at the edge of the build carries something unknown.
+**Inputs.** A hand-placed belt head (nothing feeding it from behind or from
+a side) is declared with `inputs`: `items` is `[left, right]`, one item for
+both lanes. An input on a tile fed from behind or from a side is refused.
+Without it, the head of a hand-placed belt carries something unknown,
+wherever it is, and a port it reaches gets `lanes-unknown`.
 
 **Lanes.** After routing, `lanes.py` traces every belt of the build -- block
 belts, hand-placed belts and routes alike -- and is the one place lane
@@ -204,7 +209,8 @@ the game.
 load. With `"request": "request.json"` in the plan (a path from the plan's
 folder), `build` runs the request's bill of materials and gives each block
 its share of its recipe's rate (in proportion to capacity, across blocks
-with the same recipe); a block's own `"planned"` (crafts/s) wins. Each port
+with the same recipe); a block's own `"planned"` (crafts/s) is its share,
+and the rest of the recipe's rate goes to the other blocks. Each port
 then has `planned_rate` next to `rate`, and per-item `item_rates`; routes are
 sized by the planned flow of the items they actually carry. A block planned
 above its capacity is `block-short`; a block whose recipe the bill does not
