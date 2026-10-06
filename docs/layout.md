@@ -101,9 +101,12 @@ port (or a point). `route.py` finds the pieces; nothing is drawn by hand.
   {"kind": "pipe", "from": {"at": [x, y], "direction": 4, "items": ["<fluid>"], "rate": 20},
    "to": {"block": 1, "port": 2}, "pipe": "<pipe>", "pipe_to_ground": "<pipe-to-ground>"}
 ],
-"routing": {"margin": 3, "max_nodes": 200000, "reserve": [[x0, y0, x1, y1]]}
+"routing": {"margin": 3, "max_nodes": 200000, "reserve": [[x0, y0, x1, y1]], "candidates": 12}
 ```
 
+- **Ids**: `id` names a connection (else `c<index>`); each is used once, and
+  none has a `/`, which names a split's or a lane join's sub-routes
+  (`<id>/0`, `<id>/1`). A plan with an id twice is refused.
 - **Ports** are named by their index in the block's report (`[j]` in the
   build output). An optional `items` on a port reference guards against
   renumbering: the build refuses if the port carries something else.
@@ -123,16 +126,95 @@ port (or a point). `route.py` finds the pieces; nothing is drawn by hand.
   free for later (undergrounds may pass beneath); `margin` is how far past
   everything in the plan the search may go.
 
-**Joins and lanes.** A route leaves an out port straight from its last tile
-and enters an in port with a straight join into its first tile. A straight
-belt, a curve fed by one plain belt and an underground pair all keep the left
-lane on the left, and the route never curves right after an underground exit
-(still to be confirmed in the game), so it delivers the source's lanes
-unchanged. Lanes that do not match the destination are a problem; swapped
-lanes are said to be swapped -- a route cannot swap them. A destination
-naming one item for both lanes (a block's single-ingredient input) takes it
-from either lane, so a source with that item on one lane -- a block's output
--- fits; `route-belt-slow` judges whether one lane is enough.
+**Splits, merges and lane joins** are belt connections with more than two
+ends:
+
+```json
+"connections": [
+  {"id": "cable", "from": {"block": 0, "port": 1, "items": ["<item>"]},
+   "to": [{"block": 1, "port": 0}, {"block": 2, "port": 1, "via": [[30, 12]]}],
+   "split": [{"at": [14, 18], "side": "right"}], "splitter": "<splitter>"},
+  {"id": "iron", "from": {"at": [19, -3], "direction": 8, "items": ["<item>"], "rate": 2},
+   "onto": {"block": 1, "port": 0, "lane": "auto"}},
+  {"id": "plastic", "from": {"at": [31, -3], "direction": 8, "items": ["<item>"]},
+   "onto": {"route": "green-out", "lane": "left"}},
+  {"id": "hand", "from": {"at": [5, 5], "direction": 4, "items": ["<item>"]},
+   "onto": {"at": [9, 7], "lane": "right"}},
+  {"id": "mix", "from": [{"block": 1, "port": 1}, {"at": [33, -2], "direction": 8, "items": ["<item>"]}],
+   "to": {"block": 2, "port": 0}}
+],
+"inputs": [{"at": [19, -3], "items": ["<item>"]}]
+```
+
+- **Split**: `to` is a list of two or more ports or points, each with its own
+  optional `via`. The route to the first is laid first (sub-route `<id>/0`);
+  every further one (`<id>/1`, ...) branches off a splitter put in place of a
+  belt of a route already laid. That belt must be a *straight piece*: a plain
+  belt fed straight from behind (by the belt or underground exit before it,
+  or the port or point it starts from) and carrying on straight, so neither
+  the splitter's input nor either output makes a curve. Its other half and
+  the tile past it must be free. The splitter is the only one of the belt's
+  speed unless `splitter` names one; only two-tile splitters split in v1.
+  `split` (optional, aligned with `to[1:]`) pins a branch to a tile of the
+  first route and the side the other half goes on. All or nothing: if any
+  destination fails, nothing of the connection is placed. With three or more
+  destinations the splitters cascade (`route-split-cascade`).
+- **Merge**: `onto` instead of `to` side-loads the source onto one lane of an
+  earlier route (`{"route": id}`, a sub-route `id/k` too), of the route into
+  an in port (`{"block": b, "port": j}`), or of a belt standing at a tile
+  (`{"at": [x, y]}`, hand-placed or routed). The source's last piece points
+  into the side of a straight piece past the route's last splitter, on the
+  side of the chosen `lane` -- both of its lanes go onto that one. A target
+  belt must be fed from behind: fed only from the side it is a curve, and the
+  side-load would turn it (refused). `lane` is `left`, `right` or `auto` (the
+  default; not for `at`): the lane the destination names the source's item
+  on, else the free one; both taken everywhere is refused. A merge must come
+  after the route it merges onto in the plan.
+- **Hood rule**: onto an underground entrance (only through `onto.at`) only
+  the source lane on the entrance's open side gets through
+  (`lanes.hood_passes`: a feeder from the left passes its right lane, one
+  from the right its left lane), onto the near lane; the other lane stops.
+  A source whose items are all on the blocked lane is refused. Still to be
+  confirmed in the game.
+- **Lane join**: `from` is a list of two sources and `to` one destination.
+  The first source is routed to the destination; the second points into the
+  other side of one of its curves (`curve_pieces`: a turn fed by a plain
+  belt), which makes the curve a T-junction, so each source fills the lane on
+  the side it comes from. If the destination names the two items on
+  different lanes, only turns that give that order are used. A path with no
+  turn is refused: add a `via` tile that makes it turn.
+- **Choosing a place**: every candidate place is estimated by distance, the
+  nearest `routing.candidates` (12) are routed in full, and the cheapest
+  wins (length, turns, hops). Ties go by plan order, then position: the same
+  plan always builds the same blueprint.
+- **Ports**: an out port may be a `from` once and an in port a `to` once; a
+  port inside `onto` is not a use. Pipes do not split or merge: route to a
+  point beside the pipe instead.
+
+**Inputs.** A hand-placed belt head (nothing feeding it from behind or from
+a side) is declared with `inputs`: `items` is `[left, right]`, one item for
+both lanes. An input on a tile fed from behind or from a side is refused.
+Without it, the head of a hand-placed belt carries something unknown,
+wherever it is, and a port it reaches gets `lanes-unknown`.
+
+**Lanes.** After routing, `lanes.py` traces every belt of the build -- block
+belts, hand-placed belts and routes alike -- and is the one place lane
+findings come from (`docs/checking.md`, "Lanes (in a build)"). Each in port
+in the report gets `arrives` (what reaches its first tile, lane by lane) and
+each route `delivered`. A route's own belief about its lanes is checked
+against the trace: `route-lanes-disagree` means one of them is wrong about
+the game.
+
+**Planned rates.** Port rates and `crafts_per_second` are capacity at full
+load. With `"request": "request.json"` in the plan (a path from the plan's
+folder), `build` runs the request's bill of materials and gives each block
+its share of its recipe's rate (in proportion to capacity, across blocks
+with the same recipe); a block's own `"planned"` (crafts/s) is its share,
+and the rest of the recipe's rate goes to the other blocks. Each port
+then has `planned_rate` next to `rate`, and per-item `item_rates`; routes are
+sized by the planned flow of the items they actually carry. A block planned
+above its capacity is `block-short`; a block whose recipe the bill does not
+list gets a note.
 
 **Reach** is read per prototype: `max_distance` of an underground belt,
 `max_underground_distance` of a pipe-to-ground's underground connection. It
@@ -165,24 +247,42 @@ obstacle for the next; no route is ripped up for another. The one rip-up is
 within a route: when `via` tiles make the cheapest path come back over its
 own earlier tiles, those tiles are kept out of the later part and the search
 runs again (a few times at most; otherwise `route-failed` says where the path
-crossed itself). After routing, the
+crossed itself). Splits, merges and joins try their candidate places on a
+copy of the grid and change nothing until they succeed. After routing, the
 general checks run over everything, so `belts-head-on`,
 `underground-unpaired`, `overlap` and `fluids-mixed` independently catch a
 router mistake.
 
 **Findings.** `route-failed` (nothing of that route is placed; the reason
 names the blocked start, goal or via tile, the tile the search came closest
-from and what blocked it, or the exhausted budget), `route-lanes`,
-`route-belt-slow`, and notes `route-lanes-unknown`, `route-short-supply`,
-`route-no-underground`, `route-underground-speed`, `route-tiles-unchecked`.
-The report has a `routes` list with each route's pieces, length, turns,
-underground pairs, lanes and reason.
+from and what blocked it, or the exhausted budget; a split's or join's
+sub-routes all fail together), `route-lanes-disagree`, `route-belt-slow`
+(also a merge that overfills one lane), and notes `route-short-supply`,
+`route-split-cascade`, `route-no-underground`, `route-underground-speed`,
+`route-tiles-unchecked`; from the build, `block-short`. Lane findings
+(`lanes-*`) are listed in `docs/checking.md`. The report has a `routes` list
+with each route's connection, pieces, length, turns, underground pairs,
+lanes, junction, merges, delivered lanes and reason.
 
-**Out of scope** in v1: splitters, merges, one source to several
-destinations, balancers, lane swaps, deliberate side-loading, joining a belt
-mid-line; ripping up one route for another; map terrain (water, cliffs, ore, an existing
-base -- `reserve` stands in); pipe throughput and pumps; pieces larger than one
-tile; rails and robots. A port used twice is refused.
+**Out of scope** in v1:
+
+- splitter priority, filters and balancers -- the router never sets them; the
+  lane tracker passes such a splitter on as unfiltered and notes it;
+- swapping the lanes of a belt already laid -- the one lane choice is a lane
+  join, which builds a new head;
+- the router does not create underground entrances to filter lanes; an
+  entrance can be a merge target only through `onto.at`;
+- side-loading onto an underground exit and a curve fed by anything but a
+  belt are not tracked; loaders, linked belts and drills are unknown sources
+  or exits; an inserter dropping onto a curve is unknown;
+- lane rates and ratio deadlocks beyond `lanes-mixed`; compression, which
+  lane an inserter prefers and side-load priority;
+- splitting or merging pipes; ripping up one route for another; running the
+  lane tracker in `factorio-forge check` on any blueprint; bill lines with no
+  block in the plan;
+- map terrain (water, cliffs, ore, an existing base -- `reserve` stands in);
+  pipe throughput and pumps; pieces larger than one tile besides a two-tile
+  splitter; rails and robots.
 
 ## Checks in a build
 
@@ -209,4 +309,4 @@ with a substation.
 - Inserter pickup from a moving belt (the rate is an upper bound).
 - Pipe throughput over long runs.
 - Modules and beacons as entities; `speed_bonus` only changes numbers.
-- Splitting and merging, train stations, bus composition.
+- Train stations, bus composition.

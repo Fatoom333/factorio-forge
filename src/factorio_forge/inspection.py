@@ -386,6 +386,43 @@ def undergrounds_without_a_pair(layout: Layout) -> Iterator[Finding]:
         )
 
 
+def underground_partners(entities: list) -> dict[int, int]:
+    """Each underground belt entrance's exit, by index into `entities`.
+
+    An entrance walks the way it faces, up to its reach, and pairs with the
+    first underground of its own name it meets -- if that one is an exit
+    carrying the same way. Anything else of its name there (an entrance, an
+    exit facing elsewhere) leaves it unpaired. The router and the lane
+    tracker both pair through here, so they agree on every tunnel.
+    """
+    by_tile: dict[tuple[int, int], list[int]] = {}
+    for index, entity in enumerate(entities):
+        for tile in Layout.tiles_of(entity):
+            by_tile.setdefault(tile, []).append(index)
+    partners: dict[int, int] = {}
+    for index, entity in enumerate(entities):
+        if getattr(entity, "type", "") != "underground-belt" or getattr(entity, "io_type", None) != "input":
+            continue
+        direction = int(getattr(entity, "direction", 0) or 0)
+        step = STEP.get(direction)
+        if step is None:
+            continue
+        x, y = Layout.tile_of(entity)
+        for k in range(1, (underground_reach(entity) or 0) + 1):
+            other = next(
+                (i for i in by_tile.get((x + step[0] * k, y + step[1] * k), ())
+                 if i != index and entities[i].name == entity.name),
+                None,
+            )
+            if other is None:
+                continue
+            found = entities[other]
+            if getattr(found, "io_type", None) == "output" and int(getattr(found, "direction", 0) or 0) == direction:
+                partners[index] = other
+            break
+    return partners
+
+
 def inserter_reach(entity) -> tuple[tuple[float, float], tuple[float, float]] | None:
     """Where an inserter takes from and where it puts, in world coordinates.
 

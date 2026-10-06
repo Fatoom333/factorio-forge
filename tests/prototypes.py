@@ -90,6 +90,27 @@ def splitter() -> str:
     return prototype("splitter")
 
 
+def belt_set() -> tuple[str, str, str]:
+    """A buildable belt with an underground belt and a splitter of the same speed."""
+    placeable = _buildable()
+
+    def of_speed(kind: str, speed) -> list[str]:
+        return sorted(
+            n for n, d in entities.raw.items()
+            if d.get("type") == kind and d.get("speed") == speed and n in placeable
+            and (kind != "underground-belt" or d.get("max_distance"))
+        )
+
+    for name in sorted(entities.raw):
+        data = entities.raw[name]
+        if data.get("type") != "transport-belt" or name not in placeable or not data.get("speed"):
+            continue
+        undergrounds, splitters = of_speed("underground-belt", data["speed"]), of_speed("splitter", data["speed"])
+        if len(undergrounds) == 1 and len(splitters) == 1:
+            return name, undergrounds[0], splitters[0]
+    pytest.skip("the active game data has no belt with exactly one underground belt and one splitter of its speed")
+
+
 def inserter() -> str:
     return prototype("inserter")
 

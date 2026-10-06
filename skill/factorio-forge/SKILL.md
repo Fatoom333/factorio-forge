@@ -286,8 +286,15 @@ Writes, beside the plan, `<label>.txt` (blueprint string), `<label>.html`
 - **rows**: machines against capacity;
 - **ports**: where each belt and pipe enters or leaves, its lane contents
   (left, right in the direction of travel) and rate -- this is what you
-  connect blocks with;
-- **notes**: overfed rows, extra inserters, gap columns for poles.
+  connect blocks with. Rates are at full machine load; put `"request":
+  "request.json"` (the reviewed request, path from the plan's folder) in the
+  plan and ports read `5/s planned (6/s at full load)`, routes are sized for
+  the planned flow, and a block planned above its capacity is `block-short`.
+  A block's own `"planned"` (crafts/s) is its share of the request; the
+  other blocks of that recipe share the rest. In ports also
+  say what `arrives`, lane by lane, once connected;
+- **notes**: overfed rows, extra inserters, gap columns for poles (said as
+  built: at each end only, or how many between machines, and why).
 
 Then look at the drawing (render the HTML in a browser, or publish it) and ask
 whether a player would build it this way. Revise the plan, not the output.
@@ -307,16 +314,42 @@ The router finds the pieces and obeys what the game would: no side-loading,
 nothing in an inserter's reach, no pipe touching another fluid (it goes
 underground to squeeze past), no hop that steals another pair. Underground
 reach comes from the active profile's prototypes, so mods that change it are
-followed. It joins ports straight and keeps lanes as the source has them; it
-cannot swap lanes. Routes go in plan order and each blocks the next, so put
-the hardest connection first. On `route-failed`, read the reason and the tile
+followed. It joins ports straight and keeps lanes as the source has them.
+Routes go in plan order and each blocks the next, so put the hardest
+connection first. On `route-failed`, read the reason and the tile
 it names, then steer: a `via` tile, a larger `routing.margin`, a moved or
 rotated block, a different order, undergrounds allowed. Keep doors and
 future corridors free with `routing.reserve`.
 
-Hand-place in `entities` only what the router cannot do: splitters, merges,
-one source to several destinations, lane swaps, joins into the middle of a
-belt. The same checks run over hand-placed entities.
+Three shapes go beyond one port to one port (belts only; details in
+docs/layout.md):
+
+- **Split** -- one source, several destinations: `"to": [{"block": 1, "port":
+  0}, {"block": 2, "port": 1}]`. A splitter goes in place of a straight belt
+  of the first route for each extra destination; sub-routes are `<id>/0`,
+  `<id>/1`. Pin it with `"split": [{"at": [x, y], "side": "right"}]` if the
+  place matters. All or nothing.
+- **Merge** -- a second item side-loaded onto one lane: `{"id": "iron",
+  "from": {"at": [x, y], "direction": 8, "items": ["iron-plate"]}, "onto":
+  {"block": 1, "port": 0}}` (the route into that port), or `"onto": {"route":
+  "cable/0"}`, or `"onto": {"at": [x, y], "lane": "left"}` for a hand-placed
+  belt. `lane` defaults to `auto`: the lane the port names the item on, else
+  the free one. List it after the route it merges onto.
+- **Lane join** -- two sources a lane each into one destination: `"from":
+  [source A, source B], "to": ...`. A joins from its side at a turn of A's
+  route, so the path needs a turn (add a `via` if it runs straight).
+
+Typical two-ingredient block: route the main ingredient into the port, merge
+the second onto it. If the second lands on the "wrong" lane the build notes
+`lanes-swapped` -- harmless, the inserters take from both lanes.
+
+Hand-place in `entities` only balancers, splitters with a priority or filter,
+and lane swaps of belts already laid. Declare what enters a hand-placed belt
+head with `"inputs": [{"at": [x, y], "items": ["<left>", "<right>"]}]` so its
+lanes are checked like the router's; the same checks run over everything.
+An undeclared hand-placed head carries something unknown, so the ports it
+reaches only get `lanes-unknown`. A belt that ends against a pole, a machine
+or a chest is a dead end: what nothing takes before it fills the lane.
 
 ### Grid-snapped sections (walls, lines of modules)
 
@@ -436,6 +469,13 @@ Mistakes that already happened once; check against them before handing over.
 | `connections point into the neighbouring machine` | this machine's fluid boxes do not fit a flush row; another machine, or hand-build |
 | `split is only known when it divides evenly` | the game's fluid-box assignment is uncertain here; confirm in game before building |
 | `pole network is in N pieces` | pole with a longer wire |
+| `lanes-missing`: an ingredient never arrives | merge it onto the route into that port, or declare a hand belt's load with `inputs` |
+| `lanes-not-taken`: nothing takes an item on a lane | a wrong item, or the wrong port; problem when it shares the lane with a used item (it will block it) |
+| `lanes-mixed`: two used items on one lane | give each its own lane (merge onto the other lane, or a lane join) |
+| `lanes-starved`: machines never get an ingredient | something upstream is missing it; follow the belts their inserters take from |
+| `lanes-swapped` (note) | nothing to do: inserters take from both lanes |
+| `block-short`: the request needs more than the block makes | more machines or rows, or a faster machine |
+| `route-lanes-disagree` | the router and the lane tracker differ about the game; report it, check that spot in game |
 
 ## Not checked yet
 
@@ -443,9 +483,16 @@ Mistakes that already happened once; check against them before handing over.
   lower.
 - Pipe throughput over long runs is not modelled.
 - Modules and beacons are not placed; `speed_bonus` only changes the numbers.
-- Routing joins one port to one port only: no splitters, merges, balancers,
-  lane swaps or mid-belt joins, no rip-up and reroute across routes (they
-  are greedy in plan order), and no map terrain -- water, cliffs, ore and an
-  existing base are not obstacles unless reserved. No train stations.
+- Routing splits, merges and joins lanes, but places no balancers, priority
+  or filter splitters, and swaps no lanes of a belt already laid; no rip-up
+  and reroute across routes (they are greedy in plan order); no map terrain
+  -- water, cliffs, ore and an existing base are not obstacles unless
+  reserved. Pipes do not split or merge. No train stations.
+- Lane rates are not modelled: `lanes-mixed` warns of a shared lane, but
+  whether the ratio deadlocks, belt compression and which lane an inserter
+  prefers are not computed.
 - Not yet confirmed in game: an underground pairing at exactly its reach, a
-  curve fed by an underground exit keeping both lanes.
+  curve fed by an underground exit keeping both lanes, which lane of a belt
+  side-loading an underground entrance passes the hood (`lanes.hood_passes`),
+  and whether a belt fed only from its side by an underground exit or a
+  splitter curves (reported as not tracked; the router never builds it).

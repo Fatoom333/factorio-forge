@@ -52,7 +52,14 @@ tests):
 - **Routing between block ports** — belts and pipes from one block's port to
   another's, with underground belts and pipe-to-ground, obeying the game's
   rules (no side-loading, no pipe touching another fluid, no underground
-  stealing another pair) ([docs/layout.md](docs/layout.md)).
+  stealing another pair) ([docs/layout.md](docs/layout.md)). One source can
+  feed several destinations through splitters, a second item can be merged
+  onto one lane of a route, and two sources can be joined a lane each.
+- **Lane tracking** — every belt of a build, routed or placed by hand, is
+  followed lane by lane: each input port says what arrives, and an
+  ingredient that never arrives, an item nothing takes, or two items sharing
+  a lane are reported ([docs/checking.md](docs/checking.md)). With the
+  request named in the plan, ports show the planned rates next to full load.
 - **Companion mod export** — what only the running game knows (research,
   bonuses, startup settings) is read from the
   [companion mod](#the-companion-mod)'s export, and used only when its mod set
@@ -67,13 +74,19 @@ tests):
   ends at that distance in the same way has not been tried.
 - A belt curve right after an underground exit. Whether such a curve keeps
   both lanes is not confirmed, so the router never builds one: it turns only
-  after a plain belt ([docs/layout.md](docs/layout.md), "Joins and lanes").
+  after a plain belt ([docs/layout.md](docs/layout.md), "Lanes").
+- Side-loading onto an underground entrance (the hood rule): which lane of
+  the feeding belt gets past the entrance's hood is worked out from the
+  geometry (`lanes.hood_passes`, one line to flip), not tried in the game.
+- A belt fed only from its side by an underground exit or a splitter: whether
+  the game curves it is not confirmed. The lane tracker reports it as not
+  tracked, and the router never builds one.
 
 **Does not exist:**
 
-- Splitters, merges and balancers between blocks; one source feeding several
-  destinations; lane swaps; joining into the middle of a belt. These are
-  placed by hand in the plan, and the same checks run over them.
+- Balancers, splitters with a priority or filter, and swapping the lanes of a
+  belt already laid. These are placed by hand in the plan, and the same
+  checks -- the lane tracker included -- run over them.
 - Map terrain: water, cliffs, ore and an existing base are not obstacles
   unless you reserve those tiles yourself.
 - Trains: no stations, rails or train blocks.

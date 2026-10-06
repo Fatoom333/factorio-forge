@@ -1,0 +1,159 @@
+{
+ "label": "Red circuits 1ps, routed",
+ "blocks": [
+  {
+   "type": "rows",
+   "recipe": "copper-cable",
+   "machine": "assembling-machine-2",
+   "rows": [
+    4
+   ],
+   "belt": "fast-transport-belt",
+   "inserter": "fast-inserter",
+   "long_inserter": "long-handed-inserter",
+   "pole": "medium-electric-pole",
+   "stack": "mirror",
+   "align": "start",
+   "at": [
+    0,
+    12
+   ],
+   "rotate": 0
+  },
+  {
+   "type": "rows",
+   "recipe": "electronic-circuit",
+   "machine": "assembling-machine-2",
+   "rows": [
+    2
+   ],
+   "belt": "fast-transport-belt",
+   "inserter": "fast-inserter",
+   "long_inserter": "long-handed-inserter",
+   "pole": "medium-electric-pole",
+   "stack": "mirror",
+   "align": "start",
+   "at": [
+    20,
+    0
+   ],
+   "rotate": 0
+  },
+  {
+   "type": "rows",
+   "recipe": "advanced-circuit",
+   "machine": "assembling-machine-2",
+   "rows": [
+    8
+   ],
+   "belt": "fast-transport-belt",
+   "inserter": "fast-inserter",
+   "long_inserter": "long-handed-inserter",
+   "pole": "medium-electric-pole",
+   "stack": "mirror",
+   "align": "start",
+   "at": [
+    40,
+    6
+   ],
+   "rotate": 0
+  }
+ ],
+ "entities": [
+  {
+   "name": "medium-electric-pole",
+   "position": [
+    17,
+    8
+   ]
+  },
+  {
+   "name": "medium-electric-pole",
+   "position": [
+    28,
+    4
+   ]
+  },
+  {
+   "name": "medium-electric-pole",
+   "position": [
+    36,
+    4
+   ]
+  }
+ ],
+ "connections": [
+  {
+   "id": "cable",
+   "from": {
+    "block": 0,
+    "port": 1,
+    "items": [
+     "copper-cable"
+    ]
+   },
+   "to": [
+    {
+     "block": 1,
+     "port": 0,
+     "items": [
+      "iron-plate",
+      "copper-cable"
+     ]
+    },
+    {
+     "block": 2,
+     "port": 1
+    }
+   ]
+  },
+  {
+   "id": "iron",
+   "from": {
+    "at": [
+     19,
+     -3
+    ],
+    "direction": 8,
+    "items": [
+     "iron-plate"
+    ]
+   },
+   "onto": {
+    "block": 1,
+    "port": 0
+   }
+  },
+  {
+   "id": "green",
+   "from": {
+    "block": 1,
+    "port": 1,
+    "items": [
+     "electronic-circuit"
+    ]
+   },
+   "to": {
+    "block": 2,
+    "port": 0
+   }
+  },
+  {
+   "id": "plastic",
+   "from": {
+    "at": [
+     31,
+     -3
+    ],
+    "direction": 8,
+    "items": [
+     "plastic-bar"
+    ]
+   },
+   "onto": {
+    "block": 2,
+    "port": 0
+   }
+  }
+ ]
+}
