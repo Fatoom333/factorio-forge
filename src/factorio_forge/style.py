@@ -52,7 +52,7 @@ def _entities_in(directory: Path) -> list:
     """
     entities: list = []
     for path in sorted(directory.glob("*.txt")):
-        text = path.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8-sig").strip()
         if not text:
             continue
         try:

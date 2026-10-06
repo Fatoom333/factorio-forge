@@ -9,6 +9,13 @@ config.local.json
 *.dump
 script-output/
 
+# A design's own files -- request, plan, built blueprints and drawings -- are
+# the player's, not the project's. The skill keeps them under work/; out/ and
+# blueprint.html are what build and render write when given no other place.
+work/
+out/
+blueprint.html
+
 # Extracted Factorio and mod data is generated per machine, never committed:
 # it depends on the installed game version and the enabled mod set, and it is
 # not ours to redistribute.

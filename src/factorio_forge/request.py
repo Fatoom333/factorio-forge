@@ -168,7 +168,7 @@ def parse(data: dict) -> Spec:
 
 def load(path: Path) -> Spec:
     try:
-        return parse(json.loads(Path(path).read_text(encoding="utf-8")))
+        return parse(json.loads(Path(path).read_text(encoding="utf-8-sig")))
     except json.JSONDecodeError as exc:
         raise RequestError(f"{path} is not valid JSON: {exc}") from exc
 

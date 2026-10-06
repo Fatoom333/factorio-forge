@@ -37,6 +37,36 @@ render.write_html(blueprint, "layout.html")
 `render_svg()` and `render_html()` return strings if you would rather embed the
 drawing somewhere else.
 
+## A text map, for looking while iterating
+
+```bash
+factorio-forge map <blueprint string or file> [--index N]
+```
+
+Prints the blueprint one character per tile, with x and y coordinates on the
+axes and a legend naming every entity behind each symbol. Symbols go by what
+an entity does, so a modded belt reads as a belt:
+
+```
+x 0..7, y 0..3 (8×4 tiles)
+   0
+   01234567
+ 0 >>>>>>U.
+ 1 .↓..⇓...
+ 2 aaaP.aaa
+ 3 aAa..aAa
+```
+
+Belts are `^ > v <`; inserters `↑ → ↓ ←` (doubled `⇑ ⇒ ⇓ ⇐` for one that
+reaches past the next tile), pointing where they drop; `U`/`u` an underground
+belt's entrance and exit; `S` a splitter; a machine fills its footprint (taken
+from the prototype) with lower case and a capital at its centre, so two side by
+side still read as two. An entity the loaded data does not know is `?`, two on
+one tile `!`. From Python: `textmap.text_map(blueprint)`.
+
+Use it while a layout is changing -- it is text, so it costs no screenshot --
+and render the HTML once, for the version that is handed over.
+
 ## What it draws, and what it deliberately does not
 
 Entities appear at their **real footprint**, taken from the entity itself rather

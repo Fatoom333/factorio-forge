@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Iterable
@@ -66,6 +67,20 @@ class Environment:
     # None when the export predates companion 0.7.0, which is different from
     # an export that had nothing to report.
     bonuses: Bonuses | None = None
+    # When the file was written, from its timestamp: the export itself does not
+    # name its save, so this and the tick are all that tell two exports apart.
+    exported_at: datetime | None = field(default=None, compare=False)
+
+    @property
+    def played(self) -> str:
+        """In-game time at the export, as the save list shows it (h:mm)."""
+        minutes = self.tick // 3600
+        return f"{minutes // 60}:{minutes % 60:02d}"
+
+    def describe(self) -> str:
+        """Which export this is, in the words a player can match to a save."""
+        when = f", written {self.exported_at:%Y-%m-%d %H:%M}" if self.exported_at else ""
+        return f"tick {self.tick}, {self.played} played, Factorio {self.game_version}{when}"
 
     @cached_property
     def makeable(self) -> frozenset[str]:
@@ -103,6 +118,45 @@ class Environment:
         seen = {f"{name}@{version}" for name, version in self.mods.items() if name != COMPANION}
         return bool(wanted) and wanted == seen
 
+    def mod_differences(self, mods: Iterable[Any]) -> ModDifferences:
+        """How this snapshot's mod set differs from the given one (see `matches_mods`)."""
+        wanted = {mod.name: mod.version_string for mod in mods if mod.name != COMPANION}
+        seen = {name: str(version) for name, version in self.mods.items() if name != COMPANION}
+        return ModDifferences(
+            only_export=tuple(sorted(set(seen) - set(wanted), key=str.lower)),
+            only_profile=tuple(sorted(set(wanted) - set(seen), key=str.lower)),
+            versions=tuple(
+                (name, seen[name], wanted[name])
+                for name in sorted(set(seen) & set(wanted), key=str.lower)
+                if seen[name] != wanted[name]
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ModDifferences:
+    """Mods only the export has, only the profile has, and (name, export, profile) versions."""
+
+    only_export: tuple[str, ...] = ()
+    only_profile: tuple[str, ...] = ()
+    versions: tuple[tuple[str, str, str], ...] = ()
+
+    def describe(self, limit: int = 6) -> str:
+        def shown(items: list[str]) -> str:
+            more = f" and {len(items) - limit} more" if len(items) > limit else ""
+            return ", ".join(items[:limit]) + more
+
+        parts = []
+        if self.only_export:
+            parts.append(f"only in the export: {shown(list(self.only_export))}")
+        if self.only_profile:
+            parts.append(f"only in the profile: {shown(list(self.only_profile))}")
+        if self.versions:
+            parts.append("other versions (export -> profile): " + shown(
+                [f"{name} {theirs} -> {ours}" for name, theirs, ours in self.versions]
+            ))
+        return "; ".join(parts) or "the profile lists no mods"
+
 
 def _mapping(value: Any) -> dict:
     """A JSON object, where the game's encoder may have written an empty one as []."""
@@ -138,10 +192,15 @@ def read_environment() -> Environment | None:
         return None
 
     try:
-        with path.open(encoding="utf-8") as handle:
+        with path.open(encoding="utf-8-sig") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
         raise EnvironmentError(f"cannot read {path.name}: {exc}") from exc
+
+    try:
+        exported_at = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        exported_at = None
 
     try:
         return Environment(
@@ -154,6 +213,7 @@ def read_environment() -> Environment | None:
             available_to_research=tuple(data.get("available_to_research", [])),
             recipes_enabled=tuple(data.get("recipes_enabled", [])),
             bonuses=_bonuses(data.get("bonuses")),
+            exported_at=exported_at,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise EnvironmentError(f"{path.name} is not in the expected shape: {exc}") from exc
@@ -182,8 +242,13 @@ def for_active_profile() -> tuple[Environment | None, str]:
     if environment is None:
         return None, "the companion mod has not exported this game (run /forge-export)"
     if not environment.matches_mods(profile.mods):
+        save = f" ({profile.source_save})" if profile.source_save else ""
+        source = profile.source_save or "<save>"
         return None, (
-            f"the last /forge-export was taken with a different mod set than profile {name!r}; "
-            "export again from that save"
+            f"the last /forge-export ({environment.describe()}) was taken with a different mod set "
+            f"than profile {name!r} -- {environment.mod_differences(profile.mods).describe()}. "
+            f"Load the save this profile is for{save} and run /forge-export there; if its mods or "
+            f"their startup settings changed since the profile was made, also run "
+            f"`factorio-forge create-profile \"{source}\" --name {name} --force`"
         )
-    return environment, f"from /forge-export at tick {environment.tick}, matching profile {name!r}"
+    return environment, f"from /forge-export ({environment.describe()}), matching profile {name!r}"

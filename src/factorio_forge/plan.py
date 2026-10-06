@@ -479,6 +479,6 @@ def build(plan: dict) -> BuildResult:
 
 def load(path: Path) -> dict:
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise PlanError(f"{path} is not valid JSON: {exc}") from exc

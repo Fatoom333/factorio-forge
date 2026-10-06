@@ -103,7 +103,7 @@ def load_config() -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        with path.open(encoding="utf-8") as handle:
+        with path.open(encoding="utf-8-sig") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return {}

@@ -32,7 +32,8 @@ tests):
   extraction needs the installed game, so the automatic tests do not run it;
   it has been used on a Krastorio 2 save and on a Space Age save with 42 mods.
 - **Render** — a blueprint string drawn as one self-contained HTML page
-  (`render`, [docs/rendering.md](docs/rendering.md)).
+  (`render`), or printed as a text tile map with a legend (`map`)
+  ([docs/rendering.md](docs/rendering.md)).
 - **Check** — what looks wrong in a blueprint, without changing it (`check`,
   [docs/checking.md](docs/checking.md)). Underground pairing is held against
   144 underground entities whose partners were recorded in a running game.
@@ -227,7 +228,9 @@ where the checkout is. Start Claude Code in the `factorio-forge` folder, or
 tell it the folder's path in the conversation; with the skill linked rather
 than copied, Claude can also find the checkout by following the link. Then
 ask for a blueprint in your own words, for example "a block making 2
-batteries a second for my Krastorio save".
+batteries a second for my Krastorio save". The skill keeps each design's
+files (request, plan, built blueprint) in `work/<design>/` inside the
+checkout; `work/` is ignored by git.
 
 ## The companion mod
 
@@ -252,7 +255,10 @@ knowing them and treat inserter hands as 1.
 The export can be made before or after `create-profile`. It is a single file
 that every export replaces, and the tools read research and bonuses from it
 each time they run, as long as its mod set is exactly the active profile's;
-after exporting from another save, export again from this one. Only the
+after exporting from another save, export again from this one. When they
+differ, `available` and `review` say how (mods only in the export, only in the
+profile, other versions), which export it was (tick, play time, when the file
+was written) and what to do. Only the
 startup settings are taken once, by `create-profile`: from a matching export
 if there is one, otherwise from the game's current `mod-settings.dat`, which is
 the same unless you have changed startup settings since playing that save.
@@ -271,6 +277,9 @@ Entities are drawn at their real footprint, coloured by family and marked with
 their direction; hovering shows recipes, priorities and the rest. The page is a
 single self-contained file with nothing to fetch. See
 [docs/rendering.md](docs/rendering.md).
+
+For a quick look without a browser, `factorio-forge map "0eNqlk...="` prints
+the blueprint one character per tile, with coordinates and a legend.
 
 ## Checking a blueprint
 

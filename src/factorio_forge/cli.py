@@ -209,7 +209,7 @@ def _load_blueprint(args: argparse.Namespace):
     # A blueprint string starts with its version byte; anything else is a path.
     candidate = Path(source)
     if not source.startswith("0") and candidate.is_file():
-        source = candidate.read_text(encoding="utf-8").strip()
+        source = candidate.read_text(encoding="utf-8-sig").strip()
 
     try:
         # Parse generically: a book or a planner should be recognised and
@@ -294,6 +294,16 @@ def _cmd_render(args: argparse.Namespace) -> int:
     bounds = render.measure(blueprint.entities, blueprint.tiles)
     print(f"{_plural(len(blueprint.entities), 'entity', 'entities')}, {bounds}")
     print(f"written: {written.resolve()}")
+    return 0
+
+
+def _cmd_map(args: argparse.Namespace) -> int:
+    from . import textmap
+
+    blueprint = _load_blueprint(args)
+    if blueprint is None:
+        return 1
+    print(textmap.text_map(blueprint))
     return 0
 
 
@@ -791,6 +801,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--check", action="store_true", help="run the checks and mark what they find"
     )
     draw.set_defaults(func=_cmd_render)
+
+    text = sub.add_parser("map", help="print a blueprint as a text tile map with a legend")
+    text.add_argument("blueprint", help="a blueprint string, or a file containing one")
+    text.add_argument(
+        "--index", type=int, help="which entry to show, when the string is a blueprint book"
+    )
+    text.set_defaults(func=_cmd_map)
 
     look = sub.add_parser(
         "check", help="report what looks wrong in a blueprint, without changing it"

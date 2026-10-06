@@ -39,9 +39,15 @@ Then run every command with that checkout's Python:
 ```
 
 `factorio-forge <command>` below is short for this. Start with `paths`: it
-shows where the game, its saves and its mods were found. Relative file paths
-(`request.json`, `plan.json`, `src/factorio_forge/slang.py`) are relative to
-your working directory, so working inside the checkout keeps them simple.
+shows where the game, its saves and its mods were found.
+
+Work inside the checkout, and keep each design's files -- `request.json`,
+`plan.json`, scratch scripts, what `build` writes -- in its own folder under
+`work/`, e.g. `work/red-circuits/`. `work/` is ignored by git, so nothing of
+the player's ends up in the repository; never write them to the checkout's
+root or into `src/`. Paths below (`work/<design>/request.json`) are relative
+to the checkout. JSON may be saved with or without a UTF-8 BOM (Windows
+PowerShell 5.1 `Set-Content -Encoding utf8` adds one).
 
 ## 0. Know which game you are designing for
 
@@ -76,7 +82,10 @@ What the player has *unlocked*, and the bonuses research has given them
 running game knows. The companion mod (0.7.0 or later) exports it: the player
 runs `/forge-export` in that save, or presses Export in its window. The tools
 use the export only when its mod set matches the active profile, and say when
-it does not. Without it, ask about tiers instead of guessing, and treat
+it does not: which mods differ, which export it was (tick, play time, when the
+file was written) and what to do -- `/forge-export` in the profile's save, and
+`create-profile --force` if its mods or startup settings changed. Pass that on
+to the player rather than guessing around it. Without it, ask about tiers instead of guessing, and treat
 inserter hands as 1.
 
 ## 1. Pin down the request
@@ -154,7 +163,7 @@ against the game's own files.
 **Review it**:
 
 ```
-factorio-forge review request.json
+factorio-forge review work/<design>/request.json
 ```
 
 It reports three lists and the bill of materials:
@@ -182,7 +191,7 @@ answers are in, the bill of materials it printed is step 2 done.
 ```python
 from factorio_forge import bom, environment, request
 found, why = environment.for_active_profile()
-spec = request.load("request.json")
+spec = request.load("work/<design>/request.json")
 result = request.review(spec)       # result.bill is a bom.BillOfMaterials
 for line in result.bill.lines:
     print(line.recipe, line.machine, line.machines, line.inputs, line.outputs)
@@ -259,11 +268,11 @@ Design rules, with the reason for each:
 ## 5. Build, read, look, revise
 
 ```
-factorio-forge build plan.json -o out/
+factorio-forge build work/<design>/plan.json
 ```
 
-Writes `out/<label>.txt` (blueprint string), `out/<label>.html` (drawing with
-findings marked) and `out/<label>.report.json`. Read the report:
+Writes, beside the plan, `<label>.txt` (blueprint string), `<label>.html`
+(drawing with findings marked) and `<label>.report.json`. Read the report:
 
 - **findings** with severity `problem` must be fixed before handing anything
   over: overlaps, unpowered machines, `fluids-mixed`,
@@ -400,7 +409,12 @@ Mistakes that already happened once; check against them before handing over.
   `type` decides it, and mods change it: where a mod makes furnaces assembling
   machines, a furnace needs a recipe, and "pick the recipe from the input"
   does not apply.
-- **While iterating, look at a text tile map; render once, at the end.** Each
+- **While iterating, look at a text tile map; render once, at the end.**
+  `factorio-forge map work/<design>/<label>.txt` prints the blueprint one
+  character per tile, with coordinates and a legend: belt arrows, inserter
+  arrows pointing where they drop, `U`/`u` underground entrance and exit,
+  machines as a capital at the centre of their footprint, `?` for what the
+  data does not know, `!` for overlaps (`--index N` for a book entry). Each
   drawing costs a screenshot; one render of the final version is enough.
 
 ## When the tools refuse

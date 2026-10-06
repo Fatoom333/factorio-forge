@@ -79,6 +79,10 @@ companion mod itself aside), and every tool says when it is not.
 }
 ```
 
+The file may be saved with or without a UTF-8 byte order mark (Windows
+PowerShell 5.1 `Set-Content -Encoding utf8` writes one); the same goes for a
+plan and for a blueprint string saved to a file.
+
 `factorio-forge review request.json` answers with:
 
 - **problems**: unknown names with suggestions, locked targets, tiers and
