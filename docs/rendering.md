@@ -61,9 +61,12 @@ x 0..6, y 0..5 (7×6 tiles)
 
 Belts are `^ > v <`; inserters `↑ → ↓ ←` (doubled `⇑ ⇒ ⇓ ⇐` for one that
 reaches past the next tile), pointing where they drop; `U`/`u` an underground
-belt's entrance and exit; `S` a splitter; a machine fills its footprint (taken
-from the prototype) with lower case and a capital at its centre, so two side by
-side still read as two. An entity the loaded data does not know is `?`, two on
+belt's entrance and exit. Anything larger than one tile fills its footprint
+(taken from the prototype) with lower case and a capital at its centre, so two
+side by side still read as two: an assembler is `A` among `a`, a splitter `Ss`
+(facing north or south) or `S` over `s` (facing east or west), a big pole `P`
+among `p`. Only belts and inserters show a direction; a splitter's is not drawn,
+its orientation shows only in which way its two tiles lie. An entity the loaded data does not know is `?`, two on
 one tile `!`. From Python: `textmap.text_map(blueprint)`.
 
 The command writes UTF-8 even when its output is piped or captured, where

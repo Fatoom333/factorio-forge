@@ -63,6 +63,18 @@ def test_a_machine_fills_its_footprint_with_a_marked_centre() -> None:
     assert assembler() in text
 
 
+def test_a_splitter_marks_its_footprint_like_a_machine() -> None:
+    """Both tiles are drawn, a capital on one, so neighbours stay apart."""
+    bp = Blueprint()
+    across = bp.entities.append(splitter(), tile_position=(0, 0), direction=Direction.NORTH)
+    bp.entities.append(splitter(), tile_position=(0, 2), direction=Direction.EAST)
+    if across.tile_width * across.tile_height < 2:
+        pytest.skip("the active data gives this splitter a single tile")
+    grid = rows(textmap.text_map(bp))
+    assert grid[0] == "Ss"  # facing north: two tiles side by side
+    assert grid[2][0] == "S" and grid[3][0] == "s"  # facing east: one over the other
+
+
 def test_inserter_arrow_follows_its_drop() -> None:
     bp = Blueprint()
     arm = bp.entities.append(inserter(), tile_position=(0, 0), direction=Direction.NORTH)
