@@ -187,7 +187,11 @@ class TestWholeLine:
                 raise
             pytest.skip(f"the active data's recipes differ from the fixture's: {exc}")
         assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
-        assert serious(result) == []
+        # Pole reach comes from the active data (mods change it), so the fixture's
+        # poles may not join up elsewhere; this test is about routes and lanes.
+        power = ("power-split", "pole-isolated")
+        assert [str(f) for f in result.findings
+                if f.severity is not inspection.Severity.NOTE and f.code not in power] == []
         assert [f.code for f in result.findings if f.code.startswith("lanes-")] == ["lanes-swapped"]
         green_in, red_in, red_cable = (result.blocks[1].ports[0], result.blocks[2].ports[0],
                                        result.blocks[2].ports[1])
