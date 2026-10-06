@@ -23,8 +23,11 @@ answer.
 Only `targets` is required. A rate is `per_second` or `per_minute`. What is
 not given is filled from the player's own game where the companion mod's
 export allows -- the fastest belt and inserters they have unlocked, the
-machines they can build -- and every such fill-in is listed, so it can be
-confirmed or overridden rather than discovered in the blueprint.
+fastest machines they can build -- and every such fill-in is listed, so it
+can be confirmed or overridden rather than discovered in the blueprint.
+Without an export the bill takes the most basic machine per category and asks
+about the faster ones, and any machine needing more than power (fuel, heat, a
+surface condition) is asked about whichever way it was chosen.
 """
 
 from __future__ import annotations
@@ -102,6 +105,7 @@ class Review:
                 "total_power_watts": self.bill.total_power,
                 "choices_made": [a.__dict__ for a in self.bill.ambiguities],
                 "from_elsewhere": self.bill.from_elsewhere,
+                "machine_needs": self.bill.machine_needs,
             }
         return {
             "ready": self.ready,
@@ -241,6 +245,26 @@ def _suggest(name: str, found) -> str:
     return f"; did you mean {shown}? (`factorio-forge find` searches the player's words)"
 
 
+def _machine_question(ambiguity: bom.Ambiguity, bill: bom.BillOfMaterials, surface: str | None) -> str:
+    """Which machine, asked rather than assumed when there is no export to say."""
+    picked = next(line.machine for line in bill.lines if line.category == ambiguity.subject)
+
+    def speed(name: str) -> float:
+        return float(entity_data.raw[name]["crafting_speed"])
+
+    faster = sorted((n for n in ambiguity.candidates if speed(n) > speed(picked)), key=lambda n: (-speed(n), n))
+    shown = []
+    for name in faster:
+        needs = bom.running_needs(name, surface)
+        shown.append(f"{name} (speed {speed(name):g}" + (f"; {'; '.join(needs)}" if needs else "") + ")")
+    return (
+        f"Which machine for {ambiguity.subject}? Without an export the most basic is assumed: "
+        f"{picked} (speed {speed(picked):g})."
+        + (f" Faster, if the player has them: {', '.join(shown)}." if shown else "")
+        + " Pin the answer in machine_choices."
+    )
+
+
 def review(spec: Spec, found: environment.Environment | None = None, note: str | None = None) -> Review:
     if found is None and note is None:
         found, note = environment.for_active_profile()
@@ -332,10 +356,24 @@ def review(spec: Spec, found: environment.Environment | None = None, note: str |
 
     if result.bill is not None:
         for ambiguity in result.bill.ambiguities:
+            if ambiguity.kind == "machine" and found is None:
+                result.questions.append(_machine_question(ambiguity, result.bill, chosen))
+                continue
             result.assumptions.append(
                 f"{ambiguity.kind} for {ambiguity.subject}: {ambiguity.detail} "
                 f"(candidates: {', '.join(ambiguity.candidates)})"
             )
+        for machine, needs in result.bill.machine_needs.items():
+            text = f"{machine} needs more than power: {'; '.join(needs)}."
+            if chosen is not None and not surfaces.allows(
+                entity_data.raw[machine].get("surface_conditions"), chosen
+            ):
+                result.problems.append(f"{text} Pin another machine in machine_choices.")
+            else:
+                result.questions.append(
+                    f"{text} Rows lay out power and nothing else: is that supplied, "
+                    "or should another machine be pinned in machine_choices?"
+                )
         if found is not None and found.bonuses is not None:
             researched = {
                 line.recipe: found.bonuses.recipe_productivity[line.recipe]

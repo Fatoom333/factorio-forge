@@ -193,8 +193,9 @@ class Ambiguity:
 
     `kind` is "recipe" when several recipes could make an item and the solver
     settled it on cost, or "machine" when several machines could run a recipe
-    and the fastest was taken. Only choices that ended up in the result are
-    reported; alternatives the solver priced and left at zero are not.
+    and one was taken by `_choose_machine`'s rule. Only choices that ended
+    up in the result are reported; alternatives the solver priced and left at
+    zero are not.
     """
 
     subject: str
@@ -214,6 +215,10 @@ class BillOfMaterials:
     # surfaces offering it for free ("offered_on") and those where a recipe
     # for it can run ("made_on"). Empty lists mean nowhere in the data.
     from_elsewhere: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # Each machine the lines use that needs more than power to run -- fuel,
+    # heat, a surface it is limited to (`running_needs`) -- whether it was
+    # picked or pinned through `machine_choices`.
+    machine_needs: dict[str, list[str]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -373,7 +378,61 @@ def _machines_for(recipe_name: str, surface: str | None) -> list[str]:
     )
 
 
+def running_needs(machine: str, surface: str | None = None) -> list[str]:
+    """What a machine needs to keep running besides electricity and its recipe.
+
+    Read from the prototype, never from the name: a burner `energy_source`
+    and its fuel categories (Space Age's biochamber eats nutrients), a fluid
+    or heat source, `surface_conditions` while the surface is still open, and
+    heating on a surface that freezes. Empty for a plain electric machine.
+    Rows lay out power poles and nothing else, so each of these is something
+    the plan has to supply by other means.
+    """
+    data = entity_data.raw.get(machine) or {}
+    needs: list[str] = []
+    source = data.get("energy_source")
+    kind = source.get("type") if isinstance(source, dict) else None
+    if kind == "burner":
+        categories = list(source.get("fuel_categories") or [source.get("fuel_category") or "chemical"])
+        fuels = sorted(
+            name for name, entry in item_data.raw.items()
+            if isinstance(entry, dict) and entry.get("fuel_category") in categories
+        )
+        shown = ", ".join(fuels[:3]) + (", ..." if len(fuels) > 3 else "")
+        need = f"burns {'/'.join(categories)} fuel" + (f" ({shown})" if shown else "")
+        if source.get("burnt_inventory_size"):
+            need += ", and the spent fuel has to be taken out"
+        needs.append(need)
+    elif kind == "fluid":
+        wanted = (source.get("fluid_box") or {}).get("filter")
+        needs.append(f"runs on {wanted} piped in" if wanted else "burns a fluid fuel piped in")
+    elif kind == "heat":
+        needs.append(f"runs on heat, at least {source.get('min_working_temperature', '?')} degrees, from heat pipes")
+    elif kind not in (None, "electric", "void"):
+        needs.append(f"has a {kind!r} energy source")
+    conditions = data.get("surface_conditions")
+    if conditions and (surface is None or not surface_rules.allows(conditions, surface)):
+        stated = ", ".join(
+            f"{c.get('property')} {c.get('min', '-')}..{c.get('max', '-')}" for c in conditions
+        )
+        needs.append(f"works only where {stated}" + (f", not on {surface}" if surface is not None else ""))
+    if surface is not None and data.get("heating_energy") and surface_rules.requires_heating(surface):
+        needs.append(f"freezes on {surface} without heating ({data['heating_energy']})")
+    return needs
+
+
 def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity | None]:
+    """The machine a recipe runs in, and the choice reported when there was one.
+
+    With an export of the player's game: the fastest machine they can build,
+    which is what they would reach for. Without one nothing says what they
+    have, and the fastest in the mod set is usually a late-game machine a
+    starting base does not own (a Space Age chain came back as foundries,
+    electromagnetic plants and a biochamber); so the slowest -- the most basic
+    -- is taken instead and the faster ones are reported for the player to
+    pick from. Either way a tie goes to the machine that needs least besides
+    power (`running_needs`), and an override in `machine_choices` wins.
+    """
     recipe = recipe_data.raw[recipe_name]
     category = primary_category(recipe)
 
@@ -388,9 +447,7 @@ def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity 
             f"no machine{where} can craft category {category!r} (needed for {recipe_name!r})"
         )
 
-    # With an export of the player's game, the fastest machine they can
-    # actually build -- not the fastest the mod set has, which a mid-game base
-    # rarely owns. If none is buildable, say so rather than pretend.
+    # If nothing the player has is buildable, say so rather than pretend.
     locked_note = ""
     if request.environment is not None:
         buildable = [name for name in candidates if request.environment.can_build(name)]
@@ -399,14 +456,25 @@ def _choose_machine(recipe_name: str, request: Request) -> tuple[str, Ambiguity 
         else:
             locked_note = "; none of these can be built with the recipes the export shows enabled"
 
-    chosen = max(candidates, key=lambda name: entity_data.raw[name]["crafting_speed"])
+    def speed(name: str) -> float:
+        return float(entity_data.raw[name]["crafting_speed"])
+
+    def needs(name: str) -> int:
+        return len(running_needs(name, request.surface))
+
+    if request.environment is not None:
+        chosen = min(candidates, key=lambda name: (-speed(name), needs(name), name))
+        why = "fastest" if locked_note else "fastest the player can build"
+    else:
+        chosen = min(candidates, key=lambda name: (speed(name), needs(name), name))
+        why = "the slowest, most basic: no export says which the player has"
     if len(candidates) == 1 and not locked_note:
         return chosen, None
     return chosen, Ambiguity(
         subject=category,
         kind="machine",
         candidates=tuple(candidates),
-        detail=f"picked {chosen!r} (fastest){locked_note}; override via machine_choices",
+        detail=f"picked {chosen!r} ({why}){locked_note}; override via machine_choices",
     )
 
 
@@ -1148,6 +1216,10 @@ def compute(request: Request) -> BillOfMaterials:
             )
 
     bom.ambiguities = reported
+    for line in bom.lines:
+        needs = running_needs(line.machine, request.surface)
+        if needs:
+            bom.machine_needs[line.machine] = needs
     bom.raw_materials = dict(sorted(drawn.items()))
 
     if request.surface is not None:
