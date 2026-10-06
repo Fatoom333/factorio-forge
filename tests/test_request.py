@@ -124,10 +124,120 @@ def world(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(item_data, "raw", ITEMS)
 
 
+BURNER = {"energy_source": {"type": "burner", "fuel_categories": ["snacks"]}}
+
+
+@pytest.fixture
+def hungry(world: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fastest machine of all burns fuel, the way Space Age's biochamber eats nutrients."""
+    monkeypatch.setattr(bom.recipe_data, "raw", {**RECIPES, "make-hungry": {
+        "name": "make-hungry", "category": "crafting", "energy_required": 1,
+        "ingredients": [{"type": "item", "name": "gear", "amount": 50}],
+        "results": [{"type": "item", "name": "hungry-assembler", "amount": 1}],
+    }})
+    monkeypatch.setattr(bom.entity_data, "raw", {**ENTITIES, "hungry-assembler": {
+        "name": "hungry-assembler", "type": "assembling-machine", "crafting_categories": ["crafting"],
+        "crafting_speed": 20, "energy_usage": 1000, **BURNER,
+    }})
+    monkeypatch.setattr(item_data, "raw", {
+        **ITEMS, "hungry-assembler": {"place_result": "hungry-assembler"}, "snack-bar": {"fuel_category": "snacks"},
+    })
+
+
 class TestBillAgainstTheGame:
-    def test_without_an_export_the_fastest_machine_is_taken(self, world: None) -> None:
+    def test_without_an_export_the_most_basic_machine_is_taken(self, world: None) -> None:
+        # The fastest in the mod set is usually late-game; nothing says the
+        # player owns it, so the slowest is assumed and the choice reported.
         result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),), boundary=frozenset({"plate"})))
-        assert result.lines[0].machine == "super-assembler"
+        assert result.lines[0].machine == "assembler"
+        assert any(a.kind == "machine" and "most basic" in a.detail for a in result.ambiguities)
+
+    def test_a_tie_goes_to_the_machine_that_needs_least(self, world: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        entities = {**ENTITIES, "a-burner": {**ENTITIES["assembler"], "name": "a-burner", **BURNER}}
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),), boundary=frozenset({"plate"})))
+        assert result.lines[0].machine == "assembler"
+        assert result.machine_needs == {}
+
+    def test_a_fuelled_machine_says_what_it_burns(self, hungry: None) -> None:
+        found = Environment("2.0", 1, "player", recipes_enabled=tuple(RECIPES) + ("make-hungry",))
+        result = bom.compute(bom.Request(
+            targets=(bom.Target("gear", 1.0),), boundary=frozenset({"plate"}), environment=found,
+        ))
+        assert result.lines[0].machine == "hungry-assembler"
+        (needs,) = result.machine_needs["hungry-assembler"]
+        assert "snacks" in needs and "snack-bar" in needs
+
+    def test_a_pinned_machine_is_used_and_its_needs_still_reported(self, hungry: None) -> None:
+        result = bom.compute(bom.Request(
+            targets=(bom.Target("gear", 1.0),), boundary=frozenset({"plate"}),
+            machine_choices={"crafting": "hungry-assembler"},
+        ))
+        assert result.lines[0].machine == "hungry-assembler"
+        assert not any(a.kind == "machine" for a in result.ambiguities)
+        assert "hungry-assembler" in result.machine_needs
+
+    def test_review_asks_about_faster_machines_without_an_export(self, hungry: None) -> None:
+        spec = request.parse({
+            "targets": [{"item": "gear", "per_second": 1}], "boundary": ["plate"], "plot": {}, "style": ["x"],
+        })
+        result = request.review(spec, None, "no export")
+        (asked,) = [q for q in result.questions if q.startswith("Which machine for crafting")]
+        assert "assembler (speed 1)" in asked
+        assert "super-assembler" in asked and "hungry-assembler" in asked and "snacks" in asked
+        assert not any(a.startswith("machine for") for a in result.assumptions)
+
+    def test_review_asks_how_a_pinned_burner_is_fed(self, hungry: None) -> None:
+        spec = request.parse({
+            "targets": [{"item": "gear", "per_second": 1}], "boundary": ["plate"],
+            "machine_choices": {"crafting": "hungry-assembler"}, "plot": {}, "style": ["x"],
+        })
+        result = request.review(spec, None, "no export")
+        assert any(q.startswith("hungry-assembler needs more than power") for q in result.questions)
+
+    def test_review_asks_per_category_even_when_one_machine_serves_both(
+        self, world: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # machine_choices is keyed by category: one question for the shared
+        # machine would leave the other category's answer unasked.
+        monkeypatch.setattr(bom.recipe_data, "raw", {**RECIPES, "craft-widget": {
+            "name": "craft-widget", "category": "advanced", "energy_required": 1,
+            "ingredients": [{"type": "item", "name": "gear", "amount": 2}],
+            "results": [{"type": "item", "name": "widget", "amount": 1}],
+        }})
+        both = ["crafting", "advanced"]
+        monkeypatch.setattr(bom.entity_data, "raw", {
+            name: {**entity, "crafting_categories": both} for name, entity in ENTITIES.items()
+        })
+        monkeypatch.setattr(item_data, "raw", {**ITEMS, "widget": {}})
+        spec = request.parse({
+            "targets": [{"item": "widget", "per_second": 1}], "boundary": ["plate"], "plot": {}, "style": ["x"],
+        })
+        result = request.review(spec, None, "no export")
+        asked = sorted(q.split("?")[0] for q in result.questions if q.startswith("Which machine for"))
+        assert asked == ["Which machine for advanced", "Which machine for crafting"]
+
+    def test_review_rejects_a_pinned_machine_that_cannot_work_on_the_surface(
+        self, world: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bom.entity_data, "raw", {**ENTITIES, "fussy-assembler": {
+            **ENTITIES["assembler"], "name": "fussy-assembler",
+            "surface_conditions": [{"property": "pressure", "min": 10}],
+        }})
+        # One made-up surface where every surface condition fails.
+        monkeypatch.setattr(request.surfaces, "names", lambda: ["rock"])
+        monkeypatch.setattr(request.surfaces, "exists", lambda name: name == "rock")
+        monkeypatch.setattr(request.surfaces, "sources", lambda name: {})
+        monkeypatch.setattr(request.surfaces, "allows", lambda conditions, name: not conditions)
+        monkeypatch.setattr(request.surfaces, "requires_heating", lambda name: False)
+        spec = request.parse({
+            "targets": [{"item": "gear", "per_second": 1}], "boundary": ["plate"], "surface": "rock",
+            "machine_choices": {"crafting": "fussy-assembler"}, "plot": {}, "style": ["x"],
+        })
+        result = request.review(spec, None, "no export")
+        assert any(p.startswith("fussy-assembler needs more than power") for p in result.problems)
+        assert not result.ready
+        assert not any("fussy-assembler needs more than power" in q for q in result.questions)
 
     def test_with_an_export_the_fastest_machine_the_player_can_build(self, world: None) -> None:
         found = Environment("2.0", 1, "player", recipes_enabled=("craft-gear", "make-assembler"))
@@ -160,6 +270,49 @@ class TestBillAgainstTheGame:
         monkeypatch.setattr(bom.recipe_data, "raw", capped)
         found = Environment("2.0", 1, "player", bonuses=Bonuses(recipe_productivity={"craft-gear": 0.5}))
         assert bom.Request(targets=(), environment=found).productivity_for("craft-gear") == pytest.approx(0.1)
+
+
+class TestRunningNeeds:
+    """What a machine needs besides power, read from the prototype alone."""
+
+    @pytest.fixture(autouse=True)
+    def machines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        base = {"type": "assembling-machine", "crafting_categories": ["crafting"], "crafting_speed": 1}
+        monkeypatch.setattr(bom.entity_data, "raw", {
+            "plain": {**base, "energy_source": {"type": "electric"}, "heating_energy": "100kW"},
+            "free": {**base, "energy_source": {"type": "void"}},
+            "spent": {**base, "energy_source": {"type": "burner", "fuel_categories": ["rods"], "burnt_inventory_size": 1}},
+            "oily": {**base, "energy_source": {"type": "fluid", "burns_fluid": True}},
+            "piped": {**base, "energy_source": {"type": "fluid", "fluid_box": {"filter": "steam"}}},
+            "hot": {**base, "energy_source": {"type": "heat", "min_working_temperature": 500}},
+            "fussy": {**base, "energy_source": {"type": "electric"},
+                      "surface_conditions": [{"property": "pressure", "min": 10}]},
+        })
+        monkeypatch.setattr(item_data, "raw", {"rod": {"fuel_category": "rods"}})
+
+    def test_an_electric_or_void_machine_needs_nothing(self) -> None:
+        assert bom.running_needs("plain") == []
+        assert bom.running_needs("free") == []
+
+    def test_a_burner_names_its_fuel_and_its_spent_fuel(self) -> None:
+        (need,) = bom.running_needs("spent")
+        assert "rods" in need and "rod" in need and "spent fuel" in need
+
+    def test_fluid_and_heat_sources(self) -> None:
+        assert "fluid fuel" in bom.running_needs("oily")[0]
+        assert "steam" in bom.running_needs("piped")[0]
+        assert "500" in bom.running_needs("hot")[0]
+
+    def test_surface_conditions_while_the_surface_is_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert "pressure" in bom.running_needs("fussy")[0]
+        monkeypatch.setattr(bom.surface_rules, "allows", lambda conditions, surface: True)
+        monkeypatch.setattr(bom.surface_rules, "requires_heating", lambda surface: False)
+        assert bom.running_needs("fussy", "somewhere") == []
+
+    def test_heating_only_where_the_surface_freezes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(bom.surface_rules, "requires_heating", lambda surface: surface == "cold")
+        assert bom.running_needs("plain", "warm") == []
+        assert "heating" in bom.running_needs("plain", "cold")[0]
 
 
 # --------------------------------------------------------------------------

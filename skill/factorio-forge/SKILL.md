@@ -175,9 +175,15 @@ It reports three lists and the bill of materials:
   when there are several, and anything the bill needs that this surface does
   not have ("calcite cannot be had on nauvis (free on vulcanus)") -- the
   answer is usually "it comes by rocket", which goes into `boundary`.
-- **assumed** -- tiers filled in, the machine picked per category (the
-  fastest they can build), researched productivity applied. Say these to the
-  player in one short list; do not make them confirm each.
+  Without an export, also **which machine** per category: the bill assumed
+  the most basic one and lists the faster ones with their speed and needs;
+  put the answer in `machine_choices`. And any machine that **needs more than
+  power** ("biochamber needs more than power: burns nutrients fuel") --
+  rows do not feed fuel or heat, so either the player supplies it (plan it
+  yourself) or another machine is pinned.
+- **assumed** -- tiers filled in, the machine picked per category (with an
+  export: the fastest they can build), researched productivity applied. Say
+  these to the player in one short list; do not make them confirm each.
 
 Ask everything that is missing in **one message**, with a sensible default
 beside each question, so the player can answer "yes" or correct one line. Do

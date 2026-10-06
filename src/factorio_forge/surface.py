@@ -112,6 +112,11 @@ def allows(conditions, name: str) -> bool:
     return True
 
 
+def requires_heating(name: str) -> bool:
+    """Whether entities on this surface freeze without heat (Aquilo's `entities_require_heating`)."""
+    return bool(_prototype(name).get("entities_require_heating"))
+
+
 def placed(name: str, kind: str) -> set[str]:
     """Names of the `kind` ("entity" or "tile") prototypes generated on a surface."""
     settings = ((_prototype(name).get("map_gen_settings") or {}).get("autoplace_settings") or {})

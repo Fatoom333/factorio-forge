@@ -42,7 +42,9 @@ tests):
   tiers reported, and the questions only the player can answer listed
   (`find`, `review`, [docs/request.md](docs/request.md)).
 - **Bill of materials** — machines per recipe for a target rate, with
-  researched productivity applied (printed by `review`).
+  researched productivity applied (printed by `review`). Machines are the
+  fastest the player can build, or without an export the most basic, with
+  the faster ones asked about; a machine that needs fuel or heat is flagged.
 - **Row layout** — rows of machines with their belts, inserters, poles and
   pipes, how many machines a row can keep running, mirrored, repeated and
   rotated blocks (`options`, `build`, [docs/layout.md](docs/layout.md)). Every

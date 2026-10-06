@@ -57,7 +57,7 @@ changes between versions. The game is the parser; the companion mod asks it.
 |---|---|
 | `inserter_stack_size_bonus`, `bulk_inserter_capacity_bonus` + a prototype's `stack_size_bonus` | inserter hand size, and so inserters needed per machine (`layout.inserter_hand_size`) |
 | `recipe_productivity` | the bill of materials: less of every ingredient per product, capped at the recipe's `maximum_productivity` |
-| unlocked recipes | which machine the bill picks (the fastest the player can build), which tiers `review` fills in, what `find` marks as locked |
+| unlocked recipes | which machine the bill picks (the fastest the player can build; see [Which machine](#which-machine)), which tiers `review` fills in, what `find` marks as locked |
 
 An export is used only when its mod set matches the active profile (the
 companion mod itself aside), and every tool says when it is not.
@@ -88,12 +88,41 @@ plan and for a blueprint string saved to a file.
 - **problems**: unknown names with suggestions, locked targets, tiers and
   machines;
 - **questions** for the player: the plot when missing, what arrives from
-  outside when nothing does, tiers when there is no export, the surface when
-  the mod set has several, and each thing the bill needs that the surface
-  cannot supply, with where it can be had;
+  outside when nothing does, tiers and machines when there is no export, the
+  surface when the mod set has several, each thing the bill needs that the
+  surface cannot supply, with where it can be had, and each machine that
+  needs more than power to run;
 - **assumptions**: tiers filled in from what is unlocked, the machine picked
-  per category, researched productivity applied;
+  per category (with an export), researched productivity applied;
 - the **bill of materials**.
+
+## Which machine
+
+Several machines can often run the same recipe, and the bill has to pick one
+per crafting category before it can count them.
+
+- **With an export**: the fastest machine the player can build. That is what
+  they would reach for, and the export says what they have.
+- **Without one**: the slowest -- the most basic. The fastest in the mod set
+  is usually late-game: a clean install with Space Age and no export got a
+  red-circuit line of foundries, electromagnetic plants and a biochamber for
+  oil cracking, none of which a starting base owns. The basic machine errs
+  towards more machines rather than ones the player lacks, and the review asks
+  about the faster ones by name, speed and what each needs, so the answer
+  goes into `machine_choices`.
+- Either way, a tie goes to the machine that needs least besides power, and
+  an entry in `machine_choices` (by crafting category) wins outright.
+
+**What a machine needs besides power** (`bom.running_needs`, in the bill as
+`machine_needs`) is read from the prototype, never from the name: a burner
+`energy_source` and its `fuel_categories` with the items that burn there
+(the biochamber's nutrients), spent fuel to take out (`burnt_inventory_size`),
+a fluid or heat energy source, `surface_conditions` while the surface is
+open, and `heating_energy` on a surface whose planet has
+`entities_require_heating`. Every such machine the bill uses, picked or
+pinned, becomes a question -- rows lay out power poles and nothing else, so
+fuel or heat has to be planned by other means -- and a pinned machine whose
+surface conditions fail on the chosen surface is a problem.
 
 ## Surfaces
 
