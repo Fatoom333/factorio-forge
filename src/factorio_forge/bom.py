@@ -652,7 +652,7 @@ def _gather(
     produced: set[str] = set()
     target_demand: dict[str, float] = defaultdict(float)
     ambiguities: list[Ambiguity] = []
-    reported_machines: set[str] = set()
+    reported_categories: set[str] = set()
 
     for t in request.targets:
         target_demand[t.item] += t.rate
@@ -703,8 +703,10 @@ def _gather(
 
             chosen_machine, machine_ambiguity = _choose_machine(recipe, request)
             machine[recipe] = chosen_machine
-            if machine_ambiguity and chosen_machine not in reported_machines:
-                reported_machines.add(chosen_machine)
+            # One per category, the key machine_choices answers by: two
+            # categories that settle on the same machine are still two answers.
+            if machine_ambiguity and machine_ambiguity.subject not in reported_categories:
+                reported_categories.add(machine_ambiguity.subject)
                 ambiguities.append(machine_ambiguity)
 
             for ingredient in recipe_data.raw[recipe].get("ingredients", []):

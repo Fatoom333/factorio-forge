@@ -195,6 +195,50 @@ class TestBillAgainstTheGame:
         result = request.review(spec, None, "no export")
         assert any(q.startswith("hungry-assembler needs more than power") for q in result.questions)
 
+    def test_review_asks_per_category_even_when_one_machine_serves_both(
+        self, world: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # machine_choices is keyed by category: one question for the shared
+        # machine would leave the other category's answer unasked.
+        monkeypatch.setattr(bom.recipe_data, "raw", {**RECIPES, "craft-widget": {
+            "name": "craft-widget", "category": "advanced", "energy_required": 1,
+            "ingredients": [{"type": "item", "name": "gear", "amount": 2}],
+            "results": [{"type": "item", "name": "widget", "amount": 1}],
+        }})
+        both = ["crafting", "advanced"]
+        monkeypatch.setattr(bom.entity_data, "raw", {
+            name: {**entity, "crafting_categories": both} for name, entity in ENTITIES.items()
+        })
+        monkeypatch.setattr(item_data, "raw", {**ITEMS, "widget": {}})
+        spec = request.parse({
+            "targets": [{"item": "widget", "per_second": 1}], "boundary": ["plate"], "plot": {}, "style": ["x"],
+        })
+        result = request.review(spec, None, "no export")
+        asked = sorted(q.split("?")[0] for q in result.questions if q.startswith("Which machine for"))
+        assert asked == ["Which machine for advanced", "Which machine for crafting"]
+
+    def test_review_rejects_a_pinned_machine_that_cannot_work_on_the_surface(
+        self, world: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(bom.entity_data, "raw", {**ENTITIES, "fussy-assembler": {
+            **ENTITIES["assembler"], "name": "fussy-assembler",
+            "surface_conditions": [{"property": "pressure", "min": 10}],
+        }})
+        # One made-up surface where every surface condition fails.
+        monkeypatch.setattr(request.surfaces, "names", lambda: ["rock"])
+        monkeypatch.setattr(request.surfaces, "exists", lambda name: name == "rock")
+        monkeypatch.setattr(request.surfaces, "sources", lambda name: {})
+        monkeypatch.setattr(request.surfaces, "allows", lambda conditions, name: not conditions)
+        monkeypatch.setattr(request.surfaces, "requires_heating", lambda name: False)
+        spec = request.parse({
+            "targets": [{"item": "gear", "per_second": 1}], "boundary": ["plate"], "surface": "rock",
+            "machine_choices": {"crafting": "fussy-assembler"}, "plot": {}, "style": ["x"],
+        })
+        result = request.review(spec, None, "no export")
+        assert any(p.startswith("fussy-assembler needs more than power") for p in result.problems)
+        assert not result.ready
+        assert not any("fussy-assembler needs more than power" in q for q in result.questions)
+
     def test_with_an_export_the_fastest_machine_the_player_can_build(self, world: None) -> None:
         found = Environment("2.0", 1, "player", recipes_enabled=("craft-gear", "make-assembler"))
         result = bom.compute(bom.Request(
