@@ -21,6 +21,9 @@ makes the next revision of the plan better.
       ],
       "entities": [{"name": "fast-transport-belt", "position": [-1, 3], "direction": 4}],
       "inputs": [{"at": [-1, 3], "items": ["iron-plate"]}],
+      "sources": [{"id": "iron", "at": [-1, 3], "direction": 4, "items": ["iron-plate"], "rate": 7.5},
+                  {"block": 1, "port": 0, "items": ["copper-plate", "iron-plate"], "rate": 3}],
+      "targets": [{"item": "battery", "per_second": 2}],   (optional: what is ordered; sizes the ports)
       "connections": [
         {"id": "out", "from": {"block": 0, "port": 3, "items": ["battery"]},
          "to": [{"at": [60, 2], "direction": 4}, {"at": [60, 12], "direction": 4, "via": [[50, 8]]}]},
@@ -40,8 +43,12 @@ A belt connection may also split (`to` is a list: one splitter per extra
 destination, sub-routes `<id>/0`, `<id>/1`, ...), merge (`onto` instead of
 `to`: side-loaded onto a lane of an earlier route, the route into an in port,
 or a belt at a tile) or join two sources a lane each (`from` is a list of
-two). `inputs` names what enters a hand-placed belt head. After routing,
-`lanes.py` traces every belt and the report says what arrives at each in port.
+two). `inputs` names what enters a hand-placed belt head. `sources` does the
+same and more: a source is named (`id`), sits at a belt head (`at` and the
+`direction` it flows) or at a block's in port (`block`, `port`), and says the
+`items` per lane and the `rate` the player feeds there. After routing,
+`lanes.py` traces every belt and the report says what arrives at each in port;
+what does not match what the port wants is a finding (`docs/checking.md`).
 """
 
 from __future__ import annotations
@@ -751,38 +758,126 @@ def _inputs(plan: dict) -> list[lanes.Feed]:
     return feeds
 
 
+_SOURCE_FIELDS = {"id", "at", "direction", "block", "port", "items", "rate"}
+
+
+def _sources(plan: dict, built: list[BuiltBlock]) -> list[tuple[str, lanes.Feed, int | None]]:
+    """The plan's outside supply: (name, feed, direction the belt must flow or None), validated like connections are."""
+    raw = plan.get("sources") or []
+    if not isinstance(raw, list):
+        raise PlanError("sources is a list of {\"at\": [x, y], \"direction\": d, \"items\": [...], \"rate\": n} "
+                        "or {\"block\": b, \"port\": p, \"items\": [...], \"rate\": n}")
+    out: list[tuple[str, lanes.Feed, int | None]] = []
+    names: set[str] = set()
+    tiles: dict[tuple[int, int], str] = {}
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise PlanError(f"source {index}: expected an object, not {entry!r}")
+        unknown = set(entry) - _SOURCE_FIELDS
+        if unknown:
+            raise PlanError(f"source {index}: unknown field(s) {', '.join(sorted(unknown))}")
+        name = entry.get("id", f"source {index}")
+        if not isinstance(name, str) or not name:
+            raise PlanError(f"source {index}: id is a non-empty text")
+        if name in names:
+            raise PlanError(f"source {index}: id {name!r} is used twice")
+        names.add(name)
+        label = f"source {name!r}" if "id" in entry else name
+        direction = entry.get("direction")
+        if direction is not None and (not _is_int(direction) or direction not in inspection.STEP):
+            raise PlanError(f"{label}: direction must be 0, 4, 8 or 12, not {direction!r}")
+        if "block" in entry or "port" in entry:
+            if "at" in entry:
+                raise PlanError(f"{label}: a source is at a tile ('at') or at a block's in port, not both")
+            b, j = entry.get("block"), entry.get("port")
+            if not (_is_int(b) and 0 <= b < len(built)):
+                raise PlanError(f"{label}: block {b!r} does not exist; the plan has {len(built)} block(s)")
+            ports = built[b].ports
+            if not (_is_int(j) and 0 <= j < len(ports)):
+                raise PlanError(f"{label}: block {b} has {len(ports)} port(s), not a port {j!r}")
+            port = ports[j]
+            if port["kind"] != "belt" or port["io"] != "in":
+                raise PlanError(f"{label}: block {b} port {j} is a {port['io']!r} {port['kind']} port; "
+                                "a source feeds an 'in' belt port")
+            if direction is not None and direction != port["direction"]:
+                raise PlanError(f"{label}: block {b} port {j} flows {port['direction']}, not {direction}")
+            tile, direction = (port["x"], port["y"]), port["direction"]
+        else:
+            if direction is None:
+                raise PlanError(f"{label}: a source at a tile needs the 'direction' its belt flows")
+            tile = _tile(entry.get("at"), f"{label} at")
+        items = entry.get("items")
+        if not isinstance(items, list) or not 1 <= len(items) <= 2 or not all(isinstance(i, str) for i in items):
+            raise PlanError(f"{label}: items are [left, right], or one item for both lanes")
+        rate = entry.get("rate")
+        if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))
+                             or not math.isfinite(rate) or rate < 0):
+            raise PlanError(f"{label}: rate is items per second, a number of at least 0")
+        if tile in tiles:
+            raise PlanError(f"{label}: {list(tile)} is already the source of {tiles[tile]}")
+        tiles[tile] = label
+        out.append((label, lanes.Feed(tile, (items[0], items[-1]), None if rate is None else float(rate)),
+                    direction))
+    return out
+
+
 def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int]], routes: list[route.RouteResult],
                  entities: list, known_recipes: dict[int, str], loose: set[int]) -> list[inspection.Finding]:
     """Trace every belt lane of the build, fill in what the report says arrives, and check it."""
     inputs = _inputs(plan)
-    feeds = list(inputs)
+    sources = _sources(plan, built)
+    declared_tiles = {f.tile for f in inputs} | {f.tile for _, f, _ in sources}
+    if len(declared_tiles) < len(inputs) + len(sources):
+        clash = next(t for t in declared_tiles if sum(f.tile == t for f in inputs)
+                     + sum(f.tile == t for _, f, _ in sources) > 1)
+        raise PlanError(f"{list(clash)} is named by both 'inputs' and 'sources', or twice; name a belt head once")
+    feeds = list(inputs) + [f for _, f, _ in sources]
+    point_starts = {r.spec.start_tile: r.id for r in routes
+                    if r.ok and r.spec is not None and r.spec.start.port is None
+                    and not (r.junction is not None and r.junction.kind == "splitter")}
+    for label, feed, _ in [(f"input at {list(f.tile)}", f, None) for f in inputs] + sources:
+        if feed.tile in point_starts:
+            raise PlanError(f"{label} is where connection {point_starts[feed.tile]} starts; "
+                            "give the items and rate on the connection's 'from'")
     for r in routes:
         if not r.ok or r.spec is None or r.spec.start.port is not None:
             continue
         if r.junction is not None and r.junction.kind == "splitter":
             continue  # a branch starts at its splitter, inside the plan
         items = r.spec.start.items
-        feeds.append(lanes.Feed(r.spec.start_tile, (items[0], items[1]) if len(items) == 2 else None))
+        feeds.append(lanes.Feed(r.spec.start_tile, (items[0], items[1]) if len(items) == 2 else None,
+                               r.spec.start.rate))
     # Nothing enters a block's output line from behind: what it carries, its inserters put there.
     feeds.extend(lanes.Feed(tile, ("", "")) for tile in heads)
     in_ports = [(p["x"], p["y"]) for b in built for p in b.ports if p["kind"] == "belt" and p["io"] == "in"]
     lane_map = lanes.trace(entities, feeds, in_ports, known_recipes, loose)
 
-    for feed in inputs:
+    named = [(f"input at {list(f.tile)}", f, None, "an input") for f in inputs]
+    named += [(f"{label} at {list(f.tile)}", f, d, "a source") for label, f, d in sources]
+    ending = {r.spec.goal.port: r for r in routes if r.ok and r.spec and r.spec.goal.port is not None}
+    for label, feed, _, _ in named:
+        for block in built:
+            for port in block.ports:
+                if (port["x"], port["y"]) == feed.tile and (block.index, port["index"]) in ending:
+                    raise PlanError(f"{label} is where connection {ending[(block.index, port['index'])].id} "
+                                    "ends; a source feeds a port directly, a connection brings it")
+
+    for label, feed, direction, noun in named:
         if feed.tile not in lane_map.nodes:
-            raise PlanError(f"input at {list(feed.tile)}: no belt stands there")
+            raise PlanError(f"{label}: no belt stands there")
+        if direction is not None and lane_map.nodes[feed.tile].direction != direction:
+            raise PlanError(f"{label}: the belt there flows {lane_map.nodes[feed.tile].direction}, "
+                            f"the source says {direction}")
         if lane_map.behind.get(feed.tile):
             source = lane_map.behind[feed.tile][0]
             name = entities[lane_map.nodes[source].entity].name
-            raise PlanError(f"input at {list(feed.tile)} is fed from behind by {name} at {list(source)}; "
-                            "an input names what enters a belt head")
+            raise PlanError(f"{label} is fed from behind by {name} at {list(source)}; "
+                            f"{noun} names what enters a belt head")
         if lane_map.sides.get(feed.tile):
             source = min(lane_map.sides[feed.tile].values())
             name = entities[lane_map.nodes[source].entity].name
-            raise PlanError(f"input at {list(feed.tile)} is fed from its side by {name} at {list(source)}; "
-                            "an input names what enters a belt head")
-
-    ending = {r.spec.goal.port: r for r in routes if r.ok and r.spec and r.spec.goal.port is not None}
+            raise PlanError(f"{label} is fed from its side by {name} at {list(source)}; "
+                            f"{noun} names what enters a belt head")
 
     def predicted(r: route.RouteResult | None):
         if r is None or not r.lanes or len(r.lanes) != 2:
@@ -796,9 +891,11 @@ def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int
                 continue
             r = ending.get((block.index, port["index"]))
             items = tuple(port["items"])
+            ordered_rate = port.get("planned_rate")
             expectations.append(lanes.Expectation(
                 (port["x"], port["y"]), (items[0], items[-1]), False, f"block {block.index} port {port['index']}",
                 r is not None, r.id if r else None, predicted(r),
+                port["rate"] if ordered_rate is None else ordered_rate, ordered_rate is not None,
             ))
             arrived = lane_map.at((port["x"], port["y"]))
             port["arrives"] = [arrived[0].show(), arrived[1].show()] if arrived else None
@@ -813,7 +910,7 @@ def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int
             expectations.append(lanes.Expectation(
                 last, (goal.items[0], goal.items[-1]), True, f"({goal.x}, {goal.y})", True, r.id, predicted(r),
             ))
-    return lanes.check(lane_map, expectations)
+    return lanes.check(lane_map, expectations, declared=bool(routes or sources))
 
 
 # --------------------------------------------------------------------------
@@ -833,6 +930,28 @@ def planned_from_request(plan: dict, plan_path: Path) -> tuple[dict[str, float],
         spec = request.load(path)
     except (OSError, request.RequestError) as exc:
         return {}, [f"request {ref}: {exc}"]
+    return _planned_from_spec(spec)
+
+
+def planned_from_targets(plan: dict) -> tuple[dict[str, float], list[str]]:
+    """The same from the plan's own `targets` (what is ordered), for a plan with no request file."""
+    from . import request
+
+    raw = plan.get("targets")
+    if not raw:
+        return {}, []
+    if not isinstance(raw, list) or not all(isinstance(t, dict) for t in raw):
+        raise PlanError("targets is a list of {\"item\": name, \"per_second\": n} (or \"per_minute\")")
+    try:
+        spec = request.parse({"targets": raw})
+    except request.RequestError as exc:
+        raise PlanError(f"targets: {exc}") from exc
+    return _planned_from_spec(spec)
+
+
+def _planned_from_spec(spec) -> tuple[dict[str, float], list[str]]:
+    from . import request
+
     review = request.review(spec)
     if review.bill is None:
         return {}, [f"request not ready: {'; '.join(review.problems) or 'no bill of materials'}"]
@@ -902,6 +1021,11 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
     blueprint.label = label
     built: list[BuiltBlock] = []
     collected: list[str] = []
+    if plan.get("targets") and plan.get("request"):
+        raise PlanError("a plan names its order once: 'request' or 'targets', not both")
+    if planned is None and plan.get("targets"):
+        planned, said = planned_from_targets(plan)
+        collected.extend(said)
     wanted: dict[int, float] = {}
     heads: list[tuple[int, int]] = []
     known_recipes: dict[int, str] = {}  # entity index -> recipe, for block machines that store none

@@ -76,10 +76,15 @@ def codes(result) -> list[str]:
     return [f.code for f in result.findings]
 
 
+def raw_input_unknown(f) -> bool:
+    """The first block's raw inputs are the player's supply; these plans declare none."""
+    return f.code == "lanes-unknown" and f.summary.startswith("block 0 port")
+
+
 def assert_clean(result, expected=()) -> None:
     serious = [
         str(f) for f in result.findings
-        if f.severity is not inspection.Severity.NOTE and f.code not in expected
+        if f.severity is not inspection.Severity.NOTE and f.code not in expected and not raw_input_unknown(f)
     ]
     assert serious == []
 
@@ -428,7 +433,7 @@ class TestBlocks:
         )
         (done,) = result.routes
         assert done.ok, done.reason
-        assert not [c for c in codes(result) if c.startswith("lanes-")]
+        assert not [f.code for f in result.findings if f.code.startswith("lanes-") and not raw_input_unknown(f)]
         # The blocks stand apart and nothing wires them together; power is not the route's job.
         # A block powered by a single pole (big machines) also shows as an isolated pole.
         assert_clean(result, expected=("power-split", "pole-isolated"))
@@ -612,7 +617,8 @@ def splitters_of(result) -> list:
 
 
 def lane_findings(result) -> list[str]:
-    return [c for c in codes(result) if c.startswith("lanes-") or c == "route-lanes-disagree"]
+    return [f.code for f in result.findings
+            if (f.code.startswith("lanes-") or f.code == "route-lanes-disagree") and not raw_input_unknown(f)]
 
 
 def chain_blocks(users: int):

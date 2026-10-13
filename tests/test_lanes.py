@@ -206,7 +206,10 @@ class TestFindings:
         result = built(blocks=[maker, user],
                        connections=[{"from": {"block": 0, "port": out["index"]}, "to": {"block": 1, "port": in_index}}])
         assert result.routes[0].ok
-        assert lane_codes(result) == []
+        # Block 0's raw inputs are the player's supply, and this plan declares none.
+        (raw,) = [f for f in result.findings if f.code == "lanes-unknown"]
+        assert raw.summary.startswith("block 0 port") and raw.severity is inspection.Severity.SUSPECT
+        assert lane_codes(result) == ["lanes-unknown"]
         port = result.blocks[1].ports[in_index]
         assert port["arrives"] is not None and any(port["arrives"])
 
@@ -376,3 +379,244 @@ class TestPointLanes:
 
     def test_a_mixed_lane_carries_both(self) -> None:
         assert "lanes-wrong" not in codes(self.build(["", "a+b"], ["", "b"]))
+
+
+# --------------------------------------------------------------------------
+# outside supply: sources, and the checks they allow
+# --------------------------------------------------------------------------
+
+
+def feed_line(port, length=4) -> tuple[list[dict], tuple[int, int]]:
+    """Hand-placed belts running into an in port; the tile of their head."""
+    dx, dy = inspection.STEP[port["direction"]]
+    tiles = [(port["x"] - k * dx, port["y"] - k * dy) for k in range(length, 0, -1)]
+    return [belt(x, y, port["direction"]) for x, y in tiles], tiles[0]
+
+
+def with_head_source(items, rate=None, planned=None) -> dict:
+    """A plan: one block, hand belts into its in port, one source at the head of those belts."""
+    block, port = block_and_port()
+    if planned is not None:
+        block = {**block, "planned": planned}
+    hand, head = feed_line(port)
+    source = {"id": "feed", "at": list(head), "direction": port["direction"], "items": items}
+    if rate is not None:
+        source["rate"] = rate
+    return {"label": "sources", "blocks": [block], "entities": hand, "sources": [source]}
+
+
+def finding(result, code):
+    (found,) = [f for f in result.findings if f.code == code]
+    return found
+
+
+class TestSources:
+    def test_a_declared_source_replaces_the_question_mark(self) -> None:
+        block, port = block_and_port()
+        w0, w1 = port["items"]
+        hand, head = feed_line(port)
+        unnamed = plan.build({"blocks": [block], "entities": hand})
+        unknown = finding(unnamed, "lanes-unknown")
+        assert unknown.severity is inspection.Severity.SUSPECT
+        assert "block 0 port" in unknown.summary and "sources" in unknown.detail
+        named = plan.build(with_head_source([w0, w1], 5))
+        assert lane_codes(named) == []
+        assert named.blocks[0].ports[port["index"]]["arrives"] == [w0, w1]
+
+    def test_a_source_can_sit_at_a_block_port(self) -> None:
+        block, port = block_and_port()
+        w0, w1 = port["items"]
+        result = plan.build({"blocks": [block], "sources": [
+            {"block": 0, "port": port["index"], "items": [w0, w1], "rate": 5}]})
+        assert lane_codes(result) == []
+        assert result.blocks[0].ports[port["index"]]["arrives"] == [w0, w1]
+
+    def test_swapped_lanes_with_the_right_items_are_a_note_that_says_it_does_not_matter(self) -> None:
+        _, port = block_and_port()
+        w0, w1 = port["items"]
+        result = plan.build(with_head_source([w1, w0]))
+        swapped = finding(result, "lanes-swapped")
+        assert [f.code for f in result.findings if f.code.startswith("lanes-")] == ["lanes-swapped"]
+        assert swapped.severity is inspection.Severity.NOTE and "does not matter" in swapped.summary
+
+    def test_a_missing_item_is_a_problem_and_the_wrong_item_is_named(self) -> None:
+        _, port = block_and_port()
+        w0, w1 = port["items"]
+        result = plan.build(with_head_source([w0, "junk"]))
+        missing = finding(result, "lanes-missing")
+        assert missing.severity is inspection.Severity.PROBLEM and w1 in missing.summary
+        wrong = finding(result, "lanes-wrong-item")
+        assert wrong.severity is inspection.Severity.PROBLEM
+        assert "right lane" in wrong.summary and "junk" in wrong.summary
+        # The lane the stray item sits on does not matter: lane order is free at a block port.
+        other = plan.build(with_head_source(["junk", w0]))
+        assert "left lane" in finding(other, "lanes-wrong-item").summary
+        assert w1 in finding(other, "lanes-missing").summary
+
+    def test_nothing_arriving_is_a_problem_where_a_route_ends(self) -> None:
+        block, port = block_and_port()
+        result = built(blocks=[block], connections=[feed_port(port, ["", ""])])
+        nothing = finding(result, "lanes-nothing")
+        assert nothing.severity is inspection.Severity.PROBLEM and "block 0 port" in nothing.summary
+
+    def test_an_unconnected_port_is_a_fragment_until_the_plan_declares_supply(self) -> None:
+        block, port = block_and_port()
+        assert lane_codes(plan.build({"blocks": [block]})) == []
+        belt_name = prototypes.belt_set()[0]
+        # A source on a belt far off stretches the build's box, so the port reads "- | -".
+        far = {"name": belt_name, "position": [-50, 100], "direction": EAST}
+        result = plan.build({"blocks": [block], "entities": [far],
+                             "sources": [{"id": "far", "at": [-50, 100], "direction": EAST, "items": ["a"]}]})
+        assert finding(result, "lanes-nothing").severity is inspection.Severity.SUSPECT
+        # One that stays in the port's rows leaves the port reading "? | ?": still a finding naming it.
+        near = {"name": belt_name, "position": [port["x"] + 60, port["y"]], "direction": port["direction"]}
+        result = plan.build({"blocks": [block], "entities": [near], "sources": [
+            {"id": "near", "at": [port["x"] + 60, port["y"]], "direction": port["direction"], "items": ["a"]}]})
+        unknown = finding(result, "lanes-unknown")
+        assert unknown.severity is inspection.Severity.SUSPECT
+        assert "block 0 port" in unknown.summary and "sources" in unknown.detail
+
+    def test_a_raw_input_beside_a_connection_is_asked_about_once(self) -> None:
+        (first_recipe, first_machine), (second_recipe, second_machine) = chained_recipes()
+        maker = block_spec(first_recipe, first_machine, [2])
+        alone = plan.build({"blocks": [maker]})
+        out = next(p for p in alone.blocks[0].ports if p["io"] == "out")
+        user = {**block_spec(second_recipe, second_machine, [2]), "at": [alone.blocks[0].width + 10, 0]}
+        in_index = next(p["index"] for p in plan.build({"blocks": [user]}).blocks[0].ports
+                        if p["io"] == "in" and p["kind"] == "belt")
+        result = built(blocks=[maker, user], connections=[
+            {"from": {"block": 0, "port": out["index"]}, "to": {"block": 1, "port": in_index}}])
+        unknown = [f for f in result.findings if f.code == "lanes-unknown"]
+        assert len(unknown) == 1 and unknown[0].severity is inspection.Severity.SUSPECT
+        assert "block 0 port" in unknown[0].summary and "sources" in unknown[0].detail
+
+    def side_load(self, port, length=4):
+        """Hand belts into the port plus an undeclared belt side-loading one lane; yields each side's entities."""
+        hand, head = feed_line(port)
+        dx, dy = inspection.STEP[port["direction"]]
+        mid = (head[0] + dx * 2, head[1] + dy * 2)
+        for side in (1, -1):
+            px, py = -dy * side, dx * side
+            toward = next(d for d in (NORTH, EAST, SOUTH, WEST) if inspection.STEP[d] == (-px, -py))
+            yield head, hand + [belt(mid[0] + px * 2, mid[1] + py * 2, toward),
+                                belt(mid[0] + px, mid[1] + py, toward)]
+
+    def test_an_unknown_beside_a_known_item_is_still_asked_about(self) -> None:
+        block, port = block_and_port()
+        w0, w1 = port["items"]
+        for head, placed in self.side_load(port):
+            source = {"at": list(head), "direction": port["direction"], "items": [w0, ""]}
+            result = plan.build({"blocks": [block], "entities": placed, "sources": [source]})
+            arrives = result.blocks[0].ports[port["index"]]["arrives"]
+            if "?" not in " ".join(arrives):
+                continue
+            unknown = finding(result, "lanes-unknown")
+            assert unknown.severity is inspection.Severity.SUSPECT
+            assert "block 0 port" in unknown.summary and "sources" in unknown.detail
+            # Both wanted items arrive on the known lane or are unknown; every way, one question.
+            full = plan.build({"blocks": [block], "entities": placed,
+                               "sources": [{**source, "items": [w0, w1]}]})
+            assert "lanes-missing" not in codes(full)
+            assert [f.severity for f in full.findings if f.code == "lanes-unknown"] == [inspection.Severity.SUSPECT]
+            assert "else rides the lane" in finding(full, "lanes-unknown").summary
+            return
+        pytest.fail("no side load put an unknown on a lane")
+
+    def test_a_rate_short_of_the_order_is_a_problem(self) -> None:
+        _, port = block_and_port()
+        w0, w1 = port["items"]
+        rate = finding(plan.build(with_head_source([w0, w1], 0.01, planned=1.0)), "lanes-rate")
+        assert rate.severity is inspection.Severity.PROBLEM and "asks for" in rate.summary
+        assert lane_codes(plan.build(with_head_source([w0, w1], 1000, planned=1.0))) == []
+        # No declared rate: nothing to compare.
+        assert lane_codes(plan.build(with_head_source([w0, w1], None, planned=1.0))) == []
+
+    def test_a_rate_short_of_full_load_is_only_a_note(self) -> None:
+        _, port = block_and_port()
+        w0, w1 = port["items"]
+        rate = finding(plan.build(with_head_source([w0, w1], 0.01)), "lanes-rate")
+        assert rate.severity is inspection.Severity.NOTE and "full load" in rate.summary
+
+    def test_rates_add_up_over_a_side_load_and_stop_at_a_splitter(self) -> None:
+        placed = line(0, 4, 0) + [belt(2, 2, NORTH), belt(2, 1, NORTH)]
+        result = built(placed, [{"at": [0, 0], "items": ["m"]}, {"at": [2, 2], "items": ["a"]}])
+        feeds = [lanes.Feed((0, 0), ("m", "m"), 2.0), lanes.Feed((2, 2), ("a", "a"), 3.0)]
+        lane_map = lanes.trace(list(result.blueprint.entities), feeds)
+        assert lane_map.arriving_rate((4, 0)) == 5.0
+        assert lane_map.arriving_rate((1, 0)) == 2.0
+        _, _, splitter = prototypes.belt_set()
+        cut = line(0, 1, 0) + [{"name": splitter, "position": [2, 0], "direction": EAST}] + line(3, 4, 0) + line(3, 4, 1)
+        result = built(cut, [{"at": [0, 0], "items": ["a"]}])
+        lane_map = lanes.trace(list(result.blueprint.entities), [lanes.Feed((0, 0), ("a", "a"), 2.0)])
+        assert lane_map.arriving_rate((4, 0)) is None and lane_map.arriving_rate((1, 0)) == 2.0
+
+    def test_a_sources_mistakes_are_refused(self) -> None:
+        block, port = block_and_port()
+        w0, w1 = port["items"]
+        hand, head = feed_line(port)
+        ahead = [head[0] + inspection.STEP[port["direction"]][0], head[1] + inspection.STEP[port["direction"]][1]]
+        good = {"at": list(head), "direction": port["direction"], "items": [w0, w1]}
+        out = next(p for p in plan.build({"blocks": [block]}).blocks[0].ports if p["io"] == "out")
+
+        def refuse(match, sources) -> None:
+            with pytest.raises(plan.PlanError, match=match):
+                plan.build({"blocks": [block], "entities": hand, "sources": sources})
+
+        refuse("unknown field", [{**good, "speed": 1}])
+        refuse("needs the 'direction'", [{k: v for k, v in good.items() if k != "direction"}])
+        refuse("flows", [{**good, "direction": (port["direction"] + 4) % 16}])
+        refuse("no belt", [{**good, "at": [head[0] + 50, head[1]]}])
+        refuse("items are", [{**good, "items": []}])
+        refuse("rate is", [{**good, "rate": -1}])
+        refuse("rate is", [{**good, "rate": float("nan")}])
+        refuse("rate is", [{**good, "rate": float("inf")}])
+        refuse("used twice", [{**good, "id": "x"}, {**good, "id": "x", "at": ahead}])
+        refuse("already the source", [good, {**good, "id": "again"}])
+        refuse("not a port", [{"block": 0, "port": 99, "items": [w0]}])
+        refuse("does not exist", [{"block": 3, "port": 0, "items": [w0]}])
+        refuse("not both", [{**good, "block": 0, "port": port["index"]}])
+        refuse("fed from behind", [{**good, "at": ahead}])
+        refuse("a source feeds", [{"block": 0, "port": out["index"], "items": [w0]}])
+        refuse("is a list", {"id": "x"})
+
+    def test_a_source_at_a_port_a_connection_ends_at_is_refused(self) -> None:
+        block, port = block_and_port()
+        w0, w1 = port["items"]
+        with pytest.raises(plan.PlanError, match="a connection brings it"):
+            plan.build({"blocks": [block], "connections": [feed_port(port, [w0, w1])],
+                        "sources": [{"block": 0, "port": port["index"], "items": [w0, w1]}]})
+
+    def test_a_source_where_a_connection_starts_is_refused(self) -> None:
+        block, port = block_and_port()
+        w0, w1 = port["items"]
+        connection = feed_port(port, [w0, w1])
+        start = connection["from"]
+        with pytest.raises(plan.PlanError, match="starts; give the items and rate on the connection"):
+            plan.build({"blocks": [block], "connections": [connection], "sources": [
+                {"at": start["at"], "direction": port["direction"], "items": [w0, w1]}]})
+
+
+class TestTargets:
+    def test_targets_size_the_ports_for_the_order(self) -> None:
+        block, port = block_and_port()
+        alone = plan.build({"blocks": [block]})
+        out = next(p for p in alone.blocks[0].ports if p["io"] == "out" and p["kind"] == "belt")
+        product = next(i for lane in out["items"] for i in lane.split("+") if i)
+        assert alone.blocks[0].ports[port["index"]]["planned_rate"] is None
+        ordered = plan.build({"blocks": [block], "targets": [{"item": product, "per_second": 0.01}]})
+        shown = ordered.blocks[0].ports[port["index"]]
+        # The order asks for 0.01 of the product; the output port at full load makes out["rate"] of it.
+        assert shown["planned_rate"] == pytest.approx(shown["rate"] * 0.01 / out["rate"])
+        assert 0 < shown["planned_rate"] < shown["rate"]
+
+    def test_a_plan_names_its_order_once(self) -> None:
+        block, _ = block_and_port()
+        with pytest.raises(plan.PlanError, match="names its order once"):
+            plan.build({"blocks": [block], "request": "r.json", "targets": [{"item": "x", "per_second": 1}]})
+
+    def test_bad_targets_are_refused(self) -> None:
+        block, _ = block_and_port()
+        with pytest.raises(plan.PlanError, match="targets"):
+            plan.build({"blocks": [block], "targets": [{"item": "x"}]})
+        with pytest.raises(plan.PlanError, match="targets is a list"):
+            plan.build({"blocks": [block], "targets": {"item": "x"}})
