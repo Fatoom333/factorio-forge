@@ -227,12 +227,21 @@ def for_active_profile() -> tuple[Environment | None, str]:
     else last) and using it would be silently wrong.
     """
     try:
-        from .profile import Profile
+        from .profile import Profile, ProfileError
 
         name = Profile.active_profile_name()
         if not name:
             return None, "no profile is active"
-        profile = Profile.load(name)
+        try:
+            profile = Profile.load(name)
+        except ProfileError as exc:
+            # The marker lives with draftsman's data (in the Python environment),
+            # not with the profiles, so it can name a profile this machine's
+            # forge home never had -- a copied or reused environment.
+            return None, (
+                f"draftsman's data is marked as loaded for profile {name!r}, but that "
+                f"profile is missing: {exc}"
+            )
     except Exception as exc:  # noqa: BLE001 - the answer is "not available", with the reason
         return None, f"the active profile could not be read ({exc})"
     try:

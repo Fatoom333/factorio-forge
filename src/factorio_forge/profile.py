@@ -383,9 +383,28 @@ class Profile:
     def load(cls, name: str) -> "Profile":
         path = paths.profile_dir(name) / PROFILE_FILE
         if not path.is_file():
-            raise ProfileError(f"no profile named {name!r}")
+            raise ProfileError(Profile.missing_message(name))
         with path.open(encoding="utf-8") as handle:
             return cls.from_dict(json.load(handle))
+
+    @staticmethod
+    def missing_message(name: str) -> str:
+        """Say that a profile does not exist: where it was looked for, what does, what to do."""
+        root = paths.profiles_root()
+        existing = Profile.list_all()
+        if existing:
+            have = f"profiles that exist there: {', '.join(existing)}"
+            next_step = (
+                f"activate one of them with `factorio-forge activate-profile {existing[0]}`, "
+                f"or make this one with `factorio-forge create-profile \"<save>\" --name {name}`"
+            )
+        else:
+            have = "there are no profiles there yet"
+            next_step = (
+                f"make it from the save you play with: "
+                f"`factorio-forge create-profile \"<save>\" --name {name}`"
+            )
+        return f"no profile named {name!r} in {root} ({have}); {next_step}"
 
     @staticmethod
     def list_all() -> list[str]:

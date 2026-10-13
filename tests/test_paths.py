@@ -9,7 +9,9 @@ repository itself.
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -209,3 +211,123 @@ class TestSources:
         install, user_dir = game
         write_log(user_dir, install, user_dir)
         assert paths.write_data_elsewhere() is None
+
+
+class TestUserDirIsTheOneTheGameUses:
+    """Two folders with game data: the one the game ran from last wins."""
+
+    @pytest.fixture
+    def two_dirs(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path]:
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        install = tmp_path / "Factorio"
+        stale = tmp_path / "stale"
+        fresh = tmp_path / "fresh"
+        for folder in (stale, fresh):
+            (folder / "saves").mkdir(parents=True)
+        monkeypatch.setattr(
+            paths,
+            "_default_user_dirs",
+            lambda: iter([(stale, "default location, test")]),
+        )
+        monkeypatch.setattr(
+            paths,
+            "_relocated_user_dirs",
+            lambda: iter([(fresh, "the same folder on the game's drive (test)")]),
+        )
+        return install, stale, fresh
+
+    @staticmethod
+    def age(log: Path, days: int) -> None:
+        moment = time.time() - days * 86400
+        os.utime(log, (moment, moment))
+
+    def test_newer_log_beats_the_default(self, two_dirs: tuple[Path, Path, Path]) -> None:
+        install, stale, fresh = two_dirs
+        self.age(write_log(stale, install, stale), 47)
+        write_log(fresh, install, fresh)
+
+        assert paths.factorio_user_dir() == fresh
+        source = paths.resolve_sources()["factorio_user_dir"]
+        assert "game's drive" in source and str(stale) in source
+
+    def test_default_stays_when_it_is_newer(self, two_dirs: tuple[Path, Path, Path]) -> None:
+        install, stale, fresh = two_dirs
+        write_log(stale, install, stale)
+        self.age(write_log(fresh, install, fresh), 5)
+
+        assert paths.factorio_user_dir() == stale
+        assert paths.resolve_sources()["factorio_user_dir"] == "default location, test"
+
+    def test_a_folder_with_a_log_beats_one_without(self, two_dirs: tuple[Path, Path, Path]) -> None:
+        install, _, fresh = two_dirs
+        write_log(fresh, install, fresh)
+        assert paths.factorio_user_dir() == fresh
+
+    def test_without_any_log_the_default_stays(self, two_dirs: tuple[Path, Path, Path]) -> None:
+        _, stale, _ = two_dirs
+        assert paths.factorio_user_dir() == stale
+
+    def test_the_log_can_point_to_the_real_folder(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No drive guessing needed: the default's own log may name the real one."""
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        install = tmp_path / "Factorio"
+        old, real = tmp_path / "old", tmp_path / "real"
+        (old / "saves").mkdir(parents=True)
+        (real / "saves").mkdir(parents=True)
+        monkeypatch.setattr(paths, "_default_user_dirs", lambda: iter([(old, "default location, test")]))
+        monkeypatch.setattr(paths, "_relocated_user_dirs", lambda: iter([]))
+        self.age(write_log(old, install, real), 40)
+        write_log(real, install, real)
+
+        assert paths.factorio_user_dir() == real
+
+    def test_paths_calls_an_old_log_stale(self, two_dirs: tuple[Path, Path, Path]) -> None:
+        install, stale, _ = two_dirs
+        log = write_log(stale, install, stale)
+        self.age(log, 47)
+        assert "STALE" in paths._log_label(log)
+        assert "47 days old" in paths._log_label(log)
+
+    def test_a_recent_log_is_not_called_stale(self, two_dirs: tuple[Path, Path, Path]) -> None:
+        install, stale, _ = two_dirs
+        assert "STALE" not in paths._log_label(write_log(stale, install, stale))
+
+    def test_warning_for_an_old_log(
+        self, monkeypatch: pytest.MonkeyPatch, two_dirs: tuple[Path, Path, Path]
+    ) -> None:
+        install, stale, _ = two_dirs
+        self.age(write_log(stale, install, stale), 47)
+        monkeypatch.setenv(paths.ENV_USER, str(stale))
+        assert any("47 days old" in line for line in paths.user_dir_warnings())
+
+    def test_pinned_folder_with_a_fresher_neighbour_is_warned_about(
+        self, monkeypatch: pytest.MonkeyPatch, two_dirs: tuple[Path, Path, Path]
+    ) -> None:
+        install, stale, fresh = two_dirs
+        self.age(write_log(stale, install, stale), 3)
+        write_log(fresh, install, fresh)
+        monkeypatch.setenv(paths.ENV_USER, str(stale))
+        warnings = paths.user_dir_warnings()
+        assert any(str(fresh) in line and paths.ENV_USER in line for line in warnings)
+
+    def test_no_warning_when_all_is_fresh(self, two_dirs: tuple[Path, Path, Path]) -> None:
+        install, _, fresh = two_dirs
+        write_log(fresh, install, fresh)
+        assert paths.user_dir_warnings() == []
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="drive roots are a Windows idea")
+    def test_other_drive_comes_from_where_the_game_is_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("APPDATA", "C:\\Users\\someone\\AppData\\Roaming")
+        monkeypatch.setattr(paths, "_install_hints", lambda: iter([Path("E:/Games/Factorio")]))
+        relocated = [folder for folder, _ in paths._relocated_user_dirs()]
+        assert relocated == [Path("E:/Users/someone/AppData/Roaming/Factorio")]
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="drive roots are a Windows idea")
+    def test_same_drive_gives_no_second_candidate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("APPDATA", "C:\\Users\\someone\\AppData\\Roaming")
+        monkeypatch.setattr(paths, "_install_hints", lambda: iter([Path("C:/Games/Factorio")]))
+        assert list(paths._relocated_user_dirs()) == []

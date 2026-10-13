@@ -179,7 +179,14 @@ def _cmd_list_profiles(_: argparse.Namespace) -> int:
 
     names = Profile.list_all()
     if not names:
-        print("no profiles yet — create one with create-profile")
+        marked = Profile.active_profile_name()
+        print(f"no profiles in {paths.profiles_root()} yet — create one with "
+              f"`factorio-forge create-profile \"<save>\" --name <name>`")
+        if marked:
+            print(
+                f"(draftsman's data in this Python environment is marked as loaded for "
+                f"{marked!r}, a profile this machine does not have)"
+            )
         return 0
 
     active = Profile.active_profile_name()
