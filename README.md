@@ -187,10 +187,21 @@ set `FACTORIO_PATH` (see [Where things are stored](#where-things-are-stored)).
 Next to each path it found on its own, `paths` says where the path came from:
 an environment variable, the config file, the platform's default location, or
 the game's log, with that log's date. If there are two game data folders (one
-left over from an earlier install, say) and the wrong one was picked, the old
-date gives it away; set `FACTORIO_USER_DIR` to the right folder. When the log
-in the chosen folder says the game now writes somewhere else, `paths` says that
-too.
+left over from an earlier install, or the game's data kept on another drive than
+the Windows profile), the one whose log is newest is picked, because that is
+where the game ran last; on Windows the same AppData path on the drive where the game is installed is
+also checked (no list of drive letters), and a folder anywhere else is used only
+if the game's log names it, otherwise set `FACTORIO_USER_DIR`. `paths` shows the
+age of a log older than 30 days and warns when the chosen folder's log is that
+old or another folder has a newer one; set `FACTORIO_USER_DIR` to the right folder. When the
+log in the chosen folder says the game now writes somewhere else, `paths` says
+that too.
+
+If a command says that the active profile is missing, the marker that names it
+is kept with draftsman's data in the Python environment, not with the profiles,
+so an environment copied from another machine can name a profile this machine
+does not have. The message lists where profiles are looked for, which exist, and
+the `create-profile` or `activate-profile` command to run.
 
 `render` and `check` work right away against the base game's data bundled with
 draftsman. For anything modded, make a profile from your save and activate it

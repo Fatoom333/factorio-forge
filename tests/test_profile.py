@@ -540,3 +540,28 @@ class TestActivate:
 
         assert (target / "entities.pkl").read_bytes() == b"this profile"
         assert not (target / "asteroid_chunks.pkl").exists()
+
+
+class TestMissingProfileMessage:
+    """A profile that is not there must say where it was looked for and what to do."""
+
+    def test_names_the_place_and_the_command_when_there_are_none(self) -> None:
+        with pytest.raises(ProfileError) as caught:
+            Profile.load("vulkan-start")
+        message = str(caught.value)
+        assert "'vulkan-start'" in message
+        assert str(paths.profiles_root()) in message
+        assert "no profiles there yet" in message
+        assert 'factorio-forge create-profile "<save>" --name vulkan-start' in message
+
+    def test_lists_what_exists_and_how_to_activate_it(self) -> None:
+        for name in ("alpha", "beta"):
+            directory = paths.profile_dir(name)
+            directory.mkdir(parents=True)
+            (directory / "profile.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(ProfileError) as caught:
+            Profile.load("gamma")
+        message = str(caught.value)
+        assert "alpha, beta" in message
+        assert "activate-profile alpha" in message
+        assert "--name gamma" in message

@@ -176,3 +176,21 @@ def test_export_with_bom_loads(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     target = write_export(tmp_path, make_payload())
     target.write_text("﻿" + target.read_text(encoding="utf-8"), encoding="utf-8")
     assert read_environment().tick == 123456
+
+
+def test_marker_naming_a_missing_profile_is_explained(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The marker lives in the Python environment; the profiles in the forge home."""
+    from factorio_forge import profile as profile_module
+    from factorio_forge.environment import for_active_profile
+
+    monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+    monkeypatch.setattr(
+        profile_module.Profile, "active_profile_name", staticmethod(lambda: "vulkan-start")
+    )
+    found, why = for_active_profile()
+    assert found is None
+    assert "marked as loaded for profile 'vulkan-start'" in why
+    assert str(paths.profiles_root()) in why
+    assert "create-profile" in why

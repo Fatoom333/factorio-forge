@@ -152,6 +152,94 @@ def _default_user_dirs() -> Iterator[tuple[Path, str]]:
         yield install, f"next to the standalone install remembered in {CONFIG_FILENAME}"
 
 
+def _is_user_dir(candidate: Path) -> bool:
+    return (candidate / "saves").is_dir() or (candidate / "config").is_dir()
+
+
+def _log_mtime(user_dir: Path) -> float | None:
+    """When the game last wrote its log in this folder, or None without one."""
+    try:
+        return (user_dir / LOG_FILENAME).stat().st_mtime
+    except OSError:
+        return None
+
+
+def _install_hints() -> Iterator[Path]:
+    """Places the game is installed, found without asking where its data is.
+
+    Only used to learn which drive or root the game lives on; unlike
+    `_resolve_install_dir` it never reads the user dir, which is what is being
+    looked for.
+    """
+    override = os.environ.get(ENV_GAME)
+    if override:
+        yield Path(override).expanduser()
+    remembered = _config_path_value(load_config(), "factorio_install_dir")
+    if remembered:
+        yield remembered
+    for default, _ in _default_user_dirs():
+        binaries = read_log(default / LOG_FILENAME).get("binaries")
+        if binaries:
+            yield Path(binaries).parent
+    yield from _probe_install_dirs()
+
+
+def _relocated_user_dirs() -> Iterator[tuple[Path, str]]:
+    """The default user folder as it would be on the drive the game is installed on.
+
+    On Windows the game can keep its data on another drive than the profile's,
+    under the same Users/name/AppData/Roaming/Factorio path with a different
+    root. The roots come from where the game is installed, never from a list
+    of drive letters.
+    """
+    if sys.platform != "win32":
+        return
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return
+    default = Path(appdata) / "Factorio"
+    for hint in _install_hints():
+        if hint.anchor and hint.anchor.lower() != default.anchor.lower():
+            relocated = Path(hint.anchor) / default.relative_to(default.anchor)
+            yield relocated, f"the same folder on the game's drive ({hint.anchor})"
+
+
+def _written_user_dirs(candidates: list[tuple[Path, str]]) -> Iterator[tuple[Path, str]]:
+    """Folders that the logs found so far name as the game's "Write data path"."""
+    for candidate, _ in candidates:
+        written = read_log(candidate / LOG_FILENAME).get("write_data")
+        if written:
+            yield Path(written), f"the Write data path in the log of {candidate}"
+
+
+def _user_dir_candidates() -> list[tuple[Path, str]]:
+    """Every folder that holds game data, in order of trust, without duplicates."""
+    found: list[tuple[Path, str]] = []
+
+    def add(candidate: Path, label: str) -> None:
+        if _is_user_dir(candidate) and not any(_same_place(candidate, c) for c, _ in found):
+            found.append((candidate, label))
+
+    for candidate, label in _default_user_dirs():
+        add(candidate, label)
+    for candidate, label in _relocated_user_dirs():
+        add(candidate, label)
+    for candidate, label in list(_written_user_dirs(found)):
+        add(candidate, label)
+    return found
+
+
+def _fresher_user_dir(chosen: Path) -> tuple[Path, str] | None:
+    """A game data folder whose log is newer than the one in `chosen`, if any."""
+    best: tuple[Path, str] | None = None
+    best_time = _log_mtime(chosen) or 0.0
+    for candidate, label in _user_dir_candidates():
+        written = _log_mtime(candidate)
+        if written is not None and written > best_time and not _same_place(candidate, chosen):
+            best, best_time = (candidate, label), written
+    return best
+
+
 def _resolve_user_dir(config: dict[str, Any] | None = None) -> tuple[Path | None, str | None]:
     override = os.environ.get(ENV_USER)
     if override:
@@ -163,10 +251,26 @@ def _resolve_user_dir(config: dict[str, Any] | None = None) -> tuple[Path | None
     if remembered:
         return remembered, f"remembered in {CONFIG_FILENAME} by `init`"
 
-    for candidate, label in _default_user_dirs():
-        if (candidate / "saves").is_dir() or (candidate / "config").is_dir():
-            return candidate, label
-    return None, None
+    # Several folders can hold game data (the profile's default one and one on
+    # another drive, say). The game is the judge: the folder whose log is the
+    # newest is where it ran last. Folders without a log keep their order of
+    # trust and lose to any folder that has one.
+    candidates = _user_dir_candidates()
+    if not candidates:
+        return None, None
+    first = candidates[0][0]
+    best, label = candidates[0]
+    best_time = _log_mtime(best)
+    for candidate, candidate_label in candidates[1:]:
+        written = _log_mtime(candidate)
+        if written is not None and (best_time is None or written > best_time):
+            best, label, best_time = candidate, candidate_label, written
+    if best != first:
+        if _log_mtime(first) is None:
+            label += f"; the folder {first} has no log"
+        else:
+            label += f"; its log is newer than the one in {first}"
+    return best, label
 
 
 def factorio_user_dir(config: dict[str, Any] | None = None) -> Path | None:
@@ -233,13 +337,27 @@ def _log_file() -> Path | None:
     return log if log.is_file() else None
 
 
+STALE_LOG_DAYS = 30
+
+
+def _log_age_days(log: Path) -> int | None:
+    try:
+        return round((datetime.now().timestamp() - log.stat().st_mtime) / 86400)
+    except OSError:
+        return None
+
+
 def _log_label(log: Path) -> str:
     """Which log an answer came from, dated so that a stale one stands out."""
     try:
         written = datetime.fromtimestamp(log.stat().st_mtime).strftime("%Y-%m-%d")
     except OSError:
         return f"from {log.name}"
-    return f"from {log.name} of {written}"
+    label = f"from {log.name} of {written}"
+    age = _log_age_days(log)
+    if age is not None and age > STALE_LOG_DAYS:
+        label += f", {age} days old"
+    return label
 
 
 def _log_paths() -> tuple[Path | None, str | None]:
@@ -423,6 +541,37 @@ def resolve_sources() -> dict[str, str]:
     return sources
 
 
+def user_dir_warnings() -> list[str]:
+    """Reasons to doubt the chosen game data folder, one sentence each.
+
+    Two kinds: the folder's log is old (the game last ran from it long ago) and another folder has a newer log (the game now runs from there;
+    only reachable when the choice was pinned by FACTORIO_USER_DIR or the
+    config file, since detection already prefers the newer one).
+    """
+    user_dir = factorio_user_dir()
+    if user_dir is None:
+        return []
+    warnings: list[str] = []
+    age = _log_age_days(user_dir / LOG_FILENAME)
+    if age is not None and age > STALE_LOG_DAYS:
+        warnings.append(
+            f"The game last ran from {user_dir} {age} days ago. If you play from "
+            f"another folder, set {ENV_USER} to it."
+        )
+    fresher = _fresher_user_dir(user_dir)
+    if fresher is not None:
+        folder, label = fresher
+        newer = (
+            f"has a newer {LOG_FILENAME}"
+            if _log_mtime(user_dir) is not None
+            else f"has a {LOG_FILENAME}, the chosen folder has none"
+        )
+        warnings.append(
+            f"{folder} ({label}) {newer}. If that is where you play, set {ENV_USER} to it."
+        )
+    return warnings
+
+
 def _same_place(a: Path, b: Path) -> bool:
     try:
         return os.path.samefile(a, b)
@@ -460,6 +609,8 @@ def main() -> int:
             value = "NOT FOUND"
         source = f"  ({sources[key]})" if key in sources else ""
         print(f"{key.ljust(width)}  {value}{source}")
+    for warning in user_dir_warnings():
+        print(f"\n{warning}", file=sys.stderr)
     elsewhere = write_data_elsewhere()
     if elsewhere is not None:
         print(
