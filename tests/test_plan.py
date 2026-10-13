@@ -24,8 +24,14 @@ from test_route import block_spec, codes, point, ports_of
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def raw_input_unknown(f) -> bool:
+    """A block's raw inputs are the player's supply; these plans declare none."""
+    return f.code == "lanes-unknown" and f.summary.startswith("block 0 port")
+
+
 def serious(result) -> list[str]:
-    return [str(f) for f in result.findings if f.severity is not inspection.Severity.NOTE]
+    return [str(f) for f in result.findings
+            if f.severity is not inspection.Severity.NOTE and not raw_input_unknown(f)]
 
 
 # --------------------------------------------------------------------------
@@ -191,8 +197,10 @@ class TestWholeLine:
         # poles may not join up elsewhere; this test is about routes and lanes.
         power = ("power-split", "pole-isolated")
         assert [str(f) for f in result.findings
-                if f.severity is not inspection.Severity.NOTE and f.code not in power] == []
-        assert [f.code for f in result.findings if f.code.startswith("lanes-")] == ["lanes-swapped"]
+                if f.severity is not inspection.Severity.NOTE and f.code not in power
+                and not raw_input_unknown(f)] == []
+        assert [f.code for f in result.findings
+                if f.code.startswith("lanes-") and not raw_input_unknown(f)] == ["lanes-swapped"]
         green_in, red_in, red_cable = (result.blocks[1].ports[0], result.blocks[2].ports[0],
                                        result.blocks[2].ports[1])
         assert green_in["arrives"] == list(green_in["items"])
@@ -222,7 +230,8 @@ class TestWholeLine:
         assert [s for s in serious(result) if "power" not in s and "pole" not in s] == []
         arrives = result.blocks[1].ports[port["index"]]["arrives"]
         assert set(arrives) == {product, other}
-        assert not [f for f in result.findings if f.code.startswith("lanes-") and f.code != "lanes-swapped"]
+        assert not [f for f in result.findings if f.code.startswith("lanes-") and f.code != "lanes-swapped"
+                    and not raw_input_unknown(f)]
 
 
 def two_ingredient_chain() -> tuple[tuple[str, str], tuple[str, str]]:

@@ -810,7 +810,8 @@ def _sources(plan: dict, built: list[BuiltBlock]) -> list[tuple[str, lanes.Feed,
         if not isinstance(items, list) or not 1 <= len(items) <= 2 or not all(isinstance(i, str) for i in items):
             raise PlanError(f"{label}: items are [left, right], or one item for both lanes")
         rate = entry.get("rate")
-        if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate < 0):
+        if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))
+                             or not math.isfinite(rate) or rate < 0):
             raise PlanError(f"{label}: rate is items per second, a number of at least 0")
         if tile in tiles:
             raise PlanError(f"{label}: {list(tile)} is already the source of {tiles[tile]}")
@@ -831,6 +832,13 @@ def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int
                      + sum(f.tile == t for _, f, _ in sources) > 1)
         raise PlanError(f"{list(clash)} is named by both 'inputs' and 'sources', or twice; name a belt head once")
     feeds = list(inputs) + [f for _, f, _ in sources]
+    point_starts = {r.spec.start_tile: r.id for r in routes
+                    if r.ok and r.spec is not None and r.spec.start.port is None
+                    and not (r.junction is not None and r.junction.kind == "splitter")}
+    for label, feed, _ in [(f"input at {list(f.tile)}", f, None) for f in inputs] + sources:
+        if feed.tile in point_starts:
+            raise PlanError(f"{label} is where connection {point_starts[feed.tile]} starts; "
+                            "give the items and rate on the connection's 'from'")
     for r in routes:
         if not r.ok or r.spec is None or r.spec.start.port is not None:
             continue
@@ -1013,6 +1021,8 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
     blueprint.label = label
     built: list[BuiltBlock] = []
     collected: list[str] = []
+    if plan.get("targets") and plan.get("request"):
+        raise PlanError("a plan names its order once: 'request' or 'targets', not both")
     if planned is None and plan.get("targets"):
         planned, said = planned_from_targets(plan)
         collected.extend(said)

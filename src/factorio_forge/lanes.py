@@ -683,8 +683,8 @@ def _unknown_finding(exp: Expectation, unknown_tiles, what: str, severity=Severi
 
 
 def _rate_finding(lane_map: LaneMap, exp: Expectation) -> list[Finding]:
-    if exp.need is None or exp.need <= 0:
-        return []
+    if exp.need is None or exp.need <= 0 or exp.routed:
+        return []  # a route's own supply is checked by route-short-supply
     arriving = lane_map.arriving_rate(exp.tile)
     if arriving is None or arriving + 1e-9 >= exp.need:
         return []
@@ -722,7 +722,7 @@ def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation],
                     "Connect it to a source, or declare what the player feeds it in 'sources'.", exp.tile,
                 ))
                 continue
-            if not exp.routed and not from_hand:
+            if not exp.routed and not from_hand and not (declared and not exp.ordered):
                 continue  # an unconnected fragment
         if not exp.ordered:
             wanted_items = {p for w in exp.lanes for p in _parts(w)}
@@ -742,12 +742,11 @@ def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation],
                 ))
                 for i, lane in enumerate((left, right)):
                     stray = sorted(lane.items - wanted_items)
-                    expected = sorted(_parts(exp.lanes[i]) - arriving)
-                    if stray and expected:
+                    if stray:
                         found.append(Finding(
                             Severity.PROBLEM, "lanes-wrong-item",
-                            f"{exp.label}: the {_SIDE[i]} lane should bring {', '.join(expected)}, it brings "
-                            f"{', '.join(stray)}, which the block does not use",
+                            f"{exp.label}: the {_SIDE[i]} lane brings {', '.join(stray)}, which the block does "
+                            f"not use, and {', '.join(missing)} is missing",
                             "Replace the source on that lane.", exp.tile,
                         ))
             elif unsure:
@@ -761,6 +760,8 @@ def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation],
                     "take from both lanes, so the order does not matter and it runs as built",
                     "Only something that reads the lanes one by one would care.", exp.tile,
                 ))
+            if unknown_tiles and not unsure:
+                found.append(_unknown_finding(exp, unknown_tiles, "what else rides the lane"))
         else:
             have = (left.items, right.items)
             wanted = f"{exp.lanes[0] or '-'} | {exp.lanes[1] or '-'}"

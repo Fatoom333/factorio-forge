@@ -210,18 +210,24 @@ read like `connections`: each entry may have an `id` (unique; a default
 refused). `items` is `[left, right]`, one item for both lanes; `rate`
 (items/s, both lanes) is optional. A source on a tile with no belt, with the
 wrong direction, fed from behind or from a side, twice on one tile, at an out
-port, or at a port a connection ends at is refused. The tracer treats a
+port, at a port a connection ends at, or on the tile a connection's point starts
+at (give the items and rate on the connection's `from`) is refused. A `rate` must
+be a finite number of at least 0. The tracer treats a
 source as known supply (`inputs` is the same without the rest); a connection's
 point start with a `rate` does too. A belt start nobody declared stays `?`,
 and a block in port it reaches gets `lanes-unknown` (suspect), naming the port
-and saying to declare it in `sources`.
+and saying to declare it in `sources`. That holds in a plan that declares
+connections or sources, whether the port reads `? | ?` or `? | item`, and also
+when every wanted item arrives but something unknown rides the lane too (it
+can clog it). A lone block with no connections or sources is a fragment.
 
 What the trace finds against a block in port is raised as findings
 (`docs/checking.md`, "Lanes (in a build)"):
 
-- `lanes-missing` (problem): an ingredient never arrives. With it, if the lane
-  meant for it carries something the block does not use,
-  `lanes-wrong-item` (problem) names the lane and the item.
+- `lanes-missing` (problem): an ingredient never arrives. With it, every lane
+  that carries something the block does not use gets `lanes-wrong-item`
+  (problem), naming the lane and the item; which lane it is does not matter
+  at a block port.
 - `lanes-swapped` (note): both ingredients arrive, on the other lanes. An
   inserter takes from both lanes, so for a block it does not matter. A
   point's lanes are ordered: there it is `lanes-wrong` (problem).
@@ -232,7 +238,9 @@ What the trace finds against a block in port is raised as findings
 - `lanes-rate`: the supply declared behind the port is below what it takes.
   The rate is known only when every belt behind the port starts at a
   declared source or point with a `rate` and no splitter is in between;
-  otherwise it is not compared. Below the ordered rate (`planned_rate`) it is
+  otherwise it is not compared. The comparison is of totals: not per item, and
+  not shared between several ports on one belt. A port a connection ends at is
+  left to `route-short-supply`. Below the ordered rate (`planned_rate`) it is
   a problem; below full load only (no order), a note.
 
 **Lanes.** After routing, `lanes.py` traces every belt of the build -- block
@@ -255,7 +263,8 @@ above its capacity is `block-short`; a block whose recipe the bill does not
 list gets a note. A plan with no request file can say what is ordered itself,
 `"targets": [{"item": "electronic-circuit", "per_second": 1}]` (or
 `per_minute`), and gets the same bill and the same `planned_rate`. With
-neither, the report keeps only the rates at full load.
+neither, the report keeps only the rates at full load. A plan names its order
+once: `request` together with `targets` is refused.
 
 **Reach** is read per prototype: `max_distance` of an underground belt,
 `max_underground_distance` of a pipe-to-ground's underground connection. It
