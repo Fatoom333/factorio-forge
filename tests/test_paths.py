@@ -395,3 +395,42 @@ class TestOutputAndChain:
         assert str(paths.profiles_root()) in out
         assert "create-profile" in out
         assert "vulkan-start" in out
+
+
+class TestGuessedFoldersMustBeOurs:
+    """A folder found by guessing is read for mods and saves, so it has to be ours."""
+
+    def test_a_log_dated_in_the_future_does_not_count(self, tmp_path):
+        import os
+        import time
+
+        from factorio_forge import paths
+
+        log = tmp_path / paths.LOG_FILENAME
+        log.write_text("", encoding="utf-8")
+        later = time.time() + 86400
+        os.utime(log, (later, later))
+        assert paths._log_mtime(tmp_path) is None
+
+    def test_a_folder_owned_like_its_trusted_neighbour_is_ours(self, tmp_path):
+        from factorio_forge import paths
+
+        mine = tmp_path / "mine"
+        mine.mkdir()
+        assert paths._is_own_folder(mine, tmp_path)
+
+    def test_a_folder_whose_owner_cannot_be_read_is_not_ours(self, tmp_path):
+        from factorio_forge import paths
+
+        assert not paths._is_own_folder(tmp_path / "absent", tmp_path)
+
+    def test_a_guessed_folder_of_another_owner_is_left_out(self, tmp_path, monkeypatch):
+        from factorio_forge import paths
+
+        default, other = tmp_path / "default", tmp_path / "other"
+        for folder in (default, other):
+            (folder / "saves").mkdir(parents=True)
+        monkeypatch.setattr(paths, "_default_user_dirs", lambda: iter([(default, "default")]))
+        monkeypatch.setattr(paths, "_relocated_user_dirs", lambda: iter([(other, "guess")]))
+        monkeypatch.setattr(paths, "_is_own_folder", lambda candidate, trusted: False)
+        assert [c for c, _ in paths._user_dir_candidates()] == [default]

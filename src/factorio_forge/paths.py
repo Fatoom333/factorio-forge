@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -159,9 +160,66 @@ def _is_user_dir(candidate: Path) -> bool:
 def _log_mtime(user_dir: Path) -> float | None:
     """When the game last wrote its log in this folder, or None without one."""
     try:
-        return (user_dir / LOG_FILENAME).stat().st_mtime
+        written = (user_dir / LOG_FILENAME).stat().st_mtime
     except OSError:
         return None
+    # A date in the future says nothing about where the game ran last.
+    return written if written <= time.time() + _CLOCK_SLACK else None
+
+
+_CLOCK_SLACK = 300.0
+_SYSTEM_OWNERS = {"S-1-5-18", "S-1-5-32-544"}  # the system and the Administrators group
+
+
+def _owner(path: Path) -> str | None:
+    """Who owns `path`: a SID string on Windows, a uid elsewhere, None if unreadable."""
+    if sys.platform != "win32":
+        try:
+            return str(path.stat().st_uid)
+        except OSError:
+            return None
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LocalFree.argtypes = [wintypes.HLOCAL]
+    advapi.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    sid, descriptor, text = ctypes.c_void_p(), ctypes.c_void_p(), wintypes.LPWSTR()
+    # SE_FILE_OBJECT = 1, OWNER_SECURITY_INFORMATION = 1
+    if advapi.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(sid), None, None, None,
+                                    ctypes.byref(descriptor)):
+        return None
+    try:
+        if not advapi.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+            return None
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(ctypes.cast(text, wintypes.HLOCAL))
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+def _is_own_folder(candidate: Path, trusted: Path) -> bool:
+    """Whether `candidate` belongs to whoever owns `trusted`, or to the system.
+
+    A folder found by guessing (the same path on another drive, a path a log
+    names) is only taken when another account could not have planted it: mods
+    and saves are read from it. Unreadable ownership counts as not ours.
+    """
+    owner = _owner(candidate)
+    if owner is None:
+        return False
+    if sys.platform == "win32":
+        return owner in _SYSTEM_OWNERS or owner == _owner(trusted)
+    return owner in ("0", str(os.getuid()))
 
 
 def _install_hints() -> Iterator[Path]:
@@ -220,12 +278,17 @@ def _user_dir_candidates() -> list[tuple[Path, str]]:
         if _is_user_dir(candidate) and not any(_same_place(candidate, c) for c, _ in found):
             found.append((candidate, label))
 
-    for candidate, label in _default_user_dirs():
+    defaults = list(_default_user_dirs())
+    for candidate, label in defaults:
         add(candidate, label)
+    # Everything below is a guess, so it has to be the same owner's folder.
+    trusted = defaults[0][0].parent if defaults else Path.home()
     for candidate, label in _relocated_user_dirs():
-        add(candidate, label)
+        if _is_own_folder(candidate, trusted):
+            add(candidate, label)
     for candidate, label in list(_written_user_dirs(found)):
-        add(candidate, label)
+        if _is_own_folder(candidate, trusted):
+            add(candidate, label)
     return found
 
 
