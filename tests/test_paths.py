@@ -287,12 +287,12 @@ class TestUserDirIsTheOneTheGameUses:
         install, stale, _ = two_dirs
         log = write_log(stale, install, stale)
         self.age(log, 47)
-        assert "STALE" in paths._log_label(log)
+        assert "STALE" not in paths._log_label(log)
         assert "47 days old" in paths._log_label(log)
 
     def test_a_recent_log_is_not_called_stale(self, two_dirs: tuple[Path, Path, Path]) -> None:
         install, stale, _ = two_dirs
-        assert "STALE" not in paths._log_label(write_log(stale, install, stale))
+        assert "days old" not in paths._log_label(write_log(stale, install, stale))
 
     def test_warning_for_an_old_log(
         self, monkeypatch: pytest.MonkeyPatch, two_dirs: tuple[Path, Path, Path]
@@ -300,7 +300,7 @@ class TestUserDirIsTheOneTheGameUses:
         install, stale, _ = two_dirs
         self.age(write_log(stale, install, stale), 47)
         monkeypatch.setenv(paths.ENV_USER, str(stale))
-        assert any("47 days old" in line for line in paths.user_dir_warnings())
+        assert any("47 days ago" in line for line in paths.user_dir_warnings())
 
     def test_pinned_folder_with_a_fresher_neighbour_is_warned_about(
         self, monkeypatch: pytest.MonkeyPatch, two_dirs: tuple[Path, Path, Path]
@@ -331,3 +331,67 @@ class TestUserDirIsTheOneTheGameUses:
         monkeypatch.setenv("APPDATA", "C:\\Users\\someone\\AppData\\Roaming")
         monkeypatch.setattr(paths, "_install_hints", lambda: iter([Path("C:/Games/Factorio")]))
         assert list(paths._relocated_user_dirs()) == []
+
+
+class TestOutputAndChain:
+    @pytest.mark.skipif(sys.platform != "win32", reason="drive roots are a Windows idea")
+    def test_stale_default_log_leads_to_the_games_other_drive(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Old log in the default folder -> Binaries path on another drive -> same AppData path there."""
+        appdata = tmp_path / "Users" / "someone" / "AppData" / "Roaming"
+        default = appdata / "Factorio"
+        default.mkdir(parents=True)
+        (default / paths.LOG_FILENAME).write_text(
+            "   0.001 Binaries path: Q:/Games/Factorio/bin\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("APPDATA", str(appdata))
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        monkeypatch.setattr(paths, "_probe_install_dirs", lambda: iter([]))
+        relocated = [folder for folder, _ in paths._relocated_user_dirs()]
+        expected = Path("Q:\\") / default.relative_to(default.anchor)
+        assert relocated == [expected]
+
+    def test_folder_without_log_is_named_in_the_source(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        install = tmp_path / "Factorio"
+        first, other = tmp_path / "first", tmp_path / "other"
+        for folder in (first, other):
+            (folder / "saves").mkdir(parents=True)
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        monkeypatch.setattr(paths, "_default_user_dirs", lambda: iter([(first, "default, test")]))
+        monkeypatch.setattr(paths, "_relocated_user_dirs", lambda: iter([(other, "elsewhere, test")]))
+        write_log(other, install, other)
+        source = paths.resolve_sources()["factorio_user_dir"]
+        assert "has no log" in source and "newer" not in source
+
+    def test_main_prints_the_old_log_warning_to_stderr(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        folder = tmp_path / "user"
+        (folder / "saves").mkdir(parents=True)
+        log = write_log(folder, tmp_path / "Factorio", folder)
+        moment = time.time() - 47 * 86400
+        os.utime(log, (moment, moment))
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        monkeypatch.setenv(paths.ENV_USER, str(folder))
+        assert paths.main() == 0
+        err = capsys.readouterr().err
+        assert "47 days ago" in err and paths.ENV_USER in err
+
+    def test_list_profiles_without_profiles_says_what_to_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import argparse
+
+        from factorio_forge import cli
+        from factorio_forge.profile import Profile
+
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        monkeypatch.setattr(Profile, "active_profile_name", staticmethod(lambda: "vulkan-start"))
+        assert cli._cmd_list_profiles(argparse.Namespace()) == 0
+        out = capsys.readouterr().out
+        assert str(paths.profiles_root()) in out
+        assert "create-profile" in out
+        assert "vulkan-start" in out

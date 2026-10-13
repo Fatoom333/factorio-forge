@@ -266,7 +266,10 @@ def _resolve_user_dir(config: dict[str, Any] | None = None) -> tuple[Path | None
         if written is not None and (best_time is None or written > best_time):
             best, label, best_time = candidate, candidate_label, written
     if best != first:
-        label += f"; its log is newer than the one in {first}"
+        if _log_mtime(first) is None:
+            label += f"; the folder {first} has no log"
+        else:
+            label += f"; its log is newer than the one in {first}"
     return best, label
 
 
@@ -353,7 +356,7 @@ def _log_label(log: Path) -> str:
     label = f"from {log.name} of {written}"
     age = _log_age_days(log)
     if age is not None and age > STALE_LOG_DAYS:
-        label += f", {age} days old: STALE, the game has not run from here since"
+        label += f", {age} days old"
     return label
 
 
@@ -541,8 +544,7 @@ def resolve_sources() -> dict[str, str]:
 def user_dir_warnings() -> list[str]:
     """Reasons to doubt the chosen game data folder, one sentence each.
 
-    Two kinds: the folder's log is old (the game has not run from it for a long
-    time) and another folder has a newer log (the game now runs from there;
+    Two kinds: the folder's log is old (the game last ran from it long ago) and another folder has a newer log (the game now runs from there;
     only reachable when the choice was pinned by FACTORIO_USER_DIR or the
     config file, since detection already prefers the newer one).
     """
@@ -553,15 +555,19 @@ def user_dir_warnings() -> list[str]:
     age = _log_age_days(user_dir / LOG_FILENAME)
     if age is not None and age > STALE_LOG_DAYS:
         warnings.append(
-            f"The {LOG_FILENAME} in {user_dir} is {age} days old: the game has not run "
-            f"from this folder lately, so its saves and mods may be out of date."
+            f"The game last ran from {user_dir} {age} days ago. If you play from "
+            f"another folder, set {ENV_USER} to it."
         )
     fresher = _fresher_user_dir(user_dir)
     if fresher is not None:
         folder, label = fresher
+        newer = (
+            f"has a newer {LOG_FILENAME}"
+            if _log_mtime(user_dir) is not None
+            else f"has a {LOG_FILENAME}, the chosen folder has none"
+        )
         warnings.append(
-            f"{folder} ({label}) has a newer {LOG_FILENAME}. If that is where you play, "
-            f"set {ENV_USER} to it."
+            f"{folder} ({label}) {newer}. If that is where you play, set {ENV_USER} to it."
         )
     return warnings
 
