@@ -97,6 +97,7 @@ class Feed:
 
     tile: Tile
     lanes: tuple[str, str] | None  # None = something unknown comes in here
+    rate: float | None = None  # items per second, both lanes, where the plan declared it
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,8 @@ class Expectation:
     routed: bool  # a route ends here
     route_id: str | None = None
     predicted: tuple[str, str] | None = None  # the router's belief, for route-lanes-disagree
+    need: float | None = None  # items per second the port takes (ordered rate, or full load)
+    need_is_ordered: bool = False  # `need` is what the order asks for, not the machines' capacity
 
 
 @dataclass(frozen=True)
@@ -163,6 +166,34 @@ class LaneMap:
     fed_by: dict[int, list[tuple[Tile | None, Filter | None]]] = field(default_factory=dict)
     # Heads of hand-placed belts nobody named the load of: what reaches a port from one is worth a note.
     loose_heads: set[Tile] = field(default_factory=set)
+    # The declared rate of each feed, None where the plan gave none.
+    feed_rates: dict[Tile, float | None] = field(default_factory=dict)
+
+    def arriving_rate(self, tile) -> float | None:
+        """Items per second reaching `tile`, if every belt behind it starts at a feed with a declared rate.
+
+        A splitter on the way, or a head nobody declared, makes it unknown (None):
+        the tracer follows what lies on the lanes, not how much of it.
+        """
+        total, seen, todo = 0.0, set(), [tuple(tile)]
+        while todo:
+            at = todo.pop()
+            if at in seen:
+                continue
+            seen.add(at)
+            node = self.nodes.get(at)
+            if node is None or node.kind == "splitter":
+                return None
+            preds = list(self.behind.get(at, ())) + list(self.sides.get(at, {}).values())
+            if at in self.feed_rates:
+                if preds or self.feed_rates[at] is None:
+                    return None
+                total += self.feed_rates[at]
+            elif not preds:
+                return None
+            else:
+                todo.extend(preds)
+        return total
 
     def at(self, tile) -> tuple[Content, Content] | None:
         tile = tuple(tile)
@@ -517,7 +548,7 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
 
     return LaneMap(nodes, carries, edges, consumers, closed, unchecked,
                    {k: v for k, v in seeds.items() if k in carries}, behind, halves, sides, machines, fed_by,
-                   loose_heads)
+                   loose_heads, {f.tile: f.rate for f in feeds})
 
 
 # --------------------------------------------------------------------------
@@ -640,7 +671,35 @@ def _fits(wants: tuple[str, str], have: tuple[frozenset[str], frozenset[str]]) -
     return all(_parts(w) <= h for w, h in zip(wants, have))
 
 
-def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation]) -> tuple[list[Finding], list]:
+def _unknown_finding(exp: Expectation, unknown_tiles, what: str, severity=Severity.SUSPECT) -> Finding:
+    return Finding(
+        severity, "lanes-unknown",
+        f"{exp.label}: what enters at {', '.join(_where(t) for t in unknown_tiles)} is not known, so {what} "
+        "cannot be checked",
+        "Declare it in the plan's 'sources' ({\"at\": [x, y], \"direction\": d, \"items\": [left, right], "
+        "\"rate\": n}, or {\"block\": b, \"port\": p, ...} for a port fed directly), or name a point's 'items'.",
+        exp.tile,
+    )
+
+
+def _rate_finding(lane_map: LaneMap, exp: Expectation) -> list[Finding]:
+    if exp.need is None or exp.need <= 0:
+        return []
+    arriving = lane_map.arriving_rate(exp.tile)
+    if arriving is None or arriving + 1e-9 >= exp.need:
+        return []
+    basis = "the order asks for" if exp.need_is_ordered else "it takes at full load"
+    return [Finding(
+        Severity.PROBLEM if exp.need_is_ordered else Severity.NOTE, "lanes-rate",
+        f"{exp.label} takes {exp.need:.4g}/s ({basis}); the declared sources bring {arriving:.4g}/s",
+        "Declare more supply, or lower what the block is asked to make."
+        if exp.need_is_ordered else "The block will run below full load.",
+        exp.tile,
+    )]
+
+
+def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation],
+                  declared: bool = False) -> tuple[list[Finding], list]:
     found: list[Finding] = []
     missing_at: list[tuple[set[Tile], set[str]]] = []
     for exp in expectations:
@@ -649,12 +708,25 @@ def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation]) -> tup
             continue
         left, right = lanes
         from_hand = (left.unknown | right.unknown) & lane_map.loose_heads
-        if not (left.items or right.items) and not exp.routed and not from_hand:
-            continue  # an unconnected fragment
         shown = f"{left.show()} | {right.show()}"
         unknown_tiles = sorted(left.unknown | right.unknown)
+        if not (left.items or right.items):
+            if not unknown_tiles and (exp.routed or declared):
+                # Nothing at all: no item, nothing unknown. A fragment of a plan that
+                # says nothing about supply is skipped.
+                wanted_items = {p for w in exp.lanes for p in _parts(w)}
+                missing_at.append((lane_map.downstream(exp.tile), wanted_items))
+                found.append(Finding(
+                    Severity.PROBLEM if exp.routed else Severity.SUSPECT, "lanes-nothing",
+                    f"nothing arrives at {exp.label}; it wants {exp.lanes[0] or '-'} | {exp.lanes[1] or '-'}",
+                    "Connect it to a source, or declare what the player feeds it in 'sources'.", exp.tile,
+                ))
+                continue
+            if not exp.routed and not from_hand:
+                continue  # an unconnected fragment
         if not exp.ordered:
-            needed = sorted({w for w in exp.lanes if w})
+            wanted_items = {p for w in exp.lanes for p in _parts(w)}
+            needed = sorted(wanted_items)
             arriving = left.items | right.items
             missing = [n for n in needed if n not in arriving and not unknown_tiles]
             unsure = [n for n in needed if n not in arriving and unknown_tiles]
@@ -665,50 +737,47 @@ def _expectations(lane_map: LaneMap, expectations: Sequence[Expectation]) -> tup
                     f"{exp.label} wants {exp.lanes[0] or '-'} | {exp.lanes[1] or '-'}; "
                     f"{', '.join(missing)} never arrives",
                     f"Arriving: {shown}. Bring it on with a merge onto the route, or name a hand-placed belt's "
-                    "load with 'inputs'.",
+                    "load with 'sources'.",
                     exp.tile,
                 ))
+                for i, lane in enumerate((left, right)):
+                    stray = sorted(lane.items - wanted_items)
+                    expected = sorted(_parts(exp.lanes[i]) - arriving)
+                    if stray and expected:
+                        found.append(Finding(
+                            Severity.PROBLEM, "lanes-wrong-item",
+                            f"{exp.label}: the {_SIDE[i]} lane should bring {', '.join(expected)}, it brings "
+                            f"{', '.join(stray)}, which the block does not use",
+                            "Replace the source on that lane.", exp.tile,
+                        ))
             elif unsure:
-                found.append(Finding(
-                    Severity.NOTE, "lanes-unknown",
-                    f"{exp.label}: what enters at {', '.join(_where(t) for t in unknown_tiles)} is not known, "
-                    f"so {', '.join(unsure)} cannot be checked",
-                    "Name it with a point's 'items', or 'inputs': [{\"at\": [x, y], \"items\": [...]}] for a "
-                    "hand-placed belt.",
-                    exp.tile,
-                ))
+                found.append(_unknown_finding(exp, unknown_tiles, ", ".join(unsure)))
             elif (len(needed) == 2 and exp.lanes[0] != exp.lanes[1]
-                  and not (exp.lanes[0] in left.items and exp.lanes[1] in right.items)
-                  and exp.lanes[0] in right.items and exp.lanes[1] in left.items):
+                  and not _fits(exp.lanes, (left.items, right.items))
+                  and _fits(exp.lanes, (right.items, left.items))):
                 found.append(Finding(
                     Severity.NOTE, "lanes-swapped",
                     f"{exp.label} is laid out for {exp.lanes[0]} | {exp.lanes[1]} and gets {shown}; its inserters "
-                    "take from both lanes, so it runs as built",
-                    "", exp.tile,
+                    "take from both lanes, so the order does not matter and it runs as built",
+                    "Only something that reads the lanes one by one would care.", exp.tile,
                 ))
         else:
             have = (left.items, right.items)
             wanted = f"{exp.lanes[0] or '-'} | {exp.lanes[1] or '-'}"
             if not _fits(exp.lanes, have):
                 if unknown_tiles:
-                    found.append(Finding(
-                        Severity.NOTE, "lanes-unknown",
-                        f"{exp.label}: what enters at {', '.join(_where(t) for t in unknown_tiles)} is not known, "
-                        f"so {wanted} cannot be checked",
-                        "Name it with a point's 'items', or 'inputs': [{\"at\": [x, y], \"items\": [...]}] for a "
-                        "hand-placed belt.",
-                        exp.tile,
-                    ))
+                    found.append(_unknown_finding(exp, unknown_tiles, wanted, Severity.NOTE))
                 else:
                     detail = ""
                     if _fits(exp.lanes, (right.items, left.items)):
-                        detail = ("the lanes are swapped; a lane join (\"from\": [a, b]) puts each source on the "
-                                  "lane you choose")
+                        detail = ("the lanes are swapped, and a point's lane order matters; a lane join "
+                                  "(\"from\": [a, b]) puts each source on the lane you choose")
                     found.append(Finding(
                         Severity.PROBLEM, "lanes-wrong",
                         f"{exp.label} wants {wanted} on its lanes, the belt brings {shown}",
                         detail, exp.tile,
                     ))
+        found.extend(_rate_finding(lane_map, exp))
         if exp.predicted is not None:
             # A lane with something unknown on it cannot be compared.
             if any(not lane.unknown and _parts(p) != lane.items for p, lane in zip(exp.predicted, (left, right))):
@@ -781,10 +850,14 @@ def _starved(lane_map: LaneMap, missing_at) -> list[Finding]:
     return found
 
 
-def check(lane_map: LaneMap, expectations: Sequence[Expectation]) -> list[Finding]:
-    """Dead ends, expectations, starved machines and untracked spots, in that order."""
+def check(lane_map: LaneMap, expectations: Sequence[Expectation], declared: bool = False) -> list[Finding]:
+    """Dead ends, expectations, starved machines and untracked spots, in that order.
+
+    `declared` says the plan states its supply (connections or sources), so an in
+    port nothing reaches is a finding, not an unfinished fragment.
+    """
     found = _dead_ends(lane_map)
-    said, missing_at = _expectations(lane_map, expectations)
+    said, missing_at = _expectations(lane_map, expectations, declared)
     found += said
     found += _starved(lane_map, missing_at)
     seen: set[Tile] = set()
