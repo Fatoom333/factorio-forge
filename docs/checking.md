@@ -161,8 +161,14 @@ its way there, or it fills the lane.
   arrive in the ratio they are used, one blocks the other.
 - R2, at each in port and each routed point goal that names items:
   `lanes-missing` (problem) when an ingredient never arrives;
-  `lanes-unknown` (note) when it cannot be told because something undeclared
-  comes on; `lanes-swapped` (note) when a block's two ingredients arrive on
+  `lanes-wrong-item` (problem) naming every lane that brings an item the
+  block does not use while an ingredient is missing; `lanes-nothing` when
+  nothing at all reaches the port (problem if a connection ends there,
+  suspect otherwise); `lanes-unknown` (suspect at a block's in port, note at
+  a point) when it cannot be told because something undeclared comes on --
+  declare it in the plan's `sources`; `lanes-rate` when the declared sources
+  bring less than the port needs, totals compared (problem when the plan
+  carries the order, note at full load); `lanes-swapped` (note) when a block's two ingredients arrive on
   each other's lanes -- its inserters take from both, so it runs as built.
   A point is ordered: `lanes-wrong` (problem) when its lanes do not match,
   saying so when they are only swapped. `route-lanes-disagree` (problem)
