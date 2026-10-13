@@ -140,6 +140,8 @@ class Block:
     rows: list[RowReport]
     capacity: layout.RowCapacity
     notes: list[str] = field(default_factory=list)
+    # Columns reserved for poles: (kind, x, width); kind is left, inner or right.
+    gap_columns: list[tuple[str, int, int]] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -755,17 +757,27 @@ def build_block(spec: RowBlockSpec) -> Block:
         raise failure or LayoutError(f"{spec.pole} cannot power this row")
     _, _, block, interval = min(tried, key=lambda t: t[:2])
     if interval:
-        block.notes.append(_gap_note(spec.rows, interval, why))
+        block.notes.append(_gap_note(block, why))
     return block
 
 
-def _gap_note(rows: list[int], interval: int, why: str) -> str:
-    """What the gap columns a block was built with are, said from what was built."""
-    inner = sum((n - 1) // interval for n in rows)
-    if inner == 0:
-        return f"poles stand in a column added at each end of the row(s), none between machines ({why} without them)"
-    return (f"poles needed gap columns: one at each end of every row and one after every {interval} "
-            f"machine(s), {inner} between machines in all ({why} without them)")
+def _gap_note(block: Block, why: str) -> str:
+    """What the gap columns hold, said from the poles that were placed in them."""
+    poles = [p for p in block.placements if p.name == block.spec.pole]
+    held = {"left": 0, "inner": 0, "right": 0}
+    total = {"left": 0, "inner": 0, "right": 0}
+    for kind, x, width in block.gap_columns:
+        total[kind] += 1
+        if any(x <= p.x < x + width for p in poles):
+            held[kind] += 1
+    ends, ends_held = total["left"] + total["right"], held["left"] + held["right"]
+    where = ("at every end" if ends_held == ends else "at no end" if not ends_held
+             else f"in {ends_held} of {ends} end columns")
+    between = (f"{held['inner']} of {total['inner']} columns between machines" if total["inner"]
+               else "none between machines")
+    return (f"poles needed gap columns, one at each end of every row"
+            f"{' and after every few machines' if total['inner'] else ''} ({why} without them); "
+            f"poles stand {where}, {between}")
 
 
 def _emit(spec: RowBlockSpec, row_type: RowType, interval: int, alone, shared) -> tuple[Block, int]:
@@ -793,6 +805,14 @@ def _emit(spec: RowBlockSpec, row_type: RowType, interval: int, alone, shared) -
         return starts[row] + i * w + ((i // interval + 1) * pw if interval else 0)
 
     placements: list[Placement] = []
+    gap_columns: list[tuple[str, int, int]] = []
+    if interval:
+        for row, n in enumerate(spec.rows):
+            for k in range((n - 1) // interval + 2):
+                kind = "left" if k == 0 else "right" if k == (n - 1) // interval + 1 else "inner"
+                x = starts[row] + k * interval * w + k * pw if kind != "right" else starts[row] + row_width(n) - pw
+                if (kind, x, pw) not in gap_columns:  # rows lined up share their columns
+                    gap_columns.append((kind, x, pw))
 
     def put(name, x, y, direction=0, recipe=None, width=1, height=1):
         placements.append(Placement(name, x, y, direction, recipe, width, height))
@@ -922,7 +942,7 @@ def _emit(spec: RowBlockSpec, row_type: RowType, interval: int, alone, shared) -
                 f"row {row + 1} has {n} machines where its belts keep {cap.per_row} running ({cap.limit}){hint}"
             )
 
-    return Block(spec, placements, ports, widest, height, reports, alone, notes), pieces
+    return Block(spec, placements, ports, widest, height, reports, alone, notes, gap_columns), pieces
 
 
 # --------------------------------------------------------------------------
