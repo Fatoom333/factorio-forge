@@ -294,7 +294,7 @@ Writes, beside the plan, `<label>.txt` (blueprint string), `<label>.html`
   other blocks of that recipe share the rest. In ports also
   say what `arrives`, lane by lane, once connected;
 - **notes**: overfed rows, extra inserters, gap columns for poles (said as
-  built: at each end only, or how many between machines, and why).
+  built: which end columns hold a pole, how many between machines, and why).
 
 Then look at the drawing (render the HTML in a browser, or publish it) and ask
 whether a player would build it this way. Revise the plan, not the output.

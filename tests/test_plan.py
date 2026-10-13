@@ -10,7 +10,6 @@ data has stands in for it everywhere.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -34,38 +33,45 @@ def serious(result) -> list[str]:
 
 
 class TestGapNote:
-    def test_a_row_short_of_the_interval_has_none_between(self) -> None:
-        note = rows._gap_note([2], 2, "the pole network was in 2 pieces")
-        assert "none between machines" in note and "2 pieces" in note
-        assert "none between machines" in rows._gap_note([3], 5, "x")
-
-    def test_inner_columns_are_counted(self) -> None:
-        assert "2 between machines" in rows._gap_note([2 * 3 + 1], 3, "x")
-        assert "3 between machines" in rows._gap_note([4, 5], 2, "x")
-
     def test_a_block_with_gap_columns_says_what_it_built(self) -> None:
         poles = sorted(n for n, d in entities.raw.items() if d.get("type") == "electric-pole"
-                       and n in prototypes._buildable() and layout.machine_size(n) == (1, 1))
-        for shape in ((1, 0, 1, 0), (2, 0, 1, 0)):
+                       and n in prototypes._buildable())
+        checked = 0
+        for shape in ((1, 0, 1, 0), (2, 0, 1, 0), (1, 1, 0, 1)):
             try:
                 recipe, machine = prototypes.crafting_setup(*shape)
             except pytest.skip.Exception:
                 continue
             for pole in poles:
-                for n in range(1, 7):
+                pw = layout.machine_size(pole)[0]
+                for n in range(1, 9):
                     try:
                         block = rows.build_block(rows.RowBlockSpec(**{**block_spec(recipe, machine, [n]), "pole": pole}))
                     except layout.LayoutError:
                         continue
-                    for note in block.notes:
-                        if "gap columns" not in note and "column added" not in note:
-                            continue
-                        why = re.search(r"\((.*) without them\)$", note).group(1)
-                        every = re.search(r"one after every (\d+) machine", note)
-                        interval = int(every.group(1)) if every else n
-                        assert note == rows._gap_note([n], interval, why)
-                        return
-        pytest.skip("no block from the active data needs gap columns for its poles")
+                    (note,) = [t for t in block.notes if "poles needed gap columns" in t] or [None]
+                    if note is None:
+                        continue
+                    checked += 1
+                    spans = sorted((p.x, p.x + p.width) for p in block.placements if p.name == machine)
+                    first, last = spans[0][0], spans[-1][1]
+                    px = sorted({p.x for p in block.placements if p.name == pole})
+                    left = [x for x in px if x + pw <= first]
+                    right = [x for x in px if x >= last]
+                    between = [x for x in px if first <= x < last and not any(a <= x < b for a, b in spans)]
+                    where = note.split("; poles stand ")[-1]; assert "; poles stand " in note, note
+                    if left and right:
+                        assert where.startswith("at every end"), (pole, n, note)
+                    elif not left and not right:
+                        assert where.startswith("at no end"), (pole, n, note)
+                    else:
+                        assert where.startswith("in 1 of 2 end columns"), (pole, n, note)
+                    if between:
+                        assert f"{len(between)} of " in where.split(", ")[1], (pole, n, note)
+                    else:
+                        assert "none between machines" in where or "0 of" in where, (pole, n, note)
+        if not checked:
+            pytest.skip("no block from the active data needs gap columns for its poles")
 
 
 # --------------------------------------------------------------------------
