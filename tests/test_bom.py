@@ -684,3 +684,110 @@ class TestAsteroidChunks:
             "parameter-0": {"minable": None},  # Space Age's placeholders have nothing to gather
         })
         assert "metallic-asteroid-chunk" in bom._mined_items()
+
+
+class TestRecyclingIsNotProduction:
+    """Priced in machine-seconds a recycler looks nearly free, so a bill with
+    Space Age's scrap recycling in it came out as gears, steel and circuits
+    made from fifty scrap a second."""
+
+    @pytest.fixture(autouse=True)
+    def recycling_world(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        recipes = dict(RECIPES)
+        recipes["scrap-recycling"] = {
+            "name": "scrap-recycling", "category": "recycling-or-hand-crafting", "energy_required": 0.2,
+            "ingredients": [{"type": "item", "name": "scrap", "amount": 1}],
+            "results": [
+                {"type": "item", "name": "gear", "amount": 1, "probability": 0.2},
+                {"type": "item", "name": "plate", "amount": 1, "probability": 0.1},
+            ],
+        }
+        recipes["recycle-widget"] = {
+            "name": "recycle-widget", "category": "recycling", "energy_required": 0.1,
+            "ingredients": [{"type": "item", "name": "widget", "amount": 1}],
+            "results": [{"type": "item", "name": "plate", "amount": 1, "probability": 0.25}],
+        }
+        # Space Age has hundreds of these: never listed, only reachable by a pin.
+        recipes["recycle-hidden-plate"] = {
+            "name": "recycle-hidden-plate", "category": "recycling", "energy_required": 0.1, "hidden": True,
+            "ingredients": [{"type": "item", "name": "widget", "amount": 1}],
+            "results": [{"type": "item", "name": "plate", "amount": 1, "probability": 0.25}],
+        }
+        # Random yields are not recycling in themselves: this one splits an
+        # ore into two outputs by chance, in an ordinary category.
+        recipes["sift-ore"] = {
+            "name": "sift-ore", "category": "crafting", "energy_required": 1,
+            "ingredients": [{"type": "item", "name": "ore", "amount": 1}],
+            "results": [
+                {"type": "item", "name": "sifted-a", "amount": 1, "probability": 0.3},
+                {"type": "item", "name": "sifted-b", "amount": 1, "probability": 0.2},
+            ],
+        }
+        entities = dict(ENTITIES)
+        entities["recycler"] = {
+            "name": "recycler", "type": "furnace", "crafting_speed": 1, "energy_usage": 180000,
+            "crafting_categories": ["recycling", "recycling-or-hand-crafting"],
+        }
+        monkeypatch.setattr(bom.recipe_data, "raw", recipes)
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+
+    def test_recycling_is_not_a_way_to_make_an_item(self) -> None:
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),)))
+        assert [line.recipe for line in result.lines if "recycl" in line.recipe] == []
+        assert by_recipe(result, "craft-gear")
+        assert "scrap" not in result.raw_materials
+
+    def test_the_combined_category_and_the_plain_one_both_count(self) -> None:
+        index = bom._build_result_index()
+        assert "scrap-recycling" not in index["gear"]
+        assert "recycle-widget" not in index["plate"]
+        assert "smelt-plate" in index["plate"]
+
+    def test_a_random_split_in_an_ordinary_category_is_still_offered(self) -> None:
+        assert "sift-ore" in bom._build_result_index()["sifted-a"]
+
+    def test_what_was_left_out_is_listed(self) -> None:
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),)))
+        left_out = [a for a in result.ambiguities if a.kind == "excluded"]
+        # craft-gear needs plate, so both recipes that could "make" it are named.
+        assert {a.subject: a.candidates for a in left_out} == {
+            "scrap-recycling": ("gear", "plate"),
+            "recycle-widget": ("plate",),
+        }
+        assert all("recipe_choices" in a.detail for a in left_out)
+
+    def test_hidden_recycling_is_neither_indexed_nor_listed(self) -> None:
+        assert "recycle-hidden-plate" not in bom._build_result_index()["plate"]
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),)))
+        assert "recycle-hidden-plate" not in {a.subject for a in result.ambiguities}
+
+    def test_detail_shows_how_to_pin_and_does_not_repeat_the_items(self) -> None:
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),)))
+        detail = next(a.detail for a in result.ambiguities if a.subject == "scrap-recycling")
+        assert "recipe_choices {'gear': 'scrap-recycling'}" in detail
+        assert "'plate'" not in detail
+
+    def test_a_recycler_that_cannot_run_on_the_surface_is_not_listed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entities = dict(bom.entity_data.raw)
+        entities["recycler"] = dict(entities["recycler"], surface_conditions=[{"property": "x"}])
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+        monkeypatch.setattr(bom.surface_rules, "allows", lambda conditions, surface: not conditions)
+        monkeypatch.setattr(bom.surface_rules, "requires_heating", lambda surface: False)
+        monkeypatch.setattr(bom.surface_rules, "exists", lambda name: True)
+        monkeypatch.setattr(bom.surface_rules, "names", lambda: ["rock"])
+        monkeypatch.setattr(bom.surface_rules, "sources", lambda name: {})
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),), surface="rock"))
+        assert not [a for a in result.ambiguities if a.kind == "excluded"]
+
+    def test_nothing_is_listed_for_items_the_chain_never_needs(self) -> None:
+        result = bom.compute(bom.Request(targets=(bom.Target("widget", 1.0),)))
+        assert not [a for a in result.ambiguities if a.kind == "excluded"]
+
+    def test_a_pin_in_recipe_choices_brings_it_back(self) -> None:
+        request = bom.Request(
+            targets=(bom.Target("gear", 1.0),), recipe_choices={"gear": "scrap-recycling"}
+        )
+        result = bom.compute(request)
+        assert by_recipe(result, "scrap-recycling").machine == "recycler"
+        assert not [a for a in result.ambiguities if a.kind == "excluded" and "gear" in a.candidates]
+        assert result.raw_materials["scrap"] > 0
