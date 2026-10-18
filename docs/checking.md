@@ -95,6 +95,42 @@ Connectivity and geometry: underground belts and pipes without a matching end,
 inserters reaching nothing or shuffling one container into itself, belts facing
 each other, entities sharing a tile, rail signals not beside a rail.
 
+### Inserters turned the wrong way round
+
+An inserter's `direction` names the side it takes *from*: direction north takes
+from the tile to its north and drops to the south. A row drawn by eye is easily
+mirrored, and an inserter between two things looks fine to the idle/loop check
+either way round. So `inserter-backwards` asks each side what it carries, using
+the recipes of the machines on either side and what the lane tracer knows about
+the belts (the pickup and drop tiles come from the inserter's reach, so a
+long-handed one is judged the same way):
+
+- **problem** — a machine's product is put on a belt that carries one of the
+  machine's own ingredients while nothing takes from that belt into the machine
+  (an input inserter turned about); two machines joined by an inserter where the
+  product of the first is no ingredient of the second; an item taken from a
+  belt into a machine that does not use it.
+- **problem** (in a plan build, where the sources are declared) — a machine
+  that no inserter brings an ingredient to, and one that takes from a belt
+  nothing is put on.
+- **worth a look** — a machine whose product nothing takes out, while its
+  inserters all bring things to it from belts (an output inserter turned
+  about); the mirror of that, a machine whose inserters all only take from
+  it and none brings it anything (an input inserter turned about), when the
+  sources are not declared; the same finding in a plan build when the machine
+  is near the edge of the blueprint, where the supply may lie outside.
+
+A belt that serves as input and output of the same machine is fine, even with
+the output inserter upstream of the input one. With both inserters turned
+about, only the input side is reported.
+
+Nothing is said where the answer rests on what the picture does not hold: a
+belt of unknown content, a machine without a recipe, a chest, a burner
+machine that may be handed fuel, a machine beside a loader. A belt whose head
+nobody declared is not called empty. A blueprint alone can be judged only
+as far as it makes its own items; in a plan build the declared `sources` give
+the belts their content.
+
 Power: machines outside every supply area, poles isolated from the rest of the
 network.
 

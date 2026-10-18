@@ -507,3 +507,195 @@ class TestParameterPlaceholders:
         bp.entities.append(arithmetic_combinator(), tile_position=(0, 0))
         found = [f for f in inspection.inspect(bp).findings if f.code == "combinator-unwired"]
         assert found and found[0].severity is Severity.PROBLEM
+
+
+class TestInsertersTheWrongWayRound:
+    """An inserter's direction names the side it takes FROM.
+
+    The tests build one machine with an input belt on one side and an output
+    belt on the other, the way a row is laid out, and turn the inserters
+    about. Prototypes come from the active data (`crafting_setup`,
+    `inserter_reaching`), because reach and recipes differ between mod sets.
+    """
+
+    NORTH, SOUTH = 0, 8
+
+    @staticmethod
+    def setup(reach: int):
+        import prototypes
+        from draftsman.data import recipes as recipe_data
+
+        name, machine = prototypes.crafting_setup(1, 0, 1, 0)
+        made = recipe_data.raw[name]
+        return {
+            "recipe": name,
+            "machine": machine,
+            "ingredient": made["ingredients"][0]["name"],
+            "product": made["results"][0]["name"],
+            "inserter": prototypes.inserter_reaching(reach),
+            "belt": belt(),
+            "reach": reach,
+        }
+
+    def line(self, s, input_direction: int, output_direction: int) -> dict:
+        """A machine, an input belt carrying its ingredient, an output belt, and two inserters."""
+        r = s["reach"]
+        top = 2 * r
+        entities = [{"name": s["machine"], "position": [1, top], "recipe": s["recipe"]}]
+        for x in range(5):
+            entities.append({"name": s["belt"], "position": [x, 0], "direction": 4})
+            entities.append({"name": s["belt"], "position": [x, top + 2 + 2 * r], "direction": 4})
+        entities.append({"name": s["inserter"], "position": [2, top - r], "direction": input_direction})
+        entities.append({"name": s["inserter"], "position": [2, top + 2 + r], "direction": output_direction})
+        return {
+            "label": "row",
+            "entities": entities,
+            "sources": [{"id": "supply", "at": [0, 0], "direction": 4, "items": [s["ingredient"]], "rate": 1.0}],
+        }
+
+    def backwards(self, s, input_direction: int, output_direction: int):
+        from factorio_forge import plan
+
+        result = plan.build(self.line(s, input_direction, output_direction))
+        return [f for f in result.findings if f.code == "inserter-backwards"]
+
+    @pytest.mark.parametrize("reach", [1, 2])
+    def test_a_correct_pair_says_nothing(self, reach: int) -> None:
+        s = self.setup(reach)
+        assert self.backwards(s, self.NORTH, self.NORTH) == []
+
+    @pytest.mark.parametrize("reach", [1, 2])
+    def test_a_reversed_input_inserter_is_a_problem(self, reach: int) -> None:
+        """It takes the product out of the machine and puts it on the supply belt."""
+        s = self.setup(reach)
+        found = self.backwards(s, self.SOUTH, self.NORTH)
+        assert [f.severity for f in found] == [Severity.PROBLEM]
+        assert s["product"] in found[0].summary and s["ingredient"] in found[0].summary
+        assert found[0].position == (2, 2 * reach - reach)
+
+    @pytest.mark.parametrize("reach", [1, 2])
+    def test_a_reversed_output_inserter_is_noticed(self, reach: int) -> None:
+        """It takes from the output belt and puts into the machine, so the product has no way out."""
+        s = self.setup(reach)
+        found = self.backwards(s, self.NORTH, self.SOUTH)
+        assert found and {f.severity for f in found} == {Severity.SUSPECT}
+        assert "takes the product out" in found[0].summary
+
+    @pytest.mark.parametrize("reach", [1, 2])
+    def test_both_reversed_is_found_at_the_input_side(self, reach: int) -> None:
+        s = self.setup(reach)
+        found = self.backwards(s, self.SOUTH, self.SOUTH)
+        assert any(f.severity is Severity.PROBLEM for f in found)
+
+    def test_one_belt_for_input_and_output_says_nothing(self) -> None:
+        """The output drops upstream of the input; the input only takes ingredients, so this works."""
+        s = self.setup(1)
+        for out_x, in_x in ((1, 3), (3, 1)):
+            bp = Blueprint()
+            for x in range(6):
+                bp.entities.append(s["belt"], tile_position=(x, 0), direction=Direction.EAST)
+            bp.entities.append(s["machine"], tile_position=(1, 2), recipe=s["recipe"])
+            bp.entities.append(s["inserter"], tile_position=(in_x, 1), direction=Direction.NORTH)
+            bp.entities.append(s["inserter"], tile_position=(out_x, 1), direction=Direction.SOUTH)
+            assert "inserter-backwards" not in codes(bp)
+
+    def bare(self, s, input_direction, output_direction):
+        bp = Blueprint()
+        for x in range(5):
+            bp.entities.append(s["belt"], tile_position=(x, 0), direction=Direction.EAST)
+            bp.entities.append(s["belt"], tile_position=(x, 6), direction=Direction.EAST)
+        bp.entities.append(s["machine"], tile_position=(1, 2), recipe=s["recipe"])
+        bp.entities.append(s["inserter"], tile_position=(2, 1), direction=input_direction)
+        bp.entities.append(s["inserter"], tile_position=(2, 5), direction=output_direction)
+        return [f for f in inspection.inspect(bp).findings if f.code == "inserter-backwards"]
+
+    def test_a_bare_blueprint_with_a_reversed_input_is_a_suspect(self) -> None:
+        s = self.setup(1)
+        found = self.bare(s, Direction.SOUTH, Direction.NORTH)
+        assert [f.severity for f in found] == [Severity.SUSPECT]
+        assert "brings" in found[0].summary
+
+    def test_a_bare_blueprint_with_a_reversed_output_is_a_suspect(self) -> None:
+        s = self.setup(1)
+        found = self.bare(s, Direction.NORTH, Direction.SOUTH)
+        assert [f.severity for f in found] == [Severity.SUSPECT]
+        assert "takes the product out" in found[0].summary
+
+    def test_a_bare_blueprint_with_a_correct_pair_says_nothing(self) -> None:
+        assert self.bare(self.setup(1), Direction.NORTH, Direction.NORTH) == []
+
+    def test_a_plan_build_reports_a_reversed_input_once(self) -> None:
+        s = self.setup(1)
+        assert len(self.backwards(s, self.SOUTH, self.NORTH)) == 1
+
+    def test_inspecting_many_rows_stays_fast(self) -> None:
+        import time
+
+        s = self.setup(1)
+
+        def grid(rows: int) -> Blueprint:
+            bp = Blueprint()
+            for r in range(rows):
+                y = r * 8
+                for x in range(5):
+                    bp.entities.append(s["belt"], tile_position=(x, y), direction=Direction.EAST)
+                    bp.entities.append(s["belt"], tile_position=(x, y + 6), direction=Direction.EAST)
+                bp.entities.append(s["machine"], tile_position=(1, y + 2), recipe=s["recipe"])
+                bp.entities.append(s["inserter"], tile_position=(2, y + 1),
+                                   direction=Direction.SOUTH if r % 2 else Direction.NORTH)
+                bp.entities.append(s["inserter"], tile_position=(2, y + 5), direction=Direction.NORTH)
+            return bp
+
+        small, large = grid(10), grid(80)
+        start = time.perf_counter(); inspection.inspect(small); t_small = time.perf_counter() - start
+        start = time.perf_counter(); inspection.inspect(large); t_large = time.perf_counter() - start
+        assert t_large < max(t_small, 0.05) * 8 * 4  # 8x the size: allow linear growth with slack
+
+    def test_a_correct_pair_on_a_bare_blueprint_says_nothing(self) -> None:
+        s = self.setup(1)
+        bp = Blueprint()
+        for x in range(5):
+            bp.entities.append(s["belt"], tile_position=(x, 0), direction=Direction.EAST)
+            bp.entities.append(s["belt"], tile_position=(x, 6), direction=Direction.EAST)
+        bp.entities.append(s["machine"], tile_position=(1, 2), recipe=s["recipe"])
+        bp.entities.append(s["inserter"], tile_position=(2, 1), direction=Direction.NORTH)
+        bp.entities.append(s["inserter"], tile_position=(2, 5), direction=Direction.NORTH)
+        assert "inserter-backwards" not in codes(bp)
+
+    def test_a_machine_handed_something_it_does_not_use(self) -> None:
+        """Two machines joined by an inserter: the product of one must be an ingredient of the other."""
+        from draftsman.data import entities as entity_data
+        from draftsman.data import recipes as recipe_data
+        from factorio_forge.categories import crafts
+
+        s = self.setup(1)
+
+        unrelated = next(
+            (
+                name for name, found in sorted(recipe_data.raw.items())
+                if found and found.get("ingredients") and found.get("results")
+                and not {i["name"] for i in found["ingredients"] if i.get("type") != "fluid"} & {s["product"]}
+                and all(i.get("type") != "fluid" for i in found["ingredients"] + found["results"])
+                and crafts(entity_data.raw[s["machine"]], found)
+                and s["product"] not in {i["name"] for i in found["ingredients"]}
+            ),
+            None,
+        )
+        if unrelated is None:
+            pytest.skip("the active data has no second recipe the machine can craft that ignores the product")
+        bp = Blueprint()
+        bp.entities.append(s["machine"], tile_position=(1, 0), recipe=s["recipe"])
+        bp.entities.append(s["inserter"], tile_position=(2, 3), direction=Direction.NORTH)
+        bp.entities.append(s["machine"], tile_position=(1, 4), recipe=unrelated)
+        found = [f for f in inspection.inspect(bp).findings if f.code == "inserter-backwards"]
+        assert [f.severity for f in found] == [Severity.PROBLEM]
+        assert "does not use it" in found[0].summary
+
+    def test_a_machine_fed_from_a_chest_says_nothing(self) -> None:
+        """A chest can hold anything, so the direction cannot be judged from it."""
+        s = self.setup(1)
+        bp = Blueprint()
+        bp.entities.append(chest(), tile_position=(2, 0))
+        bp.entities.append(s["inserter"], tile_position=(2, 1), direction=Direction.NORTH)
+        bp.entities.append(s["machine"], tile_position=(1, 2), recipe=s["recipe"])
+        assert "inserter-backwards" not in codes(bp)
