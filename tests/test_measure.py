@@ -8,7 +8,9 @@ asks the active data for the prototypes the plan names.
 
 from __future__ import annotations
 
+import base64
 import json
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -306,6 +308,15 @@ class TestCommand:
         assert spec["outputs"] == [{"at": [4, 6], "item": "iron-gear-wheel", "direction": 4}]
         assert spec["targets"] == [{"item": "iron-gear-wheel", "rate": 0.5}]
         assert (spec["warmup_s"], spec["measure_s"]) == (60, 120)
+
+        # The coordinate contract: a spec tile is the blueprint tile, so a 1x1 belt
+        # on tile (x, y) stands at (x + 0.5, y + 0.5) in the blueprint itself.
+        document = json.loads(zlib.decompress(base64.b64decode(spec["blueprint"][1:])))
+        belts = {(e["position"]["x"], e["position"]["y"]) for e in document["blueprint"]["entities"]
+                 if e["name"].endswith("transport-belt")}
+        for source in spec["sources"]:
+            assert (source["at"][0] + 0.5, source["at"][1] + 0.5) in belts
+        assert (4.5, 6.5) in belts
 
     def test_spec_refuses_a_plan_with_nothing_to_measure(self, tmp_path, capsys) -> None:
         the_plan = json.loads((FIXTURES / "gear-line.json").read_text(encoding="utf-8"))
