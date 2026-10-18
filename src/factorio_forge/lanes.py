@@ -19,9 +19,8 @@ entrance into its exit). How the receiving node takes that push:
   stop there (a dead end);
 - from a side, onto a transport belt: if the belt is fed from behind too, or
   from both sides, the feeder side-loads -- both its lanes go onto the near
-  lane. Fed from one side only, by a plain belt, it is a curve and keeps the
-  lanes. That holds whatever the one feeder is: a plain belt, an underground
-  exit or a splitter output.
+  lane. Fed from one side only, by whatever pushes there (a plain belt, an
+  underground exit, a splitter output), it is a curve and keeps the lanes.
 - from a side, onto an underground entrance: the hood lets only the feeder's
   lane on the entrance's open side through (`hood_passes`), onto the near lane;
   the other lane is a dead end.

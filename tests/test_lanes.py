@@ -640,6 +640,8 @@ def trace_game_case(placed, source, out):
     inputs = [{"at": list(source), "items": [IRON, COPPER]}]
     result = built(placed, inputs)
     lane_map = traced(result, inputs)
+    left, right = lane_map.at(out)
+    assert not left.unknown and not right.unknown, "the game answered, so nothing may stay unknown"
     return items_at(lane_map, out), lane_map
 
 
@@ -699,11 +701,11 @@ class TestAgainstTheGame:
         (left, right), _ = trace_game_case(placed, (-3, 0), (gap + 2, 0))
         assert (left, right) == (({IRON}, {COPPER}) if pairs else (set(), set()))
 
-    @pytest.mark.parametrize("tier", [BASIC, FAST], ids=["basic", "fast"])
+    @pytest.mark.parametrize("tier", [BASIC])
     @pytest.mark.parametrize("turn", [NORTH, SOUTH], ids=["left turn", "right turn"])
     def test_a_turn_after_one_straight_belt_behind_an_exit_keeps_the_lanes(self, tier, turn: int) -> None:
-        """Game: an exit, one straight belt, then a turn to either side: iron-plate stays on the
-        left lane and copper-plate on the right, on both tiers."""
+        """Game (basic tier only; the fast tier was not measured): an exit, one straight belt, then
+        a turn to either side: iron-plate stays on the left lane and copper-plate on the right."""
         step = -1 if turn == NORTH else 1
         placed = [tier_belt(tier, x, 0, EAST) for x in (-3, -2, -1)]
         placed += [tier_underground(tier, 0, 0, "input"), tier_underground(tier, 3, 0, "output"),
