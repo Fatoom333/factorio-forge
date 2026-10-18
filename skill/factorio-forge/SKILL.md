@@ -327,6 +327,12 @@ it names, then steer: a `via` tile, a larger `routing.margin`, a moved or
 rotated block, a different order, undergrounds allowed. Keep doors and
 future corridors free with `routing.reserve`.
 
+Blocks laid apart share no wire: when the build says `power-split`, the report's
+`power` lists each pole network and the gaps (closest poles, distance, wire
+reach). Do not place bridging poles by hand: add `"power": {"link": true}`
+(optionally `"pole"`) to the plan and read `power.added`; if `power.link`
+reports a network it cannot reach, move a block or free a corridor with `routing.reserve`.
+
 Three shapes go beyond one port to one port (belts only; details in
 docs/layout.md):
 
@@ -474,7 +480,7 @@ Mistakes that already happened once; check against them before handing over.
 | `arm-line tiles and needs` / `no arm-line tile ... lets` | faster inserter, larger `stack_size`, or fewer machines per belt |
 | `connections point into the neighbouring machine` | this machine's fluid boxes do not fit a flush row; another machine, or hand-build |
 | `split is only known when it divides evenly` | the game's fluid-box assignment is uncertain here; confirm in game before building |
-| `pole network is in N pieces` | pole with a longer wire |
+| `pole network is in N pieces` | `power.link` in the plan, or a pole with a longer wire |
 | `lanes-missing`: an ingredient never arrives | merge it onto the route into that port, or declare what the player feeds there in the plan's `sources` |
 | `lanes-wrong-item`: a lane brings an item the block does not use | the wrong belt reaches this port; fix the connection or the source |
 | `lanes-nothing`: nothing reaches an in port | connect it, or declare the outside supply in `sources` |

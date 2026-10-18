@@ -337,6 +337,37 @@ lanes, junction, merges, delivered lanes and reason.
   pipe throughput and pumps; pieces larger than one tile besides a two-tile
   splitter; rails and robots.
 
+## Power between blocks
+
+Blocks carry their own poles; blocks laid apart share no wire. The report's
+`power` lists every pole network: its poles (centre positions, the block each
+stands in, whether the tool added it), the machines it powers per block and per
+route (belts and pipes need no power, so a route shows only if it holds a
+powered piece), and for separate networks the `gaps`: the closest pair of poles
+between them in a spanning order, their distance, the wire reach (the shorter
+of the two poles' `maximum_wire_distance`) and how far short it falls.
+
+```json
+"power": {"link": true, "pole": "<pole>"}
+```
+
+With `link`, the tool adds the fewest poles it can that join every network, on
+free tiles: not under a machine, belt or route piece, not on a `reserve`d tile,
+not where an inserter picks up or drops, not on a pipe connection and not on
+the tile in front of a port, nor on the tile of a source or of a connection's `at` point and the
+tiles before and after it along its direction. It grows the largest network by the
+shortest chain of free tiles to any other (a search over tile positions, the
+wire rule being the one the blueprint's wires follow), so a gap blocked by a
+route or a reserved area gets a pole on each side of it, or a chain round it.
+Bridge poles are chosen by wire reach alone; the supply area only decides what each
+network powers in the report. `pole` defaults to the pole the build uses most; the added poles are listed in
+`power.added`. If a network cannot be reached, nothing is added for it and
+`power.link.failures` and the `power-split` finding say which one and why (no
+free chain within the wire reach inside the search area -- the build's extent
+plus `routing.margin`, at least four tiles). Poles are wired by the same
+generator as the rest, which holds a pole to five wires; if that leaves the
+networks apart the report says so.
+
 ## Checks in a build
 
 `factorio-forge build` runs the general checker (`docs/checking.md`) and
@@ -345,7 +376,8 @@ adds, for generated layouts:
 - `fluids-mixed`: one pipe network joins two fluids, traced through every
   connection and underground pair from the prototypes;
 - `fluid-box-unconnected`: a machine gets no pipe for a fluid it needs;
-- `power-split`: the poles form more than one network.
+- `power-split`: the poles form more than one network; the finding names the closest
+  poles between them and the `power.link` option joins them.
 
 ## Verified
 
