@@ -197,7 +197,8 @@ class Ambiguity:
     up in the result are reported; alternatives the solver priced and left at
     zero are not. "excluded" names a recycling or salvage recipe (the subject)
     left out of the candidates for the items in `candidates`, so the
-    omission is visible; it is always reported, whether or not it mattered.
+    omission is visible; it is reported whenever the walk reaches an item it
+    would make and that item is not pinned in recipe_choices.
     """
 
     subject: str
@@ -701,6 +702,13 @@ def _gather(
         candidates = _candidate_recipes(item, result_index, request)
         if salvage and item not in request.recipe_choices:
             for recipe in salvage.get(item, ()):
+                # Same "can run here" test the normal candidates get, so a
+                # recycler that could never work on this surface is not news.
+                if request.surface is not None and not (
+                    surface_rules.allows(recipe_data.raw[recipe].get("surface_conditions"), request.surface)
+                    and _machines_for(recipe, request.surface)
+                ):
+                    continue
                 skipped.setdefault(recipe, []).append(item)
         wanted_temperature = target_temperature.get(item)
         if wanted_temperature is not None and candidates:
@@ -758,8 +766,8 @@ def _gather(
                 candidates=tuple(sorted(items)),
                 detail=(
                     f"{recipe!r} (recycling or salvage: it takes something apart for a "
-                    f"chance at {', '.join(repr(i) for i in sorted(items))}) is not "
-                    "counted as a way to make them; pin it in recipe_choices to use it"
+                    "chance at these) is not counted as a way to make them; to use it, "
+                    f"pin it per item, e.g. recipe_choices {{{sorted(items)[0]!r}: {recipe!r}}}"
                 ),
             )
         )

@@ -707,6 +707,12 @@ class TestRecyclingIsNotProduction:
             "ingredients": [{"type": "item", "name": "widget", "amount": 1}],
             "results": [{"type": "item", "name": "plate", "amount": 1, "probability": 0.25}],
         }
+        # Space Age has hundreds of these: never listed, only reachable by a pin.
+        recipes["recycle-hidden-plate"] = {
+            "name": "recycle-hidden-plate", "category": "recycling", "energy_required": 0.1, "hidden": True,
+            "ingredients": [{"type": "item", "name": "widget", "amount": 1}],
+            "results": [{"type": "item", "name": "plate", "amount": 1, "probability": 0.25}],
+        }
         # Random yields are not recycling in themselves: this one splits an
         # ore into two outputs by chance, in an ordinary category.
         recipes["sift-ore"] = {
@@ -749,6 +755,29 @@ class TestRecyclingIsNotProduction:
             "recycle-widget": ("plate",),
         }
         assert all("recipe_choices" in a.detail for a in left_out)
+
+    def test_hidden_recycling_is_neither_indexed_nor_listed(self) -> None:
+        assert "recycle-hidden-plate" not in bom._build_result_index()["plate"]
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),)))
+        assert "recycle-hidden-plate" not in {a.subject for a in result.ambiguities}
+
+    def test_detail_shows_how_to_pin_and_does_not_repeat_the_items(self) -> None:
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),)))
+        detail = next(a.detail for a in result.ambiguities if a.subject == "scrap-recycling")
+        assert "recipe_choices {'gear': 'scrap-recycling'}" in detail
+        assert "'plate'" not in detail
+
+    def test_a_recycler_that_cannot_run_on_the_surface_is_not_listed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entities = dict(bom.entity_data.raw)
+        entities["recycler"] = dict(entities["recycler"], surface_conditions=[{"property": "x"}])
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+        monkeypatch.setattr(bom.surface_rules, "allows", lambda conditions, surface: not conditions)
+        monkeypatch.setattr(bom.surface_rules, "requires_heating", lambda surface: False)
+        monkeypatch.setattr(bom.surface_rules, "exists", lambda name: True)
+        monkeypatch.setattr(bom.surface_rules, "names", lambda: ["rock"])
+        monkeypatch.setattr(bom.surface_rules, "sources", lambda name: {})
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 1.0),), surface="rock"))
+        assert not [a for a in result.ambiguities if a.kind == "excluded"]
 
     def test_nothing_is_listed_for_items_the_chain_never_needs(self) -> None:
         result = bom.compute(bom.Request(targets=(bom.Target("widget", 1.0),)))
