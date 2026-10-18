@@ -299,6 +299,12 @@ Writes, beside the plan, `<label>.txt` (blueprint string), `<label>.html`
 Then look at the drawing (render the HTML in a browser, or publish it) and ask
 whether a player would build it this way. Revise the plan, not the output.
 
+When the same spot fails twice, do not make a third fix of the same kind:
+redesign that spot -- another layout, another route, another arrangement of
+the blocks. "The same spot" is the same place in the drawing (the same few
+tiles, the same port or the same connection) or the same finding repeating
+after you changed something around it.
+
 ## 6. Connect blocks
 
 Write `connections` from the port indices the build report prints (`[j]`

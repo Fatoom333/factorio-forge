@@ -245,6 +245,58 @@ def repack_without_junk(source: Path, target: Path) -> None:
                 cleaned.writestr(item, original.read(item.filename))
 
 
+
+def _hidden_profile_folders() -> list[Path]:
+    """Profile folders a Store-installed Claude Desktop keeps out of sight (Windows only).
+
+    Claude Desktop from the Microsoft Store is an MSIX package: what its
+    processes write under ``%APPDATA%`` is redirected into
+    ``%LOCALAPPDATA%/Packages/<package>/LocalCache/Roaming``, where a
+    normal terminal does not look. Read-only: only reports folders that exist.
+    """
+    if sys.platform != "win32":
+        return []
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return []
+    try:
+        found = sorted((Path(local) / "Packages").glob(f"*/LocalCache/Roaming/{paths.APP_DIRNAME}/profiles"))
+        return [entry for entry in found if entry.is_dir()]
+    except OSError:
+        return []
+
+
+def _profile_names_in(folder: Path) -> list[str]:
+    try:
+        return sorted(e.name for e in folder.iterdir() if (e / PROFILE_FILE).is_file())
+    except OSError:
+        return []
+
+
+def _hidden_profiles_hint(name: str, root: Path, visible: list[str]) -> str:
+    """A sentence about hidden Store-Claude profiles to append to the missing-profile message."""
+    # Inside Store Claude %APPDATA% is shown merged, so the hidden folder can be the same
+    # one as `root` seen through another path; it then holds exactly the visible profiles.
+    others = [
+        (folder, names)
+        for folder in _hidden_profile_folders()
+        if (names := _profile_names_in(folder)) and names != visible and folder != root
+    ]
+    if not others:
+        return ""
+    folder, names = next(((f, n) for f, n in others if name in n), others[0])
+    lead = (
+        f"A profile named {name!r} exists in {folder}"
+        if name in names
+        else f"Profiles also exist in {folder}"
+    )
+    return (
+        f". {lead}, a folder that Claude Desktop (Microsoft Store version) keeps out of "
+        f"sight of a normal terminal. To use it, set {paths.ENV_HOME} to {folder.parent} "
+        f"(or copy that folder to an ordinary place and point {paths.ENV_HOME} there)"
+    )
+
+
 @dataclass
 class Profile:
     """One base: its save, its mod set, its data and its style."""
@@ -404,7 +456,9 @@ class Profile:
                 f"make it from the save you play with: "
                 f"`factorio-forge create-profile \"<save>\" --name {name}`"
             )
-        return f"no profile named {name!r} in {root} ({have}); {next_step}"
+        message = f"no profile named {name!r} in {root} ({have}); {next_step}"
+        message += _hidden_profiles_hint(name, root, existing)
+        return message
 
     @staticmethod
     def list_all() -> list[str]:

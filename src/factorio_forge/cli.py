@@ -593,6 +593,39 @@ def _cmd_options(args: argparse.Namespace) -> int:
     return 0
 
 
+def _input_file_problem(path: Path) -> str | None:
+    """One line saying why an input file cannot be read, or None if it can.
+
+    The reason comes from the path itself: Windows reports a folder as a
+    permission error, so the exception type cannot be trusted.
+    """
+    if path.is_dir():
+        return f"error: {path}: is a folder, not a file"
+    if not path.exists():
+        return f"error: {path}: file does not exist"
+    return None
+
+
+def _load_input(loader, path: Path, error_type: type[Exception]):
+    """Run a file loader; report an unreadable or invalid input in one line.
+
+    Returns (result, exit code); the code is 0 on success and 2 on a bad input file.
+    """
+    problem = _input_file_problem(path)
+    if problem:
+        print(problem, file=sys.stderr)
+        return None, 2
+    try:
+        return loader(path), 0
+    except PermissionError:
+        print(f"error: {path}: permission denied", file=sys.stderr)
+    except OSError as exc:
+        print(f"error: {path}: {exc.strerror or exc}", file=sys.stderr)
+    except error_type as exc:
+        print(str(exc), file=sys.stderr)
+    return None, 2
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     """A layout plan in; blueprint string, drawing and report out."""
     import json
@@ -600,8 +633,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
 
     from . import plan, render
 
+    data, code = _load_input(plan.load, Path(args.plan), plan.PlanError)
+    if code:
+        return code
     try:
-        data = plan.load(Path(args.plan))
         planned, warned = None, []
         if data.get("request"):
             # Rates the request asks for, next to what the blocks can do at full load.
@@ -737,11 +772,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
     from . import request
 
-    try:
-        spec = request.load(Path(args.request))
-    except request.RequestError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+    spec, code = _load_input(request.load, Path(args.request), request.RequestError)
+    if code:
+        return code
     result = request.review(spec)
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
