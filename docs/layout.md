@@ -179,8 +179,8 @@ ends:
   the source lane on the entrance's open side gets through
   (`lanes.hood_passes`: a feeder from the left passes its right lane, one
   from the right its left lane), onto the near lane; the other lane stops.
-  A source whose items are all on the blocked lane is refused. Still to be
-  confirmed in the game.
+  A source whose items are all on the blocked lane is refused. Checked in
+  the game.
 - **Lane join**: `from` is a list of two sources and `to` one destination.
   The first source is routed to the destination; the second points into the
   other side of one of its curves (`curve_pieces`: a turn fed by a plain
@@ -325,8 +325,10 @@ lanes, junction, merges, delivered lanes and reason.
   join, which builds a new head;
 - the router does not create underground entrances to filter lanes; an
   entrance can be a merge target only through `onto.at`;
-- side-loading onto an underground exit and a curve fed by anything but a
-  belt are not tracked; loaders, linked belts and drills are unknown sources
+- side-loading onto an underground exit is not tracked (not tried in the
+  game); a belt fed from one side only by a plain belt, an underground exit or
+  a splitter output is a curve and keeps its lanes (checked in the game);
+  a curve fed by anything else is not tracked; loaders, linked belts and drills are unknown sources
   or exits; an inserter dropping onto a curve is unknown;
 - lane rates and ratio deadlocks beyond `lanes-mixed`; compression, which
   lane an inserter prefers and side-load priority;

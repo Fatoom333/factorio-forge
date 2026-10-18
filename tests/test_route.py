@@ -363,6 +363,25 @@ class TestTunnels:
         assert pairs[(entry.x, entry.y)] == (exit_.x, exit_.y)
         assert "underground-unpaired" not in codes(result)
 
+    def test_a_curve_may_follow_an_underground_exit_and_keeps_the_lanes(self) -> None:
+        belt, ug = belt_with_underground()
+        # A wall across the whole corridor forces a hop, and the goal lies off the line
+        # of the hop, so the first belt behind the exit is the curve.
+        result = build(
+            [belt_route(point(0, 0, items=["a", "b"]), point(4, 1, SOUTH, items=["a", "b"]), belt, ug)],
+            wall(2, 2, -6, 9), routing={"margin": 0},
+        )
+        (done,) = result.routes
+        assert done.ok, done.reason
+        flows = route._flows(done.pieces, done.spec)
+        assert any(
+            done.pieces[i - 1].io_type == "output" and flows[i] != flows[i - 1] and not done.pieces[i].io_type
+            for i in range(1, len(done.pieces))
+        )
+        assert done.delivered == ("a", "b")
+        assert not lane_findings(result)
+        assert_clean(result)
+
     def test_a_pipe_pair_of_the_same_name_is_not_intercepted(self) -> None:
         pipe, ptg = pipe_pair()
         dive, surface = route.ptg_directions(ptg, EAST)

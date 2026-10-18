@@ -507,8 +507,9 @@ Mistakes that already happened once; check against them before handing over.
 - Lane rates are not modelled: `lanes-mixed` warns of a shared lane, but
   whether the ratio deadlocks, belt compression and which lane an inserter
   prefers are not computed.
-- Not yet confirmed in game: an underground pairing at exactly its reach, a
-  curve fed by an underground exit keeping both lanes, which lane of a belt
-  side-loading an underground entrance passes the hood (`lanes.hood_passes`),
-  and whether a belt fed only from its side by an underground exit or a
-  splitter curves (reported as not tracked; the router never builds it).
+- Checked in game: an underground belt pairing at exactly its reach, the hood
+  rule (`lanes.hood_passes`), and that a belt fed from one side only by an
+  underground exit or a splitter output is a curve keeping both lanes. Not yet
+  confirmed: side-loading onto an underground exit (reported as not tracked),
+  a fast-tier turn after one straight belt behind an exit, and an underground
+  pipe at exactly its reach.

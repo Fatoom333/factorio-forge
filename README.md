@@ -67,20 +67,22 @@ tests):
 - **Building style** measured from your own reference blueprints
   (`measure-style`, `show-style`).
 
+**Checked in the game (lane rules):** an underground pair at exactly its
+reach connects and one tile more does not (basic and fast tiers); the hood
+rule (`lanes.hood_passes`) holds; a belt fed from one side only by an
+underground exit or a splitter output is a curve and keeps both lanes, so the
+router may turn right behind an exit ([docs/layout.md](docs/layout.md),
+"Lanes"); the K2 tanks hold their prototype volume.
+
 **Works, but not yet confirmed in the game:**
 
-- A routed underground belt or pipe-to-ground pair at *exactly* its maximum
-  reach. The reach comes from the prototype; whether the game pairs the two
-  ends at that distance in the same way has not been tried.
-- A belt curve right after an underground exit. Whether such a curve keeps
-  both lanes is not confirmed, so the router never builds one: it turns only
-  after a plain belt ([docs/layout.md](docs/layout.md), "Lanes").
-- Side-loading onto an underground entrance (the hood rule): which lane of
-  the feeding belt gets past the entrance's hood is worked out from the
-  geometry (`lanes.hood_passes`, one line to flip), not tried in the game.
-- A belt fed only from its side by an underground exit or a splitter: whether
-  the game curves it is not confirmed. The lane tracker reports it as not
-  tracked, and the router never builds one.
+- A routed pipe-to-ground pair at *exactly* its maximum reach (belts were
+  checked, pipes were not).
+- Side-loading onto an underground *exit*: the lane tracker reports it as not
+  tracked.
+- A fast-tier turn after one straight belt behind an exit (the turn right
+  behind the exit and the basic-tier turn after one straight belt were
+  checked).
 
 **Does not exist:**
 
