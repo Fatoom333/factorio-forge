@@ -151,6 +151,59 @@ class TestPlannedRates:
         built = plan.build(by_targets)
         assert built.blocks[0].planned_crafts_per_second == pytest.approx(alone.crafts_per_second / 2)
 
+    def test_recipe_choices_decide_which_recipe_is_planned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from factorio_forge import request
+
+        monkeypatch.setattr(environment, "for_active_profile", lambda: (None, "no export in this test"))
+        placeable = prototypes._buildable()
+        machines = sorted(n for n, d in entities.raw.items() if n in placeable and d.get("crafting_speed")
+                          and d.get("crafting_categories") and prototypes._footprint(d) == (3, 3))
+        found = None
+        for name in sorted(recipes.raw):
+            entry = recipes.raw[name]
+            if not entry or "recycling" in recipe_categories(entry):
+                continue
+            solid = [p for p in entry.get("results", []) if p.get("type") != "fluid"]
+            if len(entry.get("results", [])) != 1 or not solid or "amount" not in solid[0]:
+                continue
+            if len(entry.get("ingredients", [])) > 2 or any(p.get("type") == "fluid" for p in entry.get("ingredients", [])):
+                continue
+            machine = next((m for m in machines if crafts(entities.raw[m], entry)), None)
+            if machine is None:
+                continue
+            item = solid[0]["name"]
+            spec = request.parse({"targets": [{"item": item, "per_second": 1}]})
+            review = request.review(spec)
+            if review.bill is None or name in {line.recipe for line in review.bill.lines}:
+                continue
+            found = (name, machine, item)
+            break
+        if found is None:
+            pytest.skip("no item here is made by a recipe the bill passes over")
+        recipe, machine, item = found
+        base = {"label": "ordered", "targets": [{"item": item, "per_second": 1}],
+                "blocks": [block_spec(recipe, machine, [2])]}
+        without = plan.build(base).blocks[0]
+        assert without.planned_crafts_per_second is None
+        choices = {"recipe_choices": {item: recipe}, "machine_choices": {primary_category(recipes.raw[recipe]): machine}}
+        chosen = plan.build({**base, **choices}).blocks[0]
+        assert chosen.planned_crafts_per_second is not None
+
+    def test_order_fields_need_targets(self) -> None:
+        block, _ = one_block()
+        for extra in ({"request": "r.json", "recipe_choices": {"a": "b"}}, {"recipe_choices": {"a": "b"}},
+                      {"boundary": ["iron-plate"]}):
+            with pytest.raises(plan.PlanError, match="goes with 'targets'"):
+                plan.build({"blocks": [block], **extra})
+
+    @pytest.mark.parametrize("field,value", [
+        ("recipe_choices", ["advanced-circuit"]), ("machine_choices", "x"), ("tiers", ["belt"]),
+        ("effects", 3), ("boundary", "iron-plate"), ("boundary", [1, 2]), ("surface", ["nauvis"]),
+    ])
+    def test_order_fields_must_have_their_shape(self, field: str, value) -> None:
+        with pytest.raises(plan.PlanError, match=field):
+            plan.planned_from_targets({"targets": [{"item": "x", "per_second": 1}], field: value})
+
     def test_a_blocks_own_planned_rate_is_its_share(self) -> None:
         block, alone = one_block()
         cps = alone.crafts_per_second

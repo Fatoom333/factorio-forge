@@ -950,6 +950,18 @@ def planned_from_targets(plan: dict) -> tuple[dict[str, float], list[str]]:
         return {}, []
     if not isinstance(raw, list) or not all(isinstance(t, dict) for t in raw):
         raise PlanError("targets is a list of {\"item\": name, \"per_second\": n} (or \"per_minute\")")
+    for key in ORDER_FIELDS:
+        value = plan.get(key)
+        if not value:
+            continue
+        if key == "boundary":
+            ok, shape = isinstance(value, list) and all(isinstance(x, str) for x in value), "a list of names"
+        elif key == "surface":
+            ok, shape = isinstance(value, str), "a name"
+        else:
+            ok, shape = isinstance(value, dict), "an object"
+        if not ok:
+            raise PlanError(f"{key} must be {shape}, not {value!r}")
     try:
         spec = request.parse({"targets": raw, **{k: plan[k] for k in ORDER_FIELDS if plan.get(k)}})
     except request.RequestError as exc:
@@ -1031,6 +1043,9 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
     collected: list[str] = []
     if plan.get("targets") and plan.get("request"):
         raise PlanError("a plan names its order once: 'request' or 'targets', not both")
+    stray = [k for k in ORDER_FIELDS if plan.get(k)]
+    if stray and not plan.get("targets"):
+        raise PlanError(f"{', '.join(stray)} goes with 'targets'; with 'request', put it in the request file")
     if planned is None and plan.get("targets"):
         planned, said = planned_from_targets(plan)
         collected.extend(said)
