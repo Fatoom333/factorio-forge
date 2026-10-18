@@ -517,9 +517,11 @@ def backwards_inserters(entities: list, lane_map, complete: bool = False) -> lis
     `lane_map` is a `lanes.trace` of `entities`. Two kinds of verdict:
 
     - Without `complete`, only what holds whatever else is true about the
-      supply: a product put on a belt that runs back past the machine's own
-      input, an item taken from a belt that no ingredient of the receiving
-      machine is, or two machines handed something neither uses. A belt that
+      supply: an item taken from a belt that no ingredient of the receiving
+      machine is, two machines handed something neither uses, and (as a
+      suspect) a machine that inserters only take from or only bring to.
+      A product put on a belt upstream of the machine's own input is fine:
+      one belt may carry both ways. A belt that
       carries nothing is no verdict here, since the supply may come from a
       source that is not part of the picture.
     - With `complete` (the trace was given every declared source), a machine
@@ -538,15 +540,21 @@ def backwards_inserters(entities: list, lane_map, complete: bool = False) -> lis
             index_at.setdefault(tile, []).append(index)
     if not index_at:
         return []
-    xs = [t[0] for t in index_at]
-    ys = [t[1] for t in index_at]
+    lo_x, hi_x = min(t[0] for t in index_at), max(t[0] for t in index_at)
+    lo_y, hi_y = min(t[1] for t in index_at), max(t[1] for t in index_at)
+    tiles_cache: dict[int, list] = {}
+
+    def tiles_of(index: int) -> list:
+        if index not in tiles_cache:
+            tiles_cache[index] = list(Layout.tiles_of(entities[index]))
+        return tiles_cache[index]
 
     def beyond(tile) -> bool:
-        return not (min(xs) <= tile[0] <= max(xs) and min(ys) <= tile[1] <= max(ys))
+        return not (lo_x <= tile[0] <= hi_x and lo_y <= tile[1] <= hi_y)
 
     def near_the_edge(index: int) -> bool:
         """Whether an inserter standing beside this machine could lie outside the blueprint."""
-        tiles = list(Layout.tiles_of(entities[index]))
+        tiles = tiles_of(index)
         left, right = min(t[0] for t in tiles) - 1, max(t[0] for t in tiles) + 1
         top, bottom = min(t[1] for t in tiles) - 1, max(t[1] for t in tiles) + 1
         return any(beyond((x, y)) for x in range(left, right + 1) for y in (top, bottom)) or any(
@@ -577,7 +585,7 @@ def backwards_inserters(entities: list, lane_map, complete: bool = False) -> lis
         return frozenset(i for i in items if filt is None or filt.passes(i))
 
     def has_loader(machine: int) -> bool:
-        tiles = list(Layout.tiles_of(entities[machine]))
+        tiles = tiles_of(machine)
         around = {(x + dx, y + dy) for x, y in tiles for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
         return any(
             getattr(entities[i], "type", "") in ("loader", "loader-1x1")
@@ -664,16 +672,7 @@ def backwards_inserters(entities: list, lane_map, complete: bool = False) -> lis
             if put in lane_map.nodes and made:
                 feeding = {tile for tile, _ in lane_map.fed_by.get(source, ()) if tile is not None}
                 supply = (on_belt(put) or (frozenset(), False))[0] & ingredients(source)
-                if not complete and feeding & lane_map.downstream(put):
-                    report(
-                        entity, Severity.PROBLEM,
-                        f"{entity.name} puts {', '.join(sorted(made))} onto a belt that feeds the "
-                        f"{machine[1]} it takes from",
-                        "An inserter's direction names the side it takes FROM. This one takes the product "
-                        "out of the machine and sends it back to the machine's own input; the machine's "
-                        "ingredients are taken by inserters pointing the other way.",
-                    )
-                elif supply and not line_of(put) & feeding:
+                if complete and supply and not line_of(put) & feeding:
                     starved.setdefault(source, []).append((entity, True))
                     report(
                         entity, Severity.PROBLEM,
@@ -733,7 +732,21 @@ def backwards_inserters(entities: list, lane_map, complete: bool = False) -> lis
             "product away onto its belt, it is turned the wrong way round.",
         )
 
-    if complete:
+    if not complete:
+        for source, takers in starved.items():
+            if (not ingredients(source) or lane_map.fed_by.get(source) or has_loader(source)
+                    or near_the_edge(source)):
+                continue
+            at = "; ".join("{}, {}".format(*Layout.tile_of(e)) for e, _ in takers)
+            machine = lane_map.machines[source]
+            report(
+                takers[0][0], Severity.SUSPECT,
+                f"nothing brings the {machine[1]} making {machine[0]} an ingredient; "
+                f"the inserter(s) at {at} only take from it",
+                "The direction names the side an inserter takes from. If one of them is meant as the "
+                "machine's input, it is turned the wrong way round.",
+            )
+    else:
         for source, takers in starved.items():
             machine = lane_map.machines[source]
             if (not ingredients(source) or real_feed(source) or has_loader(source)

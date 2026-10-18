@@ -107,8 +107,7 @@ long-handed one is judged the same way):
 
 - **problem** — a machine's product is put on a belt that carries one of the
   machine's own ingredients while nothing takes from that belt into the machine
-  (an input inserter turned about); a product put on a belt that runs back past
-  the machine's own input; two machines joined by an inserter where the
+  (an input inserter turned about); two machines joined by an inserter where the
   product of the first is no ingredient of the second; an item taken from a
   belt into a machine that does not use it.
 - **problem** (in a plan build, where the sources are declared) — a machine
@@ -116,8 +115,14 @@ long-handed one is judged the same way):
   nothing is put on.
 - **worth a look** — a machine whose product nothing takes out, while its
   inserters all bring things to it from belts (an output inserter turned
-  about); the same machine-without-input finding when the machine is near
-  the edge of the blueprint, where the supply may lie outside.
+  about); the mirror of that, a machine whose inserters all only take from
+  it and none brings it anything (an input inserter turned about), when the
+  sources are not declared; the same finding in a plan build when the machine
+  is near the edge of the blueprint, where the supply may lie outside.
+
+A belt that serves as input and output of the same machine is fine, even with
+the output inserter upstream of the input one. With both inserters turned
+about, only the input side is reported.
 
 Nothing is said where the answer rests on what the picture does not hold: a
 belt of unknown content, a machine without a recipe, a chest, a burner

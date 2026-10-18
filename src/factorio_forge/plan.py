@@ -1127,8 +1127,11 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
 
     entities = list(blueprint.entities)
     report = inspection.inspect(blueprint)
-    findings = (list(report.findings) + fluids.check(entities) + route_findings
-                + _check_lanes(plan, built, heads, routes, entities, known_recipes, loose))
+    lane_findings = _check_lanes(plan, built, heads, routes, entities, known_recipes, loose)
+    # the lane check knows the declared supply; its verdict on an inserter replaces the blind one
+    judged = {f.position for f in lane_findings if f.code == "inserter-backwards"}
+    findings = ([f for f in report.findings if not (f.code == "inserter-backwards" and f.position in judged)]
+                + fluids.check(entities) + route_findings + lane_findings)
     for block in built:
         planned_rate = block.planned_crafts_per_second
         if planned_rate is not None and planned_rate > block.crafts_per_second + 1e-9:

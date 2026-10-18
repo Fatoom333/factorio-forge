@@ -587,18 +587,69 @@ class TestInsertersTheWrongWayRound:
         found = self.backwards(s, self.SOUTH, self.SOUTH)
         assert any(f.severity is Severity.PROBLEM for f in found)
 
-    def test_a_product_put_back_on_the_belt_that_feeds_the_machine_is_caught_without_a_supply(self) -> None:
-        """Alone, with no declared source: the belt runs past the machine's own input inserter."""
+    def test_one_belt_for_input_and_output_says_nothing(self) -> None:
+        """The output drops upstream of the input; the input only takes ingredients, so this works."""
         s = self.setup(1)
+        for out_x, in_x in ((1, 3), (3, 1)):
+            bp = Blueprint()
+            for x in range(6):
+                bp.entities.append(s["belt"], tile_position=(x, 0), direction=Direction.EAST)
+            bp.entities.append(s["machine"], tile_position=(1, 2), recipe=s["recipe"])
+            bp.entities.append(s["inserter"], tile_position=(in_x, 1), direction=Direction.NORTH)
+            bp.entities.append(s["inserter"], tile_position=(out_x, 1), direction=Direction.SOUTH)
+            assert "inserter-backwards" not in codes(bp)
+
+    def bare(self, s, input_direction, output_direction):
         bp = Blueprint()
         for x in range(5):
             bp.entities.append(s["belt"], tile_position=(x, 0), direction=Direction.EAST)
+            bp.entities.append(s["belt"], tile_position=(x, 6), direction=Direction.EAST)
         bp.entities.append(s["machine"], tile_position=(1, 2), recipe=s["recipe"])
-        bp.entities.append(s["inserter"], tile_position=(2, 1), direction=Direction.NORTH)
-        bp.entities.append(s["inserter"], tile_position=(1, 1), direction=Direction.SOUTH)
-        found = [f for f in inspection.inspect(bp).findings if f.code == "inserter-backwards"]
-        assert [f.severity for f in found] == [Severity.PROBLEM]
-        assert found[0].position == (1, 1)
+        bp.entities.append(s["inserter"], tile_position=(2, 1), direction=input_direction)
+        bp.entities.append(s["inserter"], tile_position=(2, 5), direction=output_direction)
+        return [f for f in inspection.inspect(bp).findings if f.code == "inserter-backwards"]
+
+    def test_a_bare_blueprint_with_a_reversed_input_is_a_suspect(self) -> None:
+        s = self.setup(1)
+        found = self.bare(s, Direction.SOUTH, Direction.NORTH)
+        assert [f.severity for f in found] == [Severity.SUSPECT]
+        assert "brings" in found[0].summary
+
+    def test_a_bare_blueprint_with_a_reversed_output_is_a_suspect(self) -> None:
+        s = self.setup(1)
+        found = self.bare(s, Direction.NORTH, Direction.SOUTH)
+        assert [f.severity for f in found] == [Severity.SUSPECT]
+        assert "takes the product out" in found[0].summary
+
+    def test_a_bare_blueprint_with_a_correct_pair_says_nothing(self) -> None:
+        assert self.bare(self.setup(1), Direction.NORTH, Direction.NORTH) == []
+
+    def test_a_plan_build_reports_a_reversed_input_once(self) -> None:
+        s = self.setup(1)
+        assert len(self.backwards(s, self.SOUTH, self.NORTH)) == 1
+
+    def test_inspecting_many_rows_stays_fast(self) -> None:
+        import time
+
+        s = self.setup(1)
+
+        def grid(rows: int) -> Blueprint:
+            bp = Blueprint()
+            for r in range(rows):
+                y = r * 8
+                for x in range(5):
+                    bp.entities.append(s["belt"], tile_position=(x, y), direction=Direction.EAST)
+                    bp.entities.append(s["belt"], tile_position=(x, y + 6), direction=Direction.EAST)
+                bp.entities.append(s["machine"], tile_position=(1, y + 2), recipe=s["recipe"])
+                bp.entities.append(s["inserter"], tile_position=(2, y + 1),
+                                   direction=Direction.SOUTH if r % 2 else Direction.NORTH)
+                bp.entities.append(s["inserter"], tile_position=(2, y + 5), direction=Direction.NORTH)
+            return bp
+
+        small, large = grid(10), grid(80)
+        start = time.perf_counter(); inspection.inspect(small); t_small = time.perf_counter() - start
+        start = time.perf_counter(); inspection.inspect(large); t_large = time.perf_counter() - start
+        assert t_large < max(t_small, 0.05) * 8 * 4  # 8x the size: allow linear growth with slack
 
     def test_a_correct_pair_on_a_bare_blueprint_says_nothing(self) -> None:
         s = self.setup(1)
