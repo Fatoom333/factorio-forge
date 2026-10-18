@@ -286,9 +286,14 @@ tools/headless-run.ps1 -Save my-save.zip -Out out -Measure spec.json     (compan
 factorio-forge measure result out/measure.json --spec spec.json
 ```
 
-`measure spec` builds the plan and writes the request: the blueprint, the plan's
-`sources` (tile, items per lane, rate), an output at every out belt port nobody
-routes from and at every route that ends at a point, and the plan's `targets`.
+`measure spec` builds the plan and writes the request: the blueprint, the sources,
+the outputs and the plan's `targets`. A source is each entry of the plan's
+`sources` and each connection whose `from` is a point with items and a rate
+(`{"at", "direction", "items", "rate"}`): that is a supply starting there, fed as
+`connection <id> start`. An output is each out belt port nobody routes from and
+each route that really ends at a free point. A route that merges `onto` a belt is
+not an output: the belt carries on, and emptying it there would starve what it
+feeds. Empty lanes are never written as an item.
 `--output-end X,Y[,ITEM[,DIR]]` adds an output end for a plan that places belts
 by hand, `--fluid X,Y,FLUID[,RATE]` a fluid source, `--target ITEM=RATE` replaces
 the plan's targets; `--warmup`, `--seconds` and `--speed` set the run (60 s, 120 s,
@@ -317,6 +322,17 @@ entities placed against expected, prototypes the game refused, a supply the
 belt could not take (the rate actually fed against the declared one), and
 machines left without a recipe (a recipe whose surface conditions fail on the
 planet is dropped by the paste, as in a real game).
+
+A short target does not always mean a faulty plan: the line may not have filled
+yet. When a target is short, `measure result` checks two signs and says so under
+the machines: the warm-up is shorter than twice an estimate of the fill time
+(the longest chain of recipe time over crafting speed, from the active data,
+plus the belt travel along the longest chain of routes, which `measure spec`
+records in the spec as `belt_travel_s`; modules and beacons are not counted), or
+the machines making the short item waited for input a quarter of the window or
+more. Then run again with a longer `--warmup`, at least twice as long. Trust a
+figure when two windows agree: if the longer run measures the same, it is the
+plan; if it climbs, it was filling.
 
 What the numbers are: production and consumption are the force's production
 statistics for the measuring surface; deliveries are counted at the sinks.

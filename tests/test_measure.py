@@ -36,11 +36,13 @@ def block(index, ports) -> SimpleNamespace:
 
 
 def route(rid, start_port=None, goal_port=None, goal=(0, 0), direction=4, ok=True, kind="belt",
-          delivered=None, lanes_=None) -> SimpleNamespace:
-    start = SimpleNamespace(port=start_port, x=0, y=0, direction=direction)
-    end = SimpleNamespace(port=goal_port, x=goal[0], y=goal[1], direction=direction)
-    return SimpleNamespace(id=rid, ok=ok, kind=kind, spec=SimpleNamespace(start=start, goal=end),
-                           delivered=delivered, lanes=lanes_)
+          delivered=None, lanes_=None, start=(0, 0), items=(), rate=None, sideload=False,
+          junction=None, pieces=0, surface="transport-belt") -> SimpleNamespace:
+    begin = SimpleNamespace(port=start_port, x=start[0], y=start[1], direction=direction, items=tuple(items),
+                            rate=rate)
+    end = SimpleNamespace(port=goal_port, x=goal[0], y=goal[1], direction=direction, sideload=sideload)
+    return SimpleNamespace(id=rid, ok=ok, kind=kind, spec=SimpleNamespace(start=begin, goal=end, surface=surface),
+                           delivered=delivered, lanes=lanes_, junction=junction, pieces=[None] * pieces)
 
 
 # --------------------------------------------------------------------------
@@ -91,6 +93,14 @@ class TestOutputs:
             {"id": "route out", "at": [40, 3], "direction": 8, "item": "circuit"},
             {"id": "route out", "at": [40, 3], "direction": 8, "item": "plate"}]
 
+    def test_a_route_merging_onto_a_belt_is_not_an_end(self) -> None:
+        routes = [route("m", goal=(28, -12), direction=4, sideload=True, delivered=("iron-plate", "-"))]
+        assert measure.outputs_from([], routes) == []
+
+    def test_a_lane_carrying_nothing_is_never_an_item(self) -> None:
+        routes = [route("out", goal=(40, 3), delivered=("-", "circuit"))]
+        assert measure.outputs_from([], routes) == [{"id": "route out", "at": [40, 3], "direction": 4, "item": "circuit"}]
+
     def test_a_failed_route_and_a_pipe_are_not_ends(self) -> None:
         routes = [route("a", goal=(1, 1), ok=False), route("b", goal=(2, 2), kind="pipe")]
         assert measure.outputs_from([], routes) == []
@@ -102,6 +112,42 @@ class TestOutputs:
     def test_the_same_item_at_the_same_tile_is_listed_once(self) -> None:
         blocks = [block(0, [out_port(0, 5, 6, ["a", "a"])])]
         assert len(measure.outputs_from(blocks, [])) == 1
+
+
+class TestRouteSources:
+    def test_a_connection_starting_at_a_point_is_a_source(self) -> None:
+        notes: list[str] = []
+        r = route("iron", start=(24, -24), direction=8, items=("iron-plate", "iron-plate"), rate=2, sideload=True)
+        assert measure.route_sources_from([r], notes) == [
+            {"id": "connection iron start", "at": [24, -24], "direction": 8, "items": ["iron-plate"], "rate": 2.0}]
+        assert notes == []
+
+    def test_two_different_lanes_are_kept_and_a_missing_rate_is_said(self) -> None:
+        notes: list[str] = []
+        r = route("mix", start=(1, 2), items=("a", "b"))
+        (entry,) = measure.route_sources_from([r], notes)
+        assert entry["items"] == ["a", "b"] and "rate" not in entry
+        assert any("no rate" in n for n in notes)
+
+    def test_a_route_from_a_port_a_splitter_branch_a_pipe_and_a_failure_are_not(self) -> None:
+        branch = route("b", start=(3, 3), items=("a", "a"), rate=1, junction=SimpleNamespace(kind="splitter"))
+        routes = [route("p", start_port=(0, 0), items=("a", "a")), branch,
+                  route("w", start=(1, 1), items=("water",), kind="pipe"),
+                  route("x", start=(2, 2), items=("a", "a"), ok=False)]
+        assert measure.route_sources_from(routes, []) == []
+
+
+class TestBeltTravel:
+    def test_the_longest_chain_of_routes_counts_at_belt_speed(self) -> None:
+        from draftsman.data import entities as entity_data
+        speed = entity_data.raw["transport-belt"]["speed"] * 60  # tiles per second
+        routes = [route("a", start_port=(0, 0), goal_port=(1, 0), pieces=30),
+                  route("b", start_port=(1, 1), goal_port=(2, 0), pieces=20),
+                  route("c", start_port=(0, 1), goal_port=(2, 1), pieces=10)]
+        assert measure.belt_travel_s(routes) == pytest.approx(50 / speed)
+
+    def test_no_routes_is_zero(self) -> None:
+        assert measure.belt_travel_s([]) == 0.0
 
 
 class TestTargetsAndSpec:
@@ -268,6 +314,52 @@ class TestFormat:
     def test_a_short_target_is_counted(self) -> None:
         text = self.text(outputs=[{"at": [4, 6], "delivered": {"gear": 0.1}}])
         assert "[SHORT]" in text and text.endswith("1 of 1 target(s) short")
+
+
+class TestWarmupHint:
+    TARGET = [{"item": "iron-gear-wheel", "rate": 0.5}]
+
+    def short(self, window, groups, belt_travel_s=0.0) -> measure.Comparison:
+        return measure.compare(answer(window=window, machines=groups,
+                                      outputs=[{"at": [4, 6], "delivered": {"iron-gear-wheel": 0.0}}]),
+                               self.TARGET, belt_travel_s)
+
+    def test_a_short_warmup_against_the_estimated_fill_time_is_said(self) -> None:
+        c = self.short({"warmup_s": 5, "measure_s": 60},
+                       [machine(recipe="iron-gear-wheel", working=0.9, waiting=0.1)], belt_travel_s=100)
+        text = measure.format_comparison(c)
+        assert "may have been too short" in text and "estimated fill time" in text
+        assert "not a fault of the plan" in text and "two windows agree" in text
+        assert text.index("may have been too short") < text.index("result:")
+
+    def test_a_last_stage_that_waited_is_said_even_when_the_warmup_looks_long(self) -> None:
+        c = self.short({"warmup_s": 600, "measure_s": 60},
+                       [machine(recipe="iron-gear-wheel", working=0.2, waiting=0.8)])
+        assert "waited for input 80%" in measure.warmup_hint(c)
+
+    def test_a_long_warmup_and_a_working_last_stage_say_nothing(self) -> None:
+        c = self.short({"warmup_s": 600, "measure_s": 60}, [machine(recipe="iron-gear-wheel", working=0.9, waiting=0.1)])
+        assert measure.warmup_hint(c) is None
+
+    def test_a_met_target_gets_no_hint(self) -> None:
+        c = measure.compare(answer(window={"warmup_s": 1, "measure_s": 60}), self.TARGET, 500)
+        assert measure.warmup_hint(c) is None
+
+    def test_the_chain_adds_the_stages_craft_times(self) -> None:
+        from draftsman.data import entities as entity_data
+        from draftsman.data import recipes as recipe_data
+        gear, speed = recipe_data.raw["iron-gear-wheel"], entity_data.raw["assembling-machine-2"]["crafting_speed"]
+        groups = [measure.MachineGroup("assembling-machine-2", "iron-gear-wheel", 1, {}, {})]
+        assert measure.craft_chain_s(groups, "iron-gear-wheel") == pytest.approx(gear.get("energy_required", 0.5) / speed)
+        assert measure.craft_chain_s(groups, "nothing-makes-this") is None
+
+    def test_the_command_reads_the_belt_travel_from_the_spec(self, tmp_path, capsys) -> None:
+        spec = tmp_path / "spec.json"
+        spec.write_text(json.dumps({"targets": self.TARGET, "belt_travel_s": 100}), encoding="utf-8")
+        data = answer(window={"warmup_s": 5, "measure_s": 60}, machines=[machine(recipe="iron-gear-wheel")],
+                      outputs=[{"at": [4, 6], "delivered": {"iron-gear-wheel": 0.0}}])
+        assert cli.main(["measure", "result", str(write(tmp_path, data)), "--spec", str(spec)]) == 1
+        assert "may have been too short" in capsys.readouterr().out
 
 
 class TestCommand:

@@ -83,12 +83,77 @@ def sources_from(plan_sources: list, notes: list[str]) -> list[dict]:
     return out
 
 
+def route_sources_from(routes: list, notes: list[str]) -> list[dict]:
+    """Spec sources for the connections that start at a point.
+
+    A connection whose ``from`` is ``{"at", "direction", "items", "rate"}`` is a
+    supply that starts there, as a plan ``sources`` entry is; it is not listed
+    in ``sources`` (that may not name the same tile), so it is read from the
+    route. A branch that starts at a splitter inside the plan is not a supply.
+    """
+    out = []
+    for r in routes:
+        spec = getattr(r, "spec", None)
+        if not r.ok or spec is None or r.kind != "belt" or spec.start.port is not None:
+            continue
+        junction = getattr(r, "junction", None)
+        if junction is not None and junction.kind == "splitter":
+            continue
+        label = f"connection {r.id} start"
+        items = [i for i in (spec.start.items or ()) if i]
+        if not items:
+            notes.append(f"{label}: no items declared, so nothing is fed there")
+            continue
+        entry: dict = {"id": label, "at": [spec.start.x, spec.start.y], "direction": spec.start.direction,
+                       "items": _lanes(items) if len(items) == 2 else items[:1]}
+        if spec.start.rate is not None:
+            entry["rate"] = float(spec.start.rate)
+        else:
+            notes.append(f"{label}: no rate declared, so it is fed as fast as the belt takes")
+        out.append(entry)
+    return out
+
+
+def belt_travel_s(routes: list) -> float:
+    """Seconds an item takes along the longest chain of routes from block to block.
+
+    Each route counts its pieces at the belt's speed (underground hops as belts);
+    the chain is the longest path through the routes that join an out port to an
+    in port. Routes whose belt is not in the active data count nothing.
+    """
+    from draftsman.data import entities as entity_data
+
+    edges: dict[int, list[tuple[int, float]]] = {}
+    for r in routes:
+        spec = getattr(r, "spec", None)
+        if not r.ok or spec is None or r.kind != "belt" or spec.start.port is None or spec.goal.port is None:
+            continue
+        speed = (entity_data.raw.get(spec.surface) or {}).get("speed")
+        if not speed:
+            continue
+        seconds = len(getattr(r, "pieces", None) or ()) / (float(speed) * 60)
+        edges.setdefault(spec.start.port[0], []).append((spec.goal.port[0], seconds))
+    best: dict[int, float] = {}
+
+    def longest(node: int, seen: frozenset) -> float:
+        if node in best:
+            return best[node]
+        top = max((s + longest(nxt, seen | {node}) for nxt, s in edges.get(node, []) if nxt not in seen),
+                  default=0.0)
+        if not seen:
+            best[node] = top
+        return top
+
+    return max((longest(n, frozenset()) for n in edges), default=0.0)
+
+
 def outputs_from(blocks: list, routes: list) -> list[dict]:
     """Every belt end where the build hands something on, one entry per item.
 
-    An out belt port nobody routes from, and a route that ends at a point
-    rather than at an in port, are the ends of the build. Pipes are not
-    measured: the mod empties belts.
+    An out belt port nobody routes from, and a route that really ends at a free
+    point, are the ends of the build. A route that merges onto a belt (it ends
+    in the side of that belt, ``goal.sideload``) is not: the belt carries on, and
+    an output there would empty it. Pipes are not measured: the mod empties belts.
     """
     routed_from = set()
     for r in routes:
@@ -100,7 +165,7 @@ def outputs_from(blocks: list, routes: list) -> list[dict]:
     out: list[dict] = []
 
     def add(at, direction, items, label):
-        items = [i for i in dict.fromkeys(items) if i]
+        items = [i for i in dict.fromkeys(items) if i and i != "-"]  # "-" is a lane carrying nothing
         for item in items or [None]:
             marker = (tuple(at), item)
             if marker in seen:
@@ -123,7 +188,8 @@ def outputs_from(blocks: list, routes: list) -> list[dict]:
                 f"block {block.index} port {port['index']}")
     for r in routes:
         spec = getattr(r, "spec", None)
-        if not r.ok or spec is None or r.kind != "belt" or spec.goal.port is not None:
+        if (not r.ok or spec is None or r.kind != "belt" or spec.goal.port is not None
+                or getattr(spec.goal, "sideload", False)):
             continue
         items = list(r.delivered or r.lanes or [])
         add((spec.goal.x, spec.goal.y), spec.goal.direction, items, f"route {r.id}")
@@ -150,7 +216,8 @@ def targets_from(plan_targets) -> list[dict]:
 
 def build_spec(blueprint: str, *, sources: list[dict], outputs: list[dict], targets: list[dict],
                surface: str | None = None, warmup_s: float = DEFAULT_WARMUP_S,
-               measure_s: float = DEFAULT_MEASURE_S, speed: float | None = DEFAULT_SPEED) -> dict:
+               measure_s: float = DEFAULT_MEASURE_S, speed: float | None = DEFAULT_SPEED,
+               belt_travel_s: float | None = None) -> dict:
     """The spec object; checks what the game would otherwise only fail on."""
     if not isinstance(blueprint, str) or not blueprint:
         raise MeasureError("the blueprint string is empty")
@@ -168,6 +235,9 @@ def build_spec(blueprint: str, *, sources: list[dict], outputs: list[dict], targ
     spec["measure_s"] = measure_s
     if speed:
         spec["speed"] = speed
+    if belt_travel_s:
+        # Not read by the game: `measure result` uses it to judge the warm-up.
+        spec["belt_travel_s"] = round(belt_travel_s, 1)
     return spec
 
 
@@ -275,6 +345,7 @@ class Comparison:
     problems: list[str]
     refused: dict[str, int]
     surface: dict
+    belt_travel_s: float = 0.0  # from the spec: belt travel along the longest chain of routes
 
     @property
     def all_met(self) -> bool:
@@ -301,7 +372,7 @@ def _rows(value) -> list:
     return value if isinstance(value, list) else list(_table(value).values())
 
 
-def compare(result: dict, targets: list[dict] | None = None) -> Comparison:
+def compare(result: dict, targets: list[dict] | None = None, belt_travel_s: float = 0.0) -> Comparison:
     """Ordered against measured, from the parsed ``measure.json``.
 
     ``targets`` are the ordered rates ({"item", "rate"}); without them the
@@ -348,7 +419,80 @@ def compare(result: dict, targets: list[dict] | None = None) -> Comparison:
         sources=_rows(result.get("sources")), produced=produced, consumed=consumed,
         delivered=delivered, problems=[str(p) for p in _rows(result.get("problems"))],
         refused={k: int(v) for k, v in _table(result.get("refused")).items()},
-        surface=_table(result.get("surface")))
+        surface=_table(result.get("surface")), belt_travel_s=float(belt_travel_s or 0.0))
+
+
+def craft_chain_s(groups: list[MachineGroup], item: str) -> float | None:
+    """Seconds of crafting along the longest chain of recipes that ends in ``item``.
+
+    A stage takes its recipe's time over its machine's crafting speed (modules
+    and beacons are not known here); a stage's ingredients that another
+    measured group makes come first, and the slowest of them counts. None when
+    no group makes the item or the data lacks the recipe or machine.
+    """
+    from draftsman.data import entities as entity_data
+    from draftsman.data import recipes as recipe_data
+
+    stages: dict[str, tuple[float, list[str]]] = {}  # product -> (seconds, ingredient items)
+    for g in groups:
+        entry = recipe_data.raw.get(g.recipe) if g.recipe else None
+        speed = (entity_data.raw.get(g.name) or {}).get("crafting_speed")
+        if not entry or not speed:
+            continue
+        seconds = float(entry.get("energy_required", 0.5) or 0.5) / float(speed)
+        ingredients = [i.get("name") for i in entry.get("ingredients") or [] if isinstance(i, dict)]
+        for product in entry.get("results") or []:
+            if isinstance(product, dict) and product.get("name"):
+                stages.setdefault(product["name"], (seconds, ingredients))
+
+    def depth(name: str, seen: frozenset) -> float:
+        seconds, ingredients = stages[name]
+        return seconds + max((depth(i, seen | {name}) for i in ingredients if i in stages and i not in seen),
+                             default=0.0)
+
+    return depth(item, frozenset()) if item in stages else None
+
+
+def warmup_hint(c: Comparison) -> str | None:
+    """A line saying the run may have been too short to fill the line, or None.
+
+    Two signs, both only signs. (1) The warm-up is shorter than twice an
+    estimate of the fill time: the longest chain of craft times (recipe time
+    over crafting speed, from the active data) plus the belt travel the spec
+    recorded for the longest chain of routes; twice, because a stage needs a
+    few crafts of input before its first product. (2) The machines making a
+    short target waited for input a quarter of the window or more: a line still
+    filling looks the same as a starved one. Neither says the plan is at fault.
+    """
+    short = [t for t in c.targets if not t.met]
+    if not short:
+        return None
+    warmup = c.window.get("warmup_s")
+    reasons: list[str] = []
+    for t in short:
+        chain = craft_chain_s(c.groups, t.item)
+        if chain is not None and isinstance(warmup, (int, float)):
+            fill = chain + c.belt_travel_s
+            if warmup < 2 * fill:
+                reasons.append(f"{t.item}: warm-up {warmup:g} s against an estimated fill time of {fill:.0f} s "
+                               f"(crafting {chain:.0f} s along the longest chain + belt travel {c.belt_travel_s:.0f} s)")
+                continue
+        last = [g for g in c.groups if g.recipe and _makes(g.recipe, t.item)]
+        waited = max((g.shares.get("waiting_input", 0.0) for g in last), default=0.0)
+        if waited >= STARVED_SHARE:
+            reasons.append(f"{t.item}: its machines waited for input {_percent(waited)} of the window")
+    if not reasons:
+        return None
+    return ("note: the run may have been too short to fill the line (" + "; ".join(reasons) + "). "
+            "That alone is not a fault of the plan: run again with a longer --warmup (at least twice as long) "
+            "and trust a figure when two windows agree")
+
+
+def _makes(recipe: str, item: str) -> bool:
+    from draftsman.data import recipes as recipe_data
+
+    entry = recipe_data.raw.get(recipe) or {}
+    return any(isinstance(p, dict) and p.get("name") == item for p in entry.get("results") or [])
 
 
 def _rate(value: float) -> str:
@@ -420,6 +564,9 @@ def format_comparison(c: Comparison) -> str:
                        "allowed on this surface or is not known to the game)")
     for problem in c.problems:
         out.append(f"note: {problem}")
+    hint = warmup_hint(c)
+    if hint:
+        out.append(hint)
     if c.targets:
         out.append("result: " + ("every target met" if all(t.met for t in c.targets)
                                  else f"{sum(not t.met for t in c.targets)} of {len(c.targets)} target(s) short"))
@@ -445,12 +592,13 @@ def _cmd_spec(args) -> int:
         result = plan.build(data, planned)
         notes: list[str] = []
         sources = sources_from(plan._sources(data, result.blocks), notes)
+        sources += route_sources_from(result.routes, notes)
         sources += [parse_fluid(text) for text in args.fluid or []]
         outputs = outputs_from(result.blocks, result.routes) + [parse_output(t) for t in args.output_ends or []]
         targets = [parse_target(t) for t in args.target or []] or targets_from(data.get("targets"))
         spec = build_spec(result.blueprint.to_string(), sources=sources, outputs=outputs, targets=targets,
                           surface=args.surface, warmup_s=args.warmup, measure_s=args.seconds,
-                          speed=args.speed)
+                          speed=args.speed, belt_travel_s=belt_travel_s(result.routes))
     except (plan.PlanError, MeasureError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -476,15 +624,16 @@ def _cmd_result(args) -> int:
 
     try:
         result = load_result(Path(args.result))
-        targets = None
+        targets, travel = None, 0.0
         if args.spec:
             try:
-                targets = json.loads(Path(args.spec).read_text(encoding="utf-8-sig")).get("targets")
+                spec = json.loads(Path(args.spec).read_text(encoding="utf-8-sig"))
+                targets, travel = spec.get("targets"), spec.get("belt_travel_s") or 0.0
             except (OSError, ValueError) as exc:
                 raise MeasureError(f"cannot read the spec {args.spec}: {exc}") from exc
         if args.target:
             targets = [parse_target(t) for t in args.target]
-        comparison = compare(result, targets)
+        comparison = compare(result, targets, travel)
     except MeasureError as exc:
         print(str(exc), file=sys.stderr)
         return 1
