@@ -24,6 +24,8 @@ makes the next revision of the plan better.
       "sources": [{"id": "iron", "at": [-1, 3], "direction": 4, "items": ["iron-plate"], "rate": 7.5},
                   {"block": 1, "port": 0, "items": ["copper-plate", "iron-plate"], "rate": 3}],
       "targets": [{"item": "battery", "per_second": 2}],   (optional: what is ordered; sizes the ports)
+      "recipe_choices": {"battery": "battery"},            (optional, with targets: as in a request;
+                                                            also machine_choices, tiers, effects, surface, boundary)
       "connections": [
         {"id": "out", "from": {"block": 0, "port": 3, "items": ["battery"]},
          "to": [{"at": [60, 2], "direction": 4}, {"at": [60, 12], "direction": 4, "via": [[50, 8]]}]},
@@ -933,6 +935,12 @@ def planned_from_request(plan: dict, plan_path: Path) -> tuple[dict[str, float],
     return _planned_from_spec(spec)
 
 
+# What a plan may say next to its `targets`, read as in a request file: without
+# `recipe_choices` a target made by several recipes is planned with whichever
+# the bill picks first, and the blocks of the recipe actually built get no share.
+ORDER_FIELDS = ("boundary", "tiers", "machine_choices", "recipe_choices", "effects", "surface")
+
+
 def planned_from_targets(plan: dict) -> tuple[dict[str, float], list[str]]:
     """The same from the plan's own `targets` (what is ordered), for a plan with no request file."""
     from . import request
@@ -942,8 +950,20 @@ def planned_from_targets(plan: dict) -> tuple[dict[str, float], list[str]]:
         return {}, []
     if not isinstance(raw, list) or not all(isinstance(t, dict) for t in raw):
         raise PlanError("targets is a list of {\"item\": name, \"per_second\": n} (or \"per_minute\")")
+    for key in ORDER_FIELDS:
+        value = plan.get(key)
+        if not value:
+            continue
+        if key == "boundary":
+            ok, shape = isinstance(value, list) and all(isinstance(x, str) for x in value), "a list of names"
+        elif key == "surface":
+            ok, shape = isinstance(value, str), "a name"
+        else:
+            ok, shape = isinstance(value, dict), "an object"
+        if not ok:
+            raise PlanError(f"{key} must be {shape}, not {value!r}")
     try:
-        spec = request.parse({"targets": raw})
+        spec = request.parse({"targets": raw, **{k: plan[k] for k in ORDER_FIELDS if plan.get(k)}})
     except request.RequestError as exc:
         raise PlanError(f"targets: {exc}") from exc
     return _planned_from_spec(spec)
@@ -1023,6 +1043,9 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
     collected: list[str] = []
     if plan.get("targets") and plan.get("request"):
         raise PlanError("a plan names its order once: 'request' or 'targets', not both")
+    stray = [k for k in ORDER_FIELDS if plan.get(k)]
+    if stray and not plan.get("targets"):
+        raise PlanError(f"{', '.join(stray)} goes with 'targets'; with 'request', put it in the request file")
     if planned is None and plan.get("targets"):
         planned, said = planned_from_targets(plan)
         collected.extend(said)
