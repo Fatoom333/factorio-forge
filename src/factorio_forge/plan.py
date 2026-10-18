@@ -32,7 +32,8 @@ makes the next revision of the plan better.
         {"id": "more", "from": {"at": [30, -6], "direction": 8, "items": ["battery"]},
          "onto": {"route": "out/1", "lane": "left"}}
       ],
-      "routing": {"margin": 3, "reserve": [[44, -4, 46, 0]], "candidates": 12}
+      "routing": {"margin": 3, "reserve": [[44, -4, 46, 0]], "candidates": 12},
+      "power": {"link": true, "pole": "medium-electric-pole"}   (optional: join the pole networks)
     }
 
 A connection joins an out port (or a point) to an in port (or a point) with
@@ -64,7 +65,7 @@ from pathlib import Path
 
 from draftsman.data import entities as entity_data
 
-from . import fluids, inspection, lanes, layout, route, rows
+from . import fluids, inspection, lanes, layout, power, route, rows
 from .layout import LayoutError, crafts_per_second
 
 
@@ -102,6 +103,9 @@ class BuildResult:
     power_networks: int
     warnings: list[str] = field(default_factory=list)
     routes: list[route.RouteResult] = field(default_factory=list)
+    # Every pole network with what it powers, the gaps between separate ones,
+    # and the poles a `power.link` added (see power.analyse).
+    power: dict = field(default_factory=dict)
 
     @property
     def problems(self) -> list[inspection.Finding]:
@@ -112,6 +116,7 @@ class BuildResult:
             "label": self.label,
             "entities": len(self.blueprint.entities),
             "power_networks": self.power_networks,
+            "power": self.power,
             "blocks": [asdict(b) for b in self.blocks],
             "findings": [
                 {"severity": f.severity.value, "code": f.code, "summary": f.summary,
@@ -133,24 +138,95 @@ def _rows_of(block: dict) -> list[int]:
     raise PlanError("a rows block needs 'rows' as a list of machine counts, or 'rows' and 'per_row'")
 
 
-def _power_networks(entities) -> int:
-    poles = [e for e in entities if getattr(e, "type", "") == "electric-pole"]
-    parent = list(range(len(poles)))
+# --------------------------------------------------------------------------
+# power between blocks
+# --------------------------------------------------------------------------
 
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
 
-    for i, a in enumerate(poles):
-        reach_a = (entity_data.raw.get(a.name) or {}).get("maximum_wire_distance") or 0
-        for j in range(i + 1, len(poles)):
-            b = poles[j]
-            reach_b = (entity_data.raw.get(b.name) or {}).get("maximum_wire_distance") or 0
-            if math.dist((a.position.x, a.position.y), (b.position.x, b.position.y)) <= min(reach_a, reach_b):
-                parent[find(i)] = find(j)
-    return len({find(i) for i in range(len(poles))})
+def _power_options(plan: dict) -> tuple[bool, str | None]:
+    """`power`: {"link": true, "pole": name} -- whether to add poles joining the networks, and which."""
+    options = plan.get("power")
+    if options is None:
+        return False, None
+    if not isinstance(options, dict):
+        raise PlanError("power: must be an object like {\"link\": true, \"pole\": \"medium-electric-pole\"}")
+    unknown = set(options) - _POWER_FIELDS
+    if unknown:
+        raise PlanError(f"power: unknown field(s) {', '.join(sorted(unknown))}")
+    link = options.get("link", False)
+    if not isinstance(link, bool):
+        raise PlanError("power: link is true or false")
+    pole = options.get("pole")
+    if pole is not None:
+        if not isinstance(pole, str):
+            raise PlanError("power: pole is a prototype name")
+        try:
+            power.check_pole(pole)
+        except power.PowerError as exc:
+            raise PlanError(str(exc)) from exc
+    return link, pole
+
+
+def _link_poles(plan: dict, built: list[BuiltBlock], blueprint, pole: str | None) -> power.Link | None:
+    """Add the poles `power.link` asks for, on tiles nothing else wants."""
+    entities = list(blueprint.entities)
+    name = pole or power.default_pole(power.poles_of(entities))
+    if name is None:
+        raise PlanError("power: link needs a pole to add; the build has none, so name one with \"pole\"")
+    margin, _, reserved, _ = _routing_options(plan)
+    keep = set(reserved)
+    # The tile in front of each port stays open for the belt or pipe that will join it.
+    for block in built:
+        for port in block.ports:
+            dx, dy = inspection.STEP[port["direction"]]
+            sign = 1 if port["io"] == "out" else -1
+            keep.add((port["x"] + sign * dx, port["y"] + sign * dy))
+    for source in plan.get("sources") or []:
+        at = source.get("at") if isinstance(source, dict) else None
+        if isinstance(at, (list, tuple)) and len(at) == 2 and all(_is_int(v) for v in at):
+            keep.add((int(at[0]), int(at[1])))
+    tiles = [t for e in entities for t in inspection.Layout.tiles_of(e)]
+    if not tiles:
+        return power.Link(name)
+    around = max(margin, power.LINK_MARGIN)
+    area = (min(t[0] for t in tiles) - around, min(t[1] for t in tiles) - around,
+            max(t[0] for t in tiles) + around, max(t[1] for t in tiles) + around)
+    grid = route.grid_of(entities, area, keep)
+    try:
+        return power.link(blueprint, grid, name)
+    except power.PowerError as exc:
+        raise PlanError(str(exc)) from exc
+
+
+def _power_findings(report: dict, link: power.Link | None, wanted: bool) -> list[inspection.Finding]:
+    """`power-split` when the poles are still in several networks, with where they fall short."""
+    networks = report["networks"]
+    if len(networks) < 2:
+        return []
+
+    def said(g: dict) -> str:
+        a, b = g["from"], g["to"]
+        short = f", {g['short_by']:g} too far" if g["short_by"] else ", within reach"
+        return (f"networks {g['networks'][0]} and {g['networks'][1]}: poles at ({a['x']:g}, {a['y']:g}) and "
+                f"({b['x']:g}, {b['y']:g}) are {g['distance']:g} tiles apart, wire reach {g['reach']:g}{short}")
+
+    detail = "; ".join(said(g) for g in report["gaps"])
+    if not wanted:
+        detail += ". Add \"power\": {\"link\": true} to the plan to have poles added between them."
+    elif link is not None and link.failures:
+        detail += ". " + " ".join(link.failures)
+    return [inspection.Finding(
+        inspection.Severity.PROBLEM, "power-split", f"the poles form {len(networks)} separate networks", detail,
+    )]
+
+
+def _link_failures(link: power.Link, report: dict) -> None:
+    """Networks still apart with no failure recorded: the pole's five-wire limit stopped the wiring."""
+    if len(report["networks"]) > 1 and not link.failures:
+        link.failures.append(
+            "Poles stand within wire reach all the way, but a pole holds at most five wires and the "
+            "blueprint's wiring left them apart; move a pole or add one by hand."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -163,6 +239,7 @@ _PORT_FIELDS = {"block", "port", "items"}
 _POINT_FIELDS = {"at", "direction", "items", "rate"}
 _ONTO_FIELDS = {"route", "block", "port", "at", "lane"}
 _ROUTING_FIELDS = {"margin", "max_nodes", "reserve", "candidates"}
+_POWER_FIELDS = {"link", "pole"}
 
 Spec = route.RouteSpec | route.SplitSpec | route.MergeSpec | route.JoinSpec
 
@@ -1053,7 +1130,9 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
     heads: list[tuple[int, int]] = []
     known_recipes: dict[int, str] = {}  # entity index -> recipe, for block machines that store none
 
+    power_link, power_pole = _power_options(plan)
     placements: list[rows.Placement] = []
+    owner: list[int] = []  # the block each placed entity belongs to
     for index, block in enumerate(plan.get("blocks") or []):
         kind = block.get("type", "rows")
         if kind != "rows":
@@ -1080,6 +1159,7 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
             (len(placements) + k, spec.recipe) for k, p in enumerate(placed) if p.name == spec.machine and not p.recipe
         )
         placements.extend(placed)
+        owner.extend([index] * len(placed))
         heads.extend(_out_line_heads(placed, ports, spec.belt))
         built.append(
             BuiltBlock(
@@ -1122,6 +1202,7 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
                     kwargs[key] = extra[key]
             blueprint.entities.append(name, **kwargs)
         routes, route_findings = _route_all(plan, built, blueprint)
+        linked = _link_poles(plan, built, blueprint, power_pole) if power_link else None
         blueprint.generate_power_connections()
     collected.extend(str(w.message) for w in caught)
 
@@ -1139,17 +1220,14 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
                 "Add machines or rows, or a faster machine; the shortfall comes out of everything downstream.",
                 tuple(block.at),
             ))
-    networks = _power_networks(entities)
-    if networks > 1:
-        findings.append(
-            inspection.Finding(
-                inspection.Severity.PROBLEM,
-                "power-split",
-                f"the poles form {networks} separate networks",
-                "Only one of them can be connected to power without more poles.",
-            )
-        )
-    return BuildResult(label, blueprint, built, findings, networks, list(dict.fromkeys(collected)), routes)
+    report = power.analyse(blueprint, owner, routes, linked)
+    if linked is not None:
+        _link_failures(linked, report)
+        report["added"] = [{"name": p.name, "x": p.x, "y": p.y} for p in linked.added]
+        report["link"] = {"pole": linked.pole, "failures": linked.failures}
+    findings.extend(_power_findings(report, linked, power_link))
+    networks = len(report["networks"])
+    return BuildResult(label, blueprint, built, findings, networks, list(dict.fromkeys(collected)), routes, report)
 
 
 def load(path: Path) -> dict:
