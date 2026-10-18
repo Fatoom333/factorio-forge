@@ -245,8 +245,8 @@ def hood_passes(side: str) -> str:
     Derived from the geometry: the entrance's hood covers the half of the tile
     in front of the dive, so of a belt pointing into its side only the lane
     nearer the open back gets on -- the right lane of a feeder from the left,
-    the left lane of one from the right. Still to be confirmed in the game;
-    if it is the other way, this is the one line to flip.
+    the left lane of one from the right. Checked in the game with feeders from
+    both sides.
     """
     return "right" if side == "left" else "left"
 
