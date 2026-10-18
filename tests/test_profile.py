@@ -607,3 +607,21 @@ class TestHiddenStoreProfiles:
         self.make_hidden(tmp_path, monkeypatch)
         monkeypatch.setattr(paths.sys, "platform", "linux")
         assert "Microsoft Store" not in Profile.missing_message("mine")
+
+    def test_other_profiles_in_hidden_folder_are_mentioned(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+        hidden = self.make_hidden(tmp_path, monkeypatch)
+        message = Profile.missing_message("other")
+        assert "Profiles also exist in" in message
+        assert str(hidden) in message
+        assert "exists in" not in message.replace("Profiles also exist in", "")
+
+    def test_same_folder_seen_twice_is_not_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        hidden = self.make_hidden(tmp_path, monkeypatch)
+        # The visible root holds the same profiles as the hidden folder (merged view).
+        monkeypatch.setenv(paths.ENV_HOME, str(hidden.parent))
+        assert "Microsoft Store" not in Profile.missing_message("other")
