@@ -930,6 +930,10 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--no-render", action="store_true")
     build.set_defaults(func=_cmd_build)
 
+    from . import measure
+
+    measure.register(sub)
+
     return parser
 
 
