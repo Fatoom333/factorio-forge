@@ -100,12 +100,18 @@ def route_sources_from(routes: list, notes: list[str]) -> list[dict]:
         if junction is not None and junction.kind == "splitter":
             continue
         label = f"connection {r.id} start"
-        items = [i for i in (spec.start.items or ()) if i]
+        items = list(spec.start.items or ())
         if not items:
             notes.append(f"{label}: no items declared, so nothing is fed there")
             continue
+        if len(items) == 1:
+            items = items * 2
+        if len(items) != 2 or not all(items) or any(i == "-" or "+" in i for i in items):
+            notes.append(f"{label}: its lanes ({', '.join(map(str, items))}) are not one item each, so nothing is fed "
+                         "there; write it with --output-end/--fluid or as a plan source")
+            continue
         entry: dict = {"id": label, "at": [spec.start.x, spec.start.y], "direction": spec.start.direction,
-                       "items": _lanes(items) if len(items) == 2 else items[:1]}
+                       "items": _lanes(items)}
         if spec.start.rate is not None:
             entry["rate"] = float(spec.start.rate)
         else:
@@ -115,33 +121,36 @@ def route_sources_from(routes: list, notes: list[str]) -> list[dict]:
 
 
 def belt_travel_s(routes: list) -> float:
-    """Seconds an item takes along the longest chain of routes from block to block.
+    """Seconds an item takes along the longest chain of routes.
 
-    Each route counts its pieces at the belt's speed (underground hops as belts);
-    the chain is the longest path through the routes that join an out port to an
-    in port. Routes whose belt is not in the active data count nothing.
+    Each belt route counts its pieces at the belt's speed (underground hops as
+    belts). A route that starts at a port leaves its block; one that starts at a
+    point is a supply and leaves a node of its own; one that ends at a port
+    enters that block, otherwise it ends the chain. Routes whose belt is not in
+    the active data count nothing.
     """
     from draftsman.data import entities as entity_data
 
-    edges: dict[int, list[tuple[int, float]]] = {}
+    edges: dict = {}
     for r in routes:
         spec = getattr(r, "spec", None)
-        if not r.ok or spec is None or r.kind != "belt" or spec.start.port is None or spec.goal.port is None:
+        if not r.ok or spec is None or r.kind != "belt":
             continue
         speed = (entity_data.raw.get(spec.surface) or {}).get("speed")
         if not speed:
             continue
         seconds = len(getattr(r, "pieces", None) or ()) / (float(speed) * 60)
-        edges.setdefault(spec.start.port[0], []).append((spec.goal.port[0], seconds))
-    best: dict[int, float] = {}
+        begin = spec.start.port[0] if spec.start.port is not None else ("supply", r.id)
+        end = spec.goal.port[0] if spec.goal.port is not None else ("end", r.id)
+        edges.setdefault(begin, []).append((end, seconds))
+    best: dict = {}
 
-    def longest(node: int, seen: frozenset) -> float:
+    def longest(node, path: frozenset) -> float:
         if node in best:
             return best[node]
-        top = max((s + longest(nxt, seen | {node}) for nxt, s in edges.get(node, []) if nxt not in seen),
+        top = max((s + longest(nxt, path | {node}) for nxt, s in edges.get(node, []) if nxt not in path and nxt != node),
                   default=0.0)
-        if not seen:
-            best[node] = top
+        best[node] = top  # the routes between blocks form a DAG; `path` only guards a cycle
         return top
 
     return max((longest(n, frozenset()) for n in edges), default=0.0)
@@ -453,39 +462,99 @@ def craft_chain_s(groups: list[MachineGroup], item: str) -> float | None:
     return depth(item, frozenset()) if item in stages else None
 
 
-def warmup_hint(c: Comparison) -> str | None:
-    """A line saying the run may have been too short to fill the line, or None.
+def _arrives(c: Comparison, item: str) -> bool:
+    """Whether the window saw ``item`` made by a measured group or fed by a source."""
+    if c.produced.get(item, 0.0) > 0:
+        return True
+    for source in c.sources:
+        for lane in _rows(source.get("lanes")):
+            if lane.get("item") == item and (lane.get("fed_rate") or 0) > 0:
+                return True
+    return False
 
-    Two signs, both only signs. (1) The warm-up is shorter than twice an
-    estimate of the fill time: the longest chain of craft times (recipe time
-    over crafting speed, from the active data) plus the belt travel the spec
-    recorded for the longest chain of routes; twice, because a stage needs a
-    few crafts of input before its first product. (2) The machines making a
-    short target waited for input a quarter of the window or more: a line still
-    filling looks the same as a starved one. Neither says the plan is at fault.
+
+def _item_ingredients(recipe: str) -> set[str]:
+    from draftsman.data import recipes as recipe_data
+
+    entry = recipe_data.raw.get(recipe) or {}
+    return {i["name"] for i in entry.get("ingredients") or []
+            if isinstance(i, dict) and i.get("name") and i.get("type", "item") == "item"}
+
+
+def unsupplied(c: Comparison, item: str) -> list[tuple[str, bool]]:
+    """Ingredients of the machines making ``item`` that they lacked and nothing delivered.
+
+    Each is (ingredient, made by a measured group). Lacked: missing at least
+    ``STARVED_SHARE`` of the window. Fluids are not judged.
+    """
+    made = {p for g in c.groups if g.recipe for p in _products(g.recipe)}
+    out: dict[str, bool] = {}
+    for g in c.groups:
+        if not g.recipe or not _makes(g.recipe, item):
+            continue
+        items = _item_ingredients(g.recipe)
+        for name, share in g.missing.items():
+            if share >= STARVED_SHARE and name in items and not _arrives(c, name):
+                out[name] = name in made
+    return sorted(out.items())
+
+
+def warmup_hint(c: Comparison) -> str | None:
+    """A line about why a short target is short: a missing supply, or a run that was too short.
+
+    Per short target. (1) A machine of the last stage lacked an ingredient that
+    neither a measured group made nor a source fed in the whole window: that is
+    a missing source or a starved stage upstream, and a longer warm-up will not
+    change it. (2) Otherwise, when the target is above 0 (or its machines waited
+    for input a quarter of the window or more) and every ingredient arrived, the
+    line may simply still be filling: advise a warm-up at least twice as long,
+    and a figure is trusted when two windows agree. The craft time along the
+    longest chain of recipes (recipe time over crafting speed; one craft per
+    stage, no buffers, no modules) plus the belt travel the spec recorded is
+    given as a floor of the fill time, not as a test: the line fills slower than
+    that. None of this says the plan is at fault.
     """
     short = [t for t in c.targets if not t.met]
     if not short:
         return None
     warmup = c.window.get("warmup_s")
-    reasons: list[str] = []
+    lines: list[str] = []
+    filling: list[str] = []
     for t in short:
-        chain = craft_chain_s(c.groups, t.item)
-        if chain is not None and isinstance(warmup, (int, float)):
-            fill = chain + c.belt_travel_s
-            if warmup < 2 * fill:
-                reasons.append(f"{t.item}: warm-up {warmup:g} s against an estimated fill time of {fill:.0f} s "
-                               f"(crafting {chain:.0f} s along the longest chain + belt travel {c.belt_travel_s:.0f} s)")
-                continue
+        lacking = unsupplied(c, t.item)
+        if lacking:
+            parts = []
+            for name, made in lacking:
+                parts.append(f"{name} was not made in the window (the machines that make it were starved: look there first)"
+                             if made else f"{name} is never supplied (no machine makes it and no source feeds it): "
+                                          "a missing source")
+            lines.append(f"{t.item}: " + "; ".join(parts) + ". A longer warm-up will not help")
+            continue
         last = [g for g in c.groups if g.recipe and _makes(g.recipe, t.item)]
         waited = max((g.shares.get("waiting_input", 0.0) for g in last), default=0.0)
+        if max(t.measured, t.produced) <= 0 and waited < STARVED_SHARE:
+            continue
+        text = f"{t.item}: {_rate(t.measured)} of {_rate(t.ordered)} ordered, every ingredient arrived"
         if waited >= STARVED_SHARE:
-            reasons.append(f"{t.item}: its machines waited for input {_percent(waited)} of the window")
-    if not reasons:
-        return None
-    return ("note: the run may have been too short to fill the line (" + "; ".join(reasons) + "). "
-            "That alone is not a fault of the plan: run again with a longer --warmup (at least twice as long) "
-            "and trust a figure when two windows agree")
+            text += f", its machines waited for input {_percent(waited)} of the window"
+        chain = craft_chain_s(c.groups, t.item)
+        if chain is not None:
+            text += (f"; filling takes at least ~{chain + c.belt_travel_s:.0f} s (crafting {chain:.0f} s along the "
+                     f"longest chain + belt travel {c.belt_travel_s:.0f} s, one craft per stage), in practice more")
+        filling.append(text)
+    if filling:
+        now = f" (it was {warmup:g} s)" if isinstance(warmup, (int, float)) else ""
+        lines.append("the run may have been too short to fill the line: " + "; ".join(filling) + ". "
+                     f"That alone is not a fault of the plan: run again with a warm-up at least twice as long{now} "
+                     "and trust a figure when two windows agree")
+    return "\n".join("note: " + line for line in lines) if lines else None
+
+
+def _products(recipe: str) -> set[str]:
+    from draftsman.data import recipes as recipe_data
+
+    entry = recipe_data.raw.get(recipe) or {}
+    return {p["name"] for p in entry.get("results") or [] if isinstance(p, dict) and p.get("name")}
 
 
 def _makes(recipe: str, item: str) -> bool:
