@@ -156,8 +156,9 @@ ends:
   every further one (`<id>/1`, ...) branches off a splitter put in place of a
   belt of a route already laid. That belt must be a *straight piece*: a plain
   belt fed straight from behind (by the belt or underground exit before it,
-  or the port or point it starts from) and carrying on straight, so neither
-  the splitter's input nor either output makes a curve. Its other half and
+  or the port or point it starts from), so the splitter's input makes no
+  curve; a curve right after it is allowed (a curve fed by a splitter output
+  keeps both lanes, checked in the game). Its other half and
   the tile past it must be free. The splitter is the only one of the belt's
   speed unless `splitter` names one; only two-tile splitters split in v1.
   `split` (optional, aligned with `to[1:]`) pins a branch to a tile of the
@@ -326,8 +327,9 @@ lanes, junction, merges, delivered lanes and reason.
 - the router does not create underground entrances to filter lanes; an
   entrance can be a merge target only through `onto.at`;
 - side-loading onto an underground exit is not tracked (not tried in the
-  game); a belt fed from one side only by a plain belt, an underground exit or
-  a splitter output is a curve and keeps its lanes (checked in the game);
+  game); a belt fed from one side only by an underground exit or a splitter
+  output is a curve and keeps its lanes (checked in the game); a fast-tier
+  turn after one straight belt behind an exit is not tried in the game;
   a curve fed by anything else is not tracked; loaders, linked belts and drills are unknown sources
   or exits; an inserter dropping onto a curve is unknown;
 - lane rates and ratio deadlocks beyond `lanes-mixed`; compression, which

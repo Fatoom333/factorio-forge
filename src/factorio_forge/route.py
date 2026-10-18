@@ -40,8 +40,8 @@ Belts and pipes fail in different ways, so they have different rules.
 
 One source may go to several destinations: the route to the first is laid,
 and each further one branches off a splitter set in place of a straight belt
-of a route already laid (`straight_pieces`: fed straight from behind, carrying
-on straight, so neither the splitter's input nor its outputs make a curve).
+of a route already laid (`straight_pieces`: fed straight from behind, so the
+splitter's input makes no curve; a curve right after it is allowed).
 A merge points a source into the side of a straight belt of a route -- past
 that route's last splitter -- and side-loads it onto one lane. A lane join
 routes the first source to the goal, then points the second into the other
@@ -60,9 +60,9 @@ carries unchanged; `lanes_at` adds what merges put on. That is the router's
 belief: `lanes.py` traces the finished build and is the one that checks
 lanes, and says so when the two disagree. Still untried in the game: a
 side-load onto an underground exit, and a fast-tier turn after one straight
-belt behind an exit. `straight_pieces` still keeps a splitter half or a
-side-load off curves: that is to leave the belts the route turns on alone, not
-a lane doubt.
+belt behind an exit. `straight_pieces` keeps a splitter half or a side-load
+off belts that are themselves curves or fed from the side; a straight belt
+before a curve may take a splitter.
 
 ## Reach
 
@@ -1159,9 +1159,9 @@ def straight_pieces(result: RouteResult) -> list[int]:
     """Indices of a route's plain belts fed straight from behind and carrying on straight.
 
     Where a splitter half may replace the belt, or a side-load land on it,
-    without either making a curve: a splitter output pushing into the side of
-    a curve, or a side-load onto a belt fed only from the side, would change
-    what the game builds.
+    without the belt itself being a curve: a side-load onto a belt fed only
+    from the side would change what the game builds. A curve right after it
+    is fine: one fed by a splitter output keeps both lanes (checked in the game).
     """
     spec = result.spec
     if spec is None or not result.ok:
@@ -1181,8 +1181,7 @@ def straight_pieces(result: RouteResult) -> list[int]:
             fed = flows[i - 1] == flows[i] and (
                 (before.name == spec.surface and before.other is None) or before.io_type == "output"
             )
-        onward = i == len(pieces) - 1 or flows[i + 1] == flows[i]
-        if fed and onward:
+        if fed:
             found.append(i)
     return found
 

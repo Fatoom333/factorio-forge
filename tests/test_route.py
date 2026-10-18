@@ -697,6 +697,24 @@ class TestSplits:
         assert 4 not in straight and 5 not in straight and 6 in straight
         assert_clean(result)
 
+    def test_a_splitter_may_sit_right_before_a_curve_of_the_base_route(self) -> None:
+        belt, ug, _ = prototypes.belt_set()
+        # The base route runs east to x=8, then turns south; the split tile is the straight belt before the turn.
+        split = {"kind": "belt", "belt": belt, "from": point(0, 0, items=["a", "b"]),
+                 "to": [point(8, 6, SOUTH, items=["a", "b"]), point(12, -1, items=["a", "b"])],
+                 "split": [{"at": [7, 0], "side": "left"}]}
+        result = build([split])
+        assert all(r.ok for r in result.routes), [r.reason for r in result.routes]
+        base = result.routes[0]
+        (splitter,) = splitters_of(result)
+        assert (7, 0) in inspection.Layout.tiles_of(splitter)
+        flows = route._flows(base.pieces, base.spec)
+        at = next(i for i, p in enumerate(base.pieces) if (p.x, p.y) == (7, 0))
+        assert flows[at + 1] != flows[at]
+        assert base.delivered == ("a", "b")
+        assert not lane_findings(result)
+        assert_clean(result)
+
     def test_a_split_tile_off_the_straight_is_refused(self) -> None:
         belt, _, _ = prototypes.belt_set()
         split = {"kind": "belt", "belt": belt, "from": point(0, 0, items=["a"]),
