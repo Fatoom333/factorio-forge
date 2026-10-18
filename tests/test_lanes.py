@@ -690,11 +690,14 @@ class TestAgainstTheGame:
         assert (left, right) == ({IRON}, {COPPER})
         assert not lane_map.unchecked
 
-    @pytest.mark.parametrize("tier,gap,pairs", [(BASIC, 5, True), (BASIC, 6, False), (FAST, 7, True), (FAST, 8, False)],
-                             ids=["basic at 5", "basic at 6", "fast at 7", "fast at 8"])
-    def test_an_underground_pair_reaches_exactly_its_maximum_distance(self, tier, gap: int, pairs: bool) -> None:
-        """Game: a basic pair five tiles apart and a fast pair seven apart carry iron-plate on the
-        left lane and copper-plate on the right; one tile further apart nothing arrives."""
+    @pytest.mark.parametrize("tier,over,pairs", [(BASIC, 0, True), (BASIC, 1, False), (FAST, 0, True), (FAST, 1, False)],
+                             ids=["basic at its reach", "basic one past", "fast at its reach", "fast one past"])
+    def test_an_underground_pair_reaches_exactly_its_maximum_distance(self, tier, over: int, pairs: bool) -> None:
+        """Game: a basic pair five tiles apart and a fast pair seven apart (their max_distance in
+        that mod set) carry iron-plate on the left lane and copper-plate on the right; one tile
+        further apart nothing arrives. The reach is read from the profile, since mods change it."""
+        reach = entities.raw[tier_underground(tier, 0, 0, "input")["name"]]["max_distance"]
+        gap = reach + over
         placed = [tier_belt(tier, x, 0, EAST) for x in (-3, -2, -1)]
         placed += [tier_underground(tier, 0, 0, "input"), tier_underground(tier, gap, 0, "output"),
                    tier_belt(tier, gap + 1, 0, EAST), tier_belt(tier, gap + 2, 0, EAST)]
