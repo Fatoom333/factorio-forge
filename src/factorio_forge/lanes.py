@@ -19,8 +19,8 @@ entrance into its exit). How the receiving node takes that push:
   stop there (a dead end);
 - from a side, onto a transport belt: if the belt is fed from behind too, or
   from both sides, the feeder side-loads -- both its lanes go onto the near
-  lane. Fed from one side only, by a plain belt, it is a curve and keeps the
-  lanes. Fed from one side only by anything else, it is not tracked.
+  lane. Fed from one side only, by whatever pushes there (a plain belt, an
+  underground exit, a splitter output), it is a curve and keeps the lanes.
 - from a side, onto an underground entrance: the hood lets only the feeder's
   lane on the entrance's open side through (`hood_passes`), onto the near lane;
   the other lane is a dead end.
@@ -141,7 +141,7 @@ class Node:
     entity: int
     kind: str  # "belt" | "entrance" | "exit" | "splitter"
     direction: int
-    shape: str  # belts: "straight" | "curve" | "unchecked"; others: "straight"
+    shape: str  # belts: "straight" | "curve"; others: "straight"
 
 
 @dataclass
@@ -412,16 +412,9 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
         from_side = sides.get(tile, {})
         if node.kind == "belt" and not fed_behind and tile not in by_feed and len(from_side) == 1:
             ((side, source),) = from_side.items()
-            if nodes[source].kind == "belt":
-                node.shape = "curve"
-                edge((source, LEFT), (tile, LEFT))
-                edge((source, RIGHT), (tile, RIGHT))
-            else:
-                node.shape = "unchecked"
-                what = {"exit": "an underground exit", "splitter": "a splitter"}.get(nodes[source].kind, "a belt")
-                unchecked.append((tile, f"a belt fed only from its side by {what}; "
-                                        "whether the game curves it is not confirmed"))
-                unknown_both(tile)
+            node.shape = "curve"
+            edge((source, LEFT), (tile, LEFT))
+            edge((source, RIGHT), (tile, RIGHT))
         else:
             for side, source in sorted(from_side.items()):
                 edge((source, LEFT), (tile, side))

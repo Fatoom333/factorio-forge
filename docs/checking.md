@@ -124,12 +124,11 @@ direction of travel. Not yet run by `factorio-forge check`.
 
 - A transport belt fed from behind, or from both sides, is straight: each
   side feeder side-loads, both its lanes onto the near lane. Fed from one
-  side only by a plain belt it is a curve and keeps the lanes; fed from one
-  side only by an underground exit or a splitter it is not tracked.
+  side only it is a curve and keeps the lanes, whatever feeds it: a plain
+  belt, an underground exit or a splitter output (checked in the game).
 - **Hood rule**: onto the side of an underground entrance only the feeder's
   lane on the entrance's open side gets through, onto the near lane; the
-  other lane is a dead end (`lanes.hood_passes`, still to be confirmed in
-  the game).
+  other lane is a dead end (`lanes.hood_passes`, checked in the game).
 - An underground pair keeps the lanes. A splitter sends each input's left
   lane to the left lane of both outputs, and the same for the right; filter
   and priority are not modelled (noted).
