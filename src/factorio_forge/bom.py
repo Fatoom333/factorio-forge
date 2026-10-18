@@ -79,7 +79,7 @@ from draftsman.data import resources as resource_data
 from draftsman.data import tiles as tile_data
 
 from . import surface as surface_rules
-from .categories import crafts, primary_category
+from .categories import crafts, primary_category, recipe_categories
 from .environment import Environment
 
 SPEED_FLOOR = -0.8
@@ -195,7 +195,9 @@ class Ambiguity:
     settled it on cost, or "machine" when several machines could run a recipe
     and one was taken by `_choose_machine`'s rule. Only choices that ended
     up in the result are reported; alternatives the solver priced and left at
-    zero are not.
+    zero are not. "excluded" names a recycling or salvage recipe (the subject)
+    left out of the candidates for the items in `candidates`, so the
+    omission is visible; it is always reported, whether or not it mattered.
     """
 
     subject: str
@@ -295,11 +297,32 @@ def _productivity_multiplier(recipe: dict, entry: dict, productivity: float) -> 
 _BARREL_SUBGROUPS = frozenset({"fill-barrel", "empty-barrel"})
 
 
-def _build_result_index() -> dict[str, list[str]]:
+def _is_salvage(recipe: dict) -> bool:
+    """Whether a recipe is recycling: it takes a made thing apart for a chance
+    at its pieces, which is not an ordinary way to make them.
+
+    Read from the recipe's category: the recycler's own (a combined one such
+    as `recycling-or-hand-crafting` counts, since the recycler runs it). Shape
+    alone is not used -- random yields are also how legitimate production
+    works (asteroid reprocessing, uranium processing), and guessing wrongly
+    would hide a real recipe.
+
+    The solver prices machine-seconds, which makes these look nearly free: a
+    recycler turns 50 scrap a second into gears, steel and circuits on paper.
+    """
+    return any("recycling" in category.split("-or-") for category in recipe_categories(recipe))
+
+
+def _build_result_index(salvage: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
     """Item/fluid -> recipes that make it, for auto-selecting a producer.
 
-    Two kinds of recipe are excluded, both real repackaging steps that the
-    game's own data marks as such rather than a production source:
+    These kinds of recipe are excluded, all real repackaging or salvage steps
+    that the game's own data marks as such rather than a production source:
+
+    - Recycling (`_is_salvage`). Left out
+      unless `Request.recipe_choices` pins one. When `salvage` is given, the
+      visible ones left out are collected into it (item -> recipes) so the
+      caller can say what was skipped; hidden ones are not, there are hundreds.
 
     - `allow_as_intermediate: false`. Packaging mods set this on both halves
       of a stack/unstack pair, which would otherwise make a mined resource
@@ -332,6 +355,11 @@ def _build_result_index() -> dict[str, list[str]]:
         if recipe.get("subgroup") in _BARREL_SUBGROUPS:
             continue
         if recipe.get("hidden") and name not in fixed:
+            continue
+        if _is_salvage(recipe):
+            if salvage is not None and not recipe.get("hidden"):
+                for result in recipe.get("results", []):
+                    salvage.setdefault(result["name"], []).append(name)
             continue
         for result in recipe.get("results", []):
             index[result["name"]].append(name)
@@ -636,7 +664,10 @@ def _candidate_recipes(item: str, result_index: dict[str, list[str]], request: R
 
 
 def _gather(
-    request: Request, result_index: dict[str, list[str]], mined: frozenset[str]
+    request: Request,
+    result_index: dict[str, list[str]],
+    mined: frozenset[str],
+    salvage: dict[str, list[str]] | None = None,
 ) -> _Chain:
     """Collect every recipe reachable from the targets, keeping all the options.
 
@@ -653,6 +684,7 @@ def _gather(
     target_demand: dict[str, float] = defaultdict(float)
     ambiguities: list[Ambiguity] = []
     reported_categories: set[str] = set()
+    skipped: dict[str, list[str]] = {}  # salvage recipe -> wanted items it would make
 
     for t in request.targets:
         target_demand[t.item] += t.rate
@@ -667,6 +699,9 @@ def _gather(
             continue
 
         candidates = _candidate_recipes(item, result_index, request)
+        if salvage and item not in request.recipe_choices:
+            for recipe in salvage.get(item, ()):
+                skipped.setdefault(recipe, []).append(item)
         wanted_temperature = target_temperature.get(item)
         if wanted_temperature is not None and candidates:
             matching = [
@@ -715,6 +750,19 @@ def _gather(
                     queued.add(name)
                     queue.append(name)
 
+    for recipe, items in sorted(skipped.items()):
+        ambiguities.append(
+            Ambiguity(
+                subject=recipe,
+                kind="excluded",
+                candidates=tuple(sorted(items)),
+                detail=(
+                    f"{recipe!r} (recycling or salvage: it takes something apart for a "
+                    f"chance at {', '.join(repr(i) for i in sorted(items))}) is not "
+                    "counted as a way to make them; pin it in recipe_choices to use it"
+                ),
+            )
+        )
     return _Chain(sorted(recipes), machine, produced, dict(target_demand), ambiguities)
 
 
@@ -1098,9 +1146,10 @@ def compute(request: Request) -> BillOfMaterials:
         raise BillOfMaterialsError(
             f"{request.surface!r} is not a surface in the active data; it has {', '.join(surface_rules.names())}"
         )
-    result_index = _build_result_index()
+    salvage: dict[str, list[str]] = {}
+    result_index = _build_result_index(salvage)
     mined = _mined_items(request.surface)
-    chain = _gather(request, result_index, mined)
+    chain = _gather(request, result_index, mined, salvage)
     imports: frozenset[str] = frozenset()
     if request.surface is not None:
         needed = {i["name"] for r in chain.recipes for i in recipe_data.raw[r].get("ingredients", [])}
@@ -1185,6 +1234,8 @@ def compute(request: Request) -> BillOfMaterials:
                     ),
                 )
             )
+        elif ambiguity.kind == "excluded":
+            reported.append(ambiguity)
         elif ambiguity.subject in used_categories:
             reported.append(ambiguity)
 
