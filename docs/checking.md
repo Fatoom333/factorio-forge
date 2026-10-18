@@ -286,9 +286,15 @@ tools/headless-run.ps1 -Save my-save.zip -Out out -Measure spec.json     (compan
 factorio-forge measure result out/measure.json --spec spec.json
 ```
 
-`measure spec` builds the plan and writes the request: the blueprint, the plan's
-`sources` (tile, items per lane, rate), an output at every out belt port nobody
-routes from and at every route that ends at a point, and the plan's `targets`.
+`measure spec` builds the plan and writes the request: the blueprint, the sources,
+the outputs and the plan's `targets`. A source is each entry of the plan's
+`sources` and each connection whose `from` is a point with items and a rate
+(`{"at", "direction", "items", "rate"}`): that is a supply starting there, fed as
+`connection <id> start`. An output is each out belt port nobody routes from and
+each route that really ends at a free point. A route that merges `onto` a belt is
+not an output: the belt carries on, and emptying it there would starve what it
+feeds. Empty lanes are never written as an item, and a connection whose lanes are
+not one item each is left out with a note.
 `--output-end X,Y[,ITEM[,DIR]]` adds an output end for a plan that places belts
 by hand, `--fluid X,Y,FLUID[,RATE]` a fluid source, `--target ITEM=RATE` replaces
 the plan's targets; `--warmup`, `--seconds` and `--speed` set the run (60 s, 120 s,
@@ -317,6 +323,23 @@ entities placed against expected, prototypes the game refused, a supply the
 belt could not take (the rate actually fed against the declared one), and
 machines left without a recipe (a recipe whose surface conditions fail on the
 planet is dropped by the paste, as in a real game).
+
+A short target does not always mean a faulty plan, and `measure result` tells
+the two apart under the machines. If a machine of the last stage lacked an
+ingredient that no measured machine made and no source fed in the whole window,
+the note says so: an ingredient nothing makes or feeds is a missing source, and
+one whose own machines made none was starved upstream; a longer warm-up changes
+neither. If every ingredient arrived and the target is still short while above 0
+(or its machines waited for input a quarter of the window or more), the line may
+still be filling, and the note always advises a run with a warm-up at least twice
+as long. Trust a figure when two windows agree: if the longer run measures the
+same, it is the plan; if it climbs, it was filling. The note also gives a floor
+for the fill time: the longest chain of recipe time over crafting speed from the
+active data, plus the belt travel along the longest chain of routes (which
+`measure spec` records in the spec as `belt_travel_s`). The floor counts one
+craft per stage and no machine buffers, belts filling up or modules, so the real
+fill takes longer (a 240 s warm-up was too short for a line whose floor was
+72 s); it is an explanation, not a test.
 
 What the numbers are: production and consumption are the force's production
 statistics for the measuring surface; deliveries are counted at the sinks.
