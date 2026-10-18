@@ -65,6 +65,27 @@ def _resolve_forge_home() -> tuple[Path, str]:
     return _platform_data_root() / APP_DIRNAME, "default location"
 
 
+def hidden_profile_roots() -> list[Path]:
+    """Profile folders a Store-installed Claude Desktop keeps out of sight (Windows).
+
+    Claude Desktop from the Microsoft Store is an MSIX package: what its
+    processes write under ``%APPDATA%`` is redirected into
+    ``%LOCALAPPDATA%/Packages/<package>/LocalCache/Roaming``, where a
+    normal terminal does not look. Read-only: only reports folders that exist.
+    """
+    if sys.platform != "win32":
+        return []
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return []
+    packages = Path(local) / "Packages"
+    try:
+        found = sorted(packages.glob(f"*/LocalCache/Roaming/{APP_DIRNAME}/profiles"))
+    except OSError:
+        return []
+    return [entry for entry in found if entry.is_dir()]
+
+
 def forge_home() -> Path:
     """Root of all data this tool owns: profiles, cache and local config."""
     return _resolve_forge_home()[0]

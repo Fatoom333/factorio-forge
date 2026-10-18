@@ -917,7 +917,18 @@ def main(argv: list[str] | None = None) -> int:
     _speak_utf8()
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except (FileNotFoundError, IsADirectoryError, PermissionError) as exc:
+        if exc.filename is None:
+            raise
+        reason = {
+            FileNotFoundError: "does not exist",
+            IsADirectoryError: "is a folder, not a file",
+            PermissionError: "cannot be read (no permission)",
+        }[type(exc)]
+        print(f"error: {exc.filename}: file {reason}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

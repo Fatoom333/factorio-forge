@@ -404,7 +404,29 @@ class Profile:
                 f"make it from the save you play with: "
                 f"`factorio-forge create-profile \"<save>\" --name {name}`"
             )
-        return f"no profile named {name!r} in {root} ({have}); {next_step}"
+        message = f"no profile named {name!r} in {root} ({have}); {next_step}"
+        for hidden in paths.hidden_profile_roots():
+            if hidden == root or not (hidden / name / PROFILE_FILE).is_file():
+                continue
+            message += (
+                f". A profile named {name!r} exists in {hidden}, a folder that "
+                "Claude Desktop (Microsoft Store version) keeps out of sight of a normal "
+                f"terminal. To use it, set {paths.ENV_HOME} to {hidden.parent} "
+                f"(or copy that folder to an ordinary place and point {paths.ENV_HOME} there)"
+            )
+            break
+        else:
+            for hidden in paths.hidden_profile_roots():
+                if hidden == root:
+                    continue
+                message += (
+                    f". Profiles also exist in {hidden}, a folder that Claude Desktop "
+                    "(Microsoft Store version) keeps out of sight of a normal terminal. "
+                    f"To use them, set {paths.ENV_HOME} to {hidden.parent} "
+                    f"(or copy that folder to an ordinary place and point {paths.ENV_HOME} there)"
+                )
+                break
+        return message
 
     @staticmethod
     def list_all() -> list[str]:
