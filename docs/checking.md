@@ -235,6 +235,60 @@ so the rest of it cannot be trusted until it is fixed:
     and check again.
 ```
 
+## Measuring what a build makes
+
+Every check above reads the blueprint. The last one is to run it: the companion
+mod's `/forge-measure` builds the blueprint on an empty surface of its own (with
+the surface properties of the planet the plan is for), feeds every declared
+source, empties every output belt end, runs for a warm-up and a measured
+stretch, and writes `measure.json`. It is the check that finds what no reading
+can: a ratio that starves a machine, an output that backs up, a supply the belt
+cannot carry.
+
+```
+factorio-forge measure spec plan.json --surface vulcanus -o spec.json
+tools/headless-run.ps1 -Save my-save.zip -Out out -Measure spec.json     (companion repo)
+factorio-forge measure result out/measure.json --spec spec.json
+```
+
+`measure spec` builds the plan and writes the request: the blueprint, the plan's
+`sources` (tile, items per lane, rate), an output at every out belt port nobody
+routes from and at every route that ends at a point, and the plan's `targets`.
+`--output-end X,Y[,ITEM[,DIR]]` adds an output end for a plan that places belts
+by hand, `--fluid X,Y,FLUID[,RATE]` a fluid source, `--target ITEM=RATE` replaces
+the plan's targets; `--warmup`, `--seconds` and `--speed` set the run (60 s, 120 s,
+game speed 10). A source's `rate` is items per second over both lanes, as in the
+plan; a source with no rate is fed as fast as the belt takes.
+
+`measure result` prints each target ordered against measured, where measured is
+what arrived at the output belt ends (or, with no output end, what the machines
+made), then how each kind of machine spent the window, and why the starved ones
+waited:
+
+```
+targets (ordered -> measured):
+  iron-gear-wheel: ordered 0.5/s, measured 0.5/s at the output belts (100%), machines made 0.5/s [ok]
+machines:
+  1 x assembling-machine-1 (iron-gear-wheel): working 50%, waiting input 50%
+starved: 1 x assembling-machine-1 (iron-gear-wheel) waited for input 50%: iron-plate missing 50% of the time
+result: every target met
+```
+
+A target counts as met from 95% of the order. A machine is called starved when
+a quarter of the window or more went on waiting for an ingredient, and blocked
+when it went on a full output; any time without power is reported. The exit
+code is 0 when every target is met and 1 otherwise. The run also reports
+entities placed against expected, prototypes the game refused, a supply the
+belt could not take (the rate actually fed against the declared one), and
+machines left without a recipe (a recipe whose surface conditions fail on the
+planet is dropped by the paste, as in a real game).
+
+What the numbers are: production and consumption are the force's production
+statistics for the measuring surface; deliveries are counted at the sinks.
+Power is a test source of one gigawatt, so power is never the limit; fluid
+sources are infinity pipes, so a fluid supply is never the limit either. The
+rates measured are those of a build fed exactly what the plan declares.
+
 ## Still to come
 
 Circuit logic is not yet checked in any meaningful sense. A combinator with no

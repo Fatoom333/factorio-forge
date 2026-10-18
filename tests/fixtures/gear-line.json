@@ -1,0 +1,21 @@
+{
+  "label": "Gear line",
+  "entities": [
+    {"name": "transport-belt", "position": [0, 0], "direction": 4},
+    {"name": "transport-belt", "position": [1, 0], "direction": 4},
+    {"name": "transport-belt", "position": [2, 0], "direction": 4},
+    {"name": "transport-belt", "position": [3, 0], "direction": 4},
+    {"name": "transport-belt", "position": [4, 0], "direction": 4},
+    {"name": "fast-inserter", "position": [2, 1], "direction": 0},
+    {"name": "assembling-machine-1", "position": [1, 2], "recipe": "iron-gear-wheel"},
+    {"name": "fast-inserter", "position": [2, 5], "direction": 0},
+    {"name": "small-electric-pole", "position": [0, 3]},
+    {"name": "transport-belt", "position": [0, 6], "direction": 4},
+    {"name": "transport-belt", "position": [1, 6], "direction": 4},
+    {"name": "transport-belt", "position": [2, 6], "direction": 4},
+    {"name": "transport-belt", "position": [3, 6], "direction": 4},
+    {"name": "transport-belt", "position": [4, 6], "direction": 4}
+  ],
+  "sources": [{"id": "iron", "at": [0, 0], "direction": 4, "items": ["iron-plate"], "rate": 1.0}],
+  "targets": [{"item": "iron-gear-wheel", "per_second": 0.5}]
+}
