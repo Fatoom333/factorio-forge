@@ -181,10 +181,22 @@ def _link_poles(plan: dict, built: list[BuiltBlock], blueprint, pole: str | None
             dx, dy = inspection.STEP[port["direction"]]
             sign = 1 if port["io"] == "out" else -1
             keep.add((port["x"] + sign * dx, port["y"] + sign * dy))
-    for source in plan.get("sources") or []:
-        at = source.get("at") if isinstance(source, dict) else None
-        if isinstance(at, (list, tuple)) and len(at) == 2 and all(_is_int(v) for v in at):
-            keep.add((int(at[0]), int(at[1])))
+    # So does the line through each outside point (a source, or the end of a connection that
+    # leaves or enters the build at a tile): the tile itself and the ones before and after it.
+    points = list(plan.get("sources") or [])
+    for conn in plan.get("connections") or []:
+        if isinstance(conn, dict):
+            points += [conn.get("from"), conn.get("to")]
+    for point in points:
+        at = point.get("at") if isinstance(point, dict) else None
+        if not (isinstance(at, (list, tuple)) and len(at) == 2 and all(_is_int(v) for v in at)):
+            continue
+        x, y = int(at[0]), int(at[1])
+        keep.add((x, y))
+        direction = point.get("direction")
+        if _is_int(direction) and direction in inspection.STEP:
+            dx, dy = inspection.STEP[direction]
+            keep.update({(x + dx, y + dy), (x - dx, y - dy)})
     tiles = [t for e in entities for t in inspection.Layout.tiles_of(e)]
     if not tiles:
         return power.Link(name)
@@ -221,11 +233,11 @@ def _power_findings(report: dict, link: power.Link | None, wanted: bool) -> list
 
 
 def _link_failures(link: power.Link, report: dict) -> None:
-    """Networks still apart with no failure recorded: the pole's five-wire limit stopped the wiring."""
+    """Networks still apart with no failure recorded: the poles are in reach but the wiring left them apart."""
     if len(report["networks"]) > 1 and not link.failures:
         link.failures.append(
-            "Poles stand within wire reach all the way, but a pole holds at most five wires and the "
-            "blueprint's wiring left them apart; move a pole or add one by hand."
+            "The poles stand within wire reach all the way, yet the blueprint's wiring left them apart "
+            "(a pole holds at most five wires); move a pole or add one by hand."
         )
 
 

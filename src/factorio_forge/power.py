@@ -6,8 +6,9 @@ wire. This module does two things with that.
 `link` adds the fewest poles it can that join every pole network into one, on
 tiles that are free: not under a machine, belt or route piece, not on a tile
 the plan reserves, not where an inserter picks up or drops, not on a pipe
-connection and not on the tile in front of a port. The wire reach comes from
-the pole's prototype, the same rule the blueprint's own wires follow: two
+connection and not on the tile in front of a port or along the line of an outside
+point. Poles are chosen by wire reach alone; the supply area only decides what
+each network powers in the report. The wire reach comes from the pole's prototype, the same rule the blueprint's own wires follow: two
 poles connect when their centres are no further apart than the shorter of
 their two reaches.
 
@@ -268,11 +269,6 @@ def _covered(pole: PoleInfo) -> set[tuple[int, int]]:
         for ty in range(math.floor(pole.y - pole.supply), math.ceil(pole.y + pole.supply)):
             tiles.add((tx, ty))
     return tiles
-
-
-def count_networks(blueprint) -> int:
-    """How many networks the blueprint's wires leave its poles in."""
-    return len(_wired_groups(blueprint, poles_of(list(blueprint.entities))))
 
 
 def analyse(blueprint, owner: list[int], routes: list, link_result: Link | None) -> dict:

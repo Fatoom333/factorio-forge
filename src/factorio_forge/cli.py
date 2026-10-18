@@ -700,7 +700,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
             if r.delivered:
                 line += f", delivered {' | '.join(r.delivered)}"
             print(line)
-    _print_power(result.power)
     shown = [f for f in result.findings if f.severity.value != "note"]
     if shown:
         print(f"\n{_plural(len(shown), 'finding', 'findings')}:")
@@ -714,34 +713,6 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if html_path:
         print(f"drawing:   {html_path.resolve()}")
     return 0
-
-
-def _print_power(power: dict) -> None:
-    """Pole networks when there is more than one, or when poles were added to join them."""
-    networks = power.get("networks") or []
-    added = power.get("added") or []
-    if len(networks) < 2 and not added:
-        return
-    print(f"\npower: {_plural(len(networks), 'network', 'networks')}")
-    for net in networks:
-        powers = net["powers"]
-        parts = [f"block {b['block']} ({b['entities']})" for b in powers["blocks"]]
-        parts += [f"route {r['route']} ({r['entities']})" for r in powers["routes"]]
-        if powers["other"]:
-            parts.append(f"{powers['other']} other")
-        shown = [f"({p['x']:g}, {p['y']:g})" + (" added" if p["added"] else "") for p in net["poles"]]
-        poles = ", ".join(shown[:4]) + (f" and {len(shown) - 4} more (all in report.json)" if len(shown) > 4 else "")
-        print(f"  network {net['index']}: {_plural(len(net['poles']), 'pole', 'poles')} at {poles}; "
-              f"powers {', '.join(parts) or 'nothing'}")
-    for gap in power.get("gaps") or []:
-        a, b = gap["from"], gap["to"]
-        print(f"  gap: network {gap['networks'][0]} ({a['x']:g}, {a['y']:g}) to network {gap['networks'][1]} "
-              f"({b['x']:g}, {b['y']:g}): {gap['distance']:g} tiles, wire reach {gap['reach']:g}")
-    if added:
-        print(f"  added {_plural(len(added), 'pole', 'poles')} ({power['link']['pole']}): "
-              + ", ".join(f"({p['x']:g}, {p['y']:g})" for p in added))
-    for reason in (power.get("link") or {}).get("failures") or []:
-        print(f"  not joined: {reason}")
 
 
 def _cmd_find(args: argparse.Namespace) -> int:

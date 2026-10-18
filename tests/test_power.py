@@ -12,7 +12,7 @@ import pytest
 from draftsman.data import entities
 
 import prototypes
-from factorio_forge import inspection, plan
+from factorio_forge import inspection, plan, power
 from test_route import block_spec, chained_recipes
 
 
@@ -98,7 +98,7 @@ class TestLink:
         result = plan.build({**two_blocks(distance=1), "power": {"link": True}})
         assert result.power["added"] == [] and result.power_networks == 1
 
-    def test_a_route_between_the_blocks_is_not_built_over(self) -> None:
+    def test_a_route_on_the_straight_chain_is_gone_round(self) -> None:
         first, second = chained_recipes()
         maker = block_spec(*first, [2])
         taker = block_spec(*second, [2])
@@ -107,15 +107,23 @@ class TestLink:
         at = [alone.width + 30, 0]
         into = next(p for p in plan.build({"blocks": [{**taker, "at": at}]}).blocks[0].ports
                     if p["io"] == "in" and p["kind"] == "belt")
-        result = plan.build({"blocks": [maker, {**taker, "at": at}], "power": {"link": True},
-                             "connections": [{"id": "r", "from": {"block": 0, "port": out["index"]},
-                                              "to": {"block": 1, "port": into["index"]}}]})
+        blocks = [maker, {**taker, "at": at}]
+        link = {"link": True, "pole": prototypes.small_pole()}
+        # Without the route, the chain's middle pole takes some tile on the line between the blocks.
+        free = plan.build({"blocks": blocks, "power": link})
+        straight = sorted(added_tiles(free))
+        assert len(straight) >= 2
+        middle = straight[len(straight) // 2]
+        conn = {"id": "r", "from": {"block": 0, "port": out["index"]}, "to": {"block": 1, "port": into["index"]},
+                "via": [list(middle)]}
+        result = plan.build({"blocks": blocks, "power": link, "connections": [conn]})
         (route_result,) = result.routes
         assert route_result.ok, route_result.reason
-        assert result.power_networks == 1
         occupied = {t for e in result.blueprint.entities if e.type != "electric-pole"
                     for t in inspection.Layout.tiles_of(e)}
-        assert not added_tiles(result) & occupied
+        assert middle in occupied  # the route really sits where the straight chain would put a pole
+        assert result.power_networks == 1
+        assert result.power["added"] and not added_tiles(result) & occupied
         assert [f.code for f in result.findings if f.code in ("power-split", "pole-isolated")] == []
 
     def test_a_wall_across_the_gap_is_gone_round(self) -> None:
@@ -130,6 +138,26 @@ class TestLink:
         for x, y in added_tiles(result):
             assert not (wall[0] <= x <= wall[2] and wall[1] <= y <= wall[3])
         assert any(p["y"] > bottom for p in result.power["added"])
+
+    def test_poles_keep_off_the_line_of_an_outside_point(self, monkeypatch) -> None:
+        seen = {}
+        original = plan.route.grid_of
+
+        def spy(entities, area, keep):
+            seen["keep"] = set(keep)
+            return original(entities, area, keep)
+
+        monkeypatch.setattr(plan.route, "grid_of", spy)
+        spec = two_blocks(power={"link": True})
+        built = plan.build(spec).blocks
+        port = next(p for p in built[0].ports if p["io"] == "out")
+        outside = {"at": [200, 200], "direction": 4}
+        connection = {"id": "c", "from": {"block": 0, "port": port["index"]}, "to": outside}
+        try:
+            plan.build({**spec, "connections": [connection]})
+        except plan.PlanError:
+            pass  # the route itself may be refused; what the pole search was told to keep is what matters
+        assert {(200, 200), (201, 200), (199, 200)} <= seen["keep"]
 
     def test_poles_keep_off_the_tiles_in_front_of_ports(self) -> None:
         result = plan.build(two_blocks(power={"link": True}))
@@ -184,3 +212,14 @@ class TestOptions:
     def test_without_link_nothing_is_added(self) -> None:
         result = plan.build({**two_blocks(), "power": {"pole": prototypes.small_pole()}})
         assert result.power_networks == 2 and "added" not in result.power
+
+
+class TestWiringLeftApart:
+    def test_poles_in_reach_but_unwired_are_reported(self) -> None:
+        link = power.Link("small-electric-pole")
+        plan._link_failures(link, {"networks": [{}, {}]})
+        (reason,) = link.failures
+        assert "within wire reach" in reason
+        quiet = power.Link("small-electric-pole")
+        plan._link_failures(quiet, {"networks": [{}]})
+        assert quiet.failures == []
