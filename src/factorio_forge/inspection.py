@@ -38,6 +38,7 @@ from enum import Enum
 from typing import Callable, Iterable, Iterator
 
 import draftsman.data.entities as entity_data
+from draftsman.data import recipes as recipe_data
 
 # --------------------------------------------------------------------------
 # findings
@@ -497,6 +498,269 @@ def inserters_reaching_nothing(layout: Layout) -> Iterator[Finding]:
                 (x, y),
                 (entity.name, taking[0].name),
             )
+
+
+def _solid_items(parts) -> frozenset[str]:
+    return frozenset(p["name"] for p in parts or [] if p.get("type") != "fluid" and p.get("name"))
+
+
+def backwards_inserters(entities: list, lane_map, complete: bool = False) -> list[Finding]:
+    """Inserters that work in the wrong direction, judged from what stands on each side.
+
+    In a blueprint an inserter's direction points at the side it takes FROM, so
+    a row built by eye is easily mirrored: the input inserter then takes the
+    product out of the machine and puts it on the belt that feeds it, and the
+    output inserter takes from an empty belt and puts into the machine. An
+    inserter between two things looks fine to `inserters_reaching_nothing`
+    either way round, so the sides are asked what they carry.
+
+    `lane_map` is a `lanes.trace` of `entities`. Two kinds of verdict:
+
+    - Without `complete`, only what holds whatever else is true about the
+      supply: a product put on a belt that runs back past the machine's own
+      input, an item taken from a belt that no ingredient of the receiving
+      machine is, or two machines handed something neither uses. A belt that
+      carries nothing is no verdict here, since the supply may come from a
+      source that is not part of the picture.
+    - With `complete` (the trace was given every declared source), a machine
+      that nothing brings an ingredient to, or an inserter taking from a belt
+      that nothing is put on, is a verdict too.
+
+    Where the answer depends on something not in the picture -- a belt of
+    unknown content, a machine with no recipe, a machine at the edge of the
+    blueprint -- nothing is said, or a suspect at most.
+    """
+    from .lanes import _filter_of
+
+    index_at: dict[tuple[int, int], list[int]] = {}
+    for index, entity in enumerate(entities):
+        for tile in Layout.tiles_of(entity):
+            index_at.setdefault(tile, []).append(index)
+    if not index_at:
+        return []
+    xs = [t[0] for t in index_at]
+    ys = [t[1] for t in index_at]
+
+    def beyond(tile) -> bool:
+        return not (min(xs) <= tile[0] <= max(xs) and min(ys) <= tile[1] <= max(ys))
+
+    def near_the_edge(index: int) -> bool:
+        """Whether an inserter standing beside this machine could lie outside the blueprint."""
+        tiles = list(Layout.tiles_of(entities[index]))
+        left, right = min(t[0] for t in tiles) - 1, max(t[0] for t in tiles) + 1
+        top, bottom = min(t[1] for t in tiles) - 1, max(t[1] for t in tiles) + 1
+        return any(beyond((x, y)) for x in range(left, right + 1) for y in (top, bottom)) or any(
+            beyond((x, y)) for y in range(top, bottom + 1) for x in (left, right)
+        )
+
+    def machine_at(tile):
+        return next((i for i in index_at.get(tile, ()) if i in lane_map.machines), None)
+
+    def ingredients(machine: int) -> frozenset[str]:
+        return _solid_items(recipe_data.raw[lane_map.machines[machine][0]].get("ingredients"))
+
+    def products(machine: int) -> frozenset[str]:
+        return _solid_items(recipe_data.raw[lane_map.machines[machine][0]].get("results"))
+
+    def burns(machine: int) -> bool:
+        source = (entity_data.raw.get(entities[machine].name) or {}).get("energy_source") or {}
+        return source.get("type") == "burner"
+
+    def on_belt(tile):
+        """(items, unknown) over both lanes of a belt tile, or None where there is no belt."""
+        both = lane_map.at(tile)
+        if both is None:
+            return None
+        return both[0].items | both[1].items, bool(both[0].unknown or both[1].unknown)
+
+    def passing(filt, items):
+        return frozenset(i for i in items if filt is None or filt.passes(i))
+
+    def has_loader(machine: int) -> bool:
+        tiles = list(Layout.tiles_of(entities[machine]))
+        around = {(x + dx, y + dy) for x, y in tiles for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+        return any(
+            getattr(entities[i], "type", "") in ("loader", "loader-1x1")
+            for tile in around for i in index_at.get(tile, ())
+        )
+
+    reverse_edges: dict = {}
+    for source_key, targets in lane_map.edges.items():
+        for tile, lane, _ in targets:
+            reverse_edges.setdefault((tile, lane), []).append(source_key)
+
+    def line_of(tile) -> set:
+        """Every belt tile joined to `tile` by items moving either way."""
+        todo = [(tile, 0), (tile, 1)]
+        seen = set(todo)
+        while todo:
+            key = todo.pop()
+            for nxt in [k for k in reverse_edges.get(key, ())] + [(t, ln) for t, ln, _ in lane_map.edges.get(key, ())]:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    todo.append(nxt)
+        return {key[0] for key in seen}
+
+    def settled(tile) -> bool:
+        """Whether every belt head behind `tile` is one the plan named.
+
+        What a belt carries is only known as far as where it starts. A head
+        nobody declared may be fed from outside the picture, and then both
+        "it carries nothing" and "it carries only this" are guesses.
+        """
+        todo = [(tile, 0), (tile, 1)]
+        seen = set(todo)
+        while todo:
+            key = todo.pop()
+            behind = reverse_edges.get(key, ())
+            if not behind and key[0] not in lane_map.feed_rates:
+                return False
+            for before in behind:
+                if before not in seen:
+                    seen.add(before)
+                    todo.append(before)
+        return True
+
+    def real_feed(machine: int) -> bool:
+        """Whether some inserter could bring this machine an ingredient."""
+        needed = ingredients(machine)
+        for tile, filt in lane_map.fed_by.get(machine, ()):
+            if tile is None:
+                return True
+            seen = on_belt(tile)
+            if seen is None or seen[1] or not settled(tile) or passing(filt, seen[0]) & needed:
+                return True
+        return False
+
+    moves = []
+    for entity in entities:
+        if getattr(entity, "type", "") != "inserter":
+            continue
+        reach = inserter_reach(entity)
+        if reach is None:
+            continue
+        pick = (math.floor(reach[0][0]), math.floor(reach[0][1]))
+        put = (math.floor(reach[1][0]), math.floor(reach[1][1]))
+        source, sink = machine_at(pick), machine_at(put)
+        if source is not None and source == sink:
+            continue  # a loop; `inserters_reaching_nothing` says so
+        moves.append((entity, pick, put, source, sink))
+    emptied = {source for _, _, _, source, _ in moves if source is not None}
+
+    found: list[Finding] = []
+
+    def report(entity, severity, summary, detail):
+        found.append(Finding(severity, "inserter-backwards", summary, detail,
+                             Layout.tile_of(entity), (entity.name,)))
+
+    stuck: dict[int, list] = {}  # blind: machine -> inserters that only bring things to it
+    starved: dict[int, list] = {}  # complete: machine -> [(entity, already reported)]
+    for entity, pick, put, source, sink in moves:
+        filt = _filter_of(entity)
+
+        if source is not None:
+            made = passing(filt, products(source))
+            machine = lane_map.machines[source]
+            if put in lane_map.nodes and made:
+                feeding = {tile for tile, _ in lane_map.fed_by.get(source, ()) if tile is not None}
+                supply = (on_belt(put) or (frozenset(), False))[0] & ingredients(source)
+                if not complete and feeding & lane_map.downstream(put):
+                    report(
+                        entity, Severity.PROBLEM,
+                        f"{entity.name} puts {', '.join(sorted(made))} onto a belt that feeds the "
+                        f"{machine[1]} it takes from",
+                        "An inserter's direction names the side it takes FROM. This one takes the product "
+                        "out of the machine and sends it back to the machine's own input; the machine's "
+                        "ingredients are taken by inserters pointing the other way.",
+                    )
+                elif supply and not line_of(put) & feeding:
+                    starved.setdefault(source, []).append((entity, True))
+                    report(
+                        entity, Severity.PROBLEM,
+                        f"{entity.name} puts {', '.join(sorted(made))} onto a belt that carries "
+                        f"{', '.join(sorted(supply))}, which the {machine[1]} it takes from needs, "
+                        "and takes nothing from that belt",
+                        "That belt is the machine's supply, and the product is going onto it: the inserter "
+                        "is turned the wrong way round (its direction names the side it takes FROM). "
+                        "The machine's own input inserters point at the belt and away from the machine.",
+                    )
+                else:
+                    starved.setdefault(source, []).append((entity, False))
+            if (not complete and sink is not None and not burns(sink) and made
+                    and not made & ingredients(sink)):
+                receiver = lane_map.machines[sink]
+                reverse = products(sink) & ingredients(source)
+                report(
+                    entity, Severity.PROBLEM,
+                    f"{entity.name} moves {', '.join(sorted(made))} from {machine[0]} into a "
+                    f"{receiver[1]} making {receiver[0]}, which does not use it"
+                    + ("; the other way round would work" if reverse else ""),
+                    "The direction names the side the inserter takes from, so it may be mirrored."
+                    if reverse else "Neither machine uses what this inserter carries.",
+                )
+        elif sink is not None and pick in lane_map.nodes and not burns(sink):
+            seen = on_belt(pick)
+            receiver = lane_map.machines[sink]
+            if not complete:
+                carried = passing(filt, seen[0]) if seen is not None else frozenset()
+                if seen is not None and not seen[1] and seen[0] and not carried & ingredients(sink):
+                    report(
+                        entity, Severity.PROBLEM,
+                        f"{entity.name} takes {', '.join(sorted(seen[0]))} from a belt into a "
+                        f"{receiver[1]} making {receiver[0]}, which does not use it",
+                        "The direction names the side the inserter takes from; if it is meant to carry "
+                        "the product away, it is turned the wrong way round.",
+                    )
+                elif (products(sink) and sink not in emptied and not near_the_edge(sink)
+                        and not has_loader(sink) and not carried & ingredients(sink)):
+                    stuck.setdefault(sink, []).append(entity)
+            elif seen is not None and not seen[1] and not seen[0] and settled(pick):
+                report(
+                    entity, Severity.PROBLEM,
+                    f"{entity.name} feeds the {receiver[1]} making {receiver[0]} from a belt that carries nothing",
+                    "Nothing declared puts anything on the belt it takes from. If that belt is where the "
+                    "machine's product is meant to go, the inserter is turned the wrong way round.",
+                )
+
+    for sink, feeders in stuck.items():
+        receiver = lane_map.machines[sink]
+        at = "; ".join("{}, {}".format(*Layout.tile_of(e)) for e in feeders)
+        report(
+            feeders[0], Severity.SUSPECT,
+            f"nothing takes the product out of the {receiver[1]} making {receiver[0]}; "
+            f"the inserter(s) at {at} only bring things to it from belts",
+            "The direction names the side an inserter takes from. If one of them is meant to carry the "
+            "product away onto its belt, it is turned the wrong way round.",
+        )
+
+    if complete:
+        for source, takers in starved.items():
+            machine = lane_map.machines[source]
+            if (not ingredients(source) or real_feed(source) or has_loader(source)
+                    or any(flag for _, flag in takers)):
+                continue  # a supply belt being written to is already said above
+            edge = near_the_edge(source)
+            at = "; ".join("{}, {}".format(*Layout.tile_of(e)) for e, _ in takers)
+            report(
+                takers[0][0], Severity.SUSPECT if edge else Severity.PROBLEM,
+                f"no inserter brings the {machine[1]} making {machine[0]} an ingredient; "
+                f"the inserter(s) at {at} only take from it",
+                "Every inserter at the machine either takes from it or takes from a belt that carries "
+                "nothing it uses. If one of them is meant as the machine's input, it is turned the wrong way "
+                "round (its direction names the side it takes FROM)."
+                + (" The machine is near the edge of the blueprint, so the supply may be outside it." if edge else ""),
+            )
+    return found
+
+
+@check
+def inserters_the_wrong_way_round(layout: Layout) -> Iterator[Finding]:
+    """An inserter that takes a machine's product back to its input, or feeds a machine what it does not use."""
+    from . import lanes
+
+    if not any(getattr(e, "type", "") == "inserter" for e in layout.entities):
+        return
+    yield from backwards_inserters(layout.entities, lanes.trace(layout.entities))
 
 
 @check

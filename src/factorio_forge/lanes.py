@@ -168,6 +168,8 @@ class LaneMap:
     loose_heads: set[Tile] = field(default_factory=set)
     # The declared rate of each feed, None where the plan gave none.
     feed_rates: dict[Tile, float | None] = field(default_factory=dict)
+    # The entities that were traced, so a check can read what stands beside a belt.
+    entities: list = field(default_factory=list)
 
     def arriving_rate(self, tile) -> float | None:
         """Items per second reaching `tile`, if every belt behind it starts at a feed with a declared rate.
@@ -548,7 +550,7 @@ def trace(entities: list, feeds: Sequence[Feed] = (), in_ports: Sequence[Tile] =
 
     return LaneMap(nodes, carries, edges, consumers, closed, unchecked,
                    {k: v for k, v in seeds.items() if k in carries}, behind, halves, sides, machines, fed_by,
-                   loose_heads, {f.tile: f.rate for f in feeds})
+                   loose_heads, {f.tile: f.rate for f in feeds}, entities)
 
 
 # --------------------------------------------------------------------------
@@ -861,6 +863,7 @@ def check(lane_map: LaneMap, expectations: Sequence[Expectation], declared: bool
     said, missing_at = _expectations(lane_map, expectations, declared)
     found += said
     found += _starved(lane_map, missing_at)
+    found += inspection.backwards_inserters(lane_map.entities, lane_map, complete=True)
     seen: set[Tile] = set()
     for tile, reason in lane_map.unchecked:
         if tile in seen:
