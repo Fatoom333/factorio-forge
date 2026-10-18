@@ -40,8 +40,8 @@ Belts and pipes fail in different ways, so they have different rules.
 
 One source may go to several destinations: the route to the first is laid,
 and each further one branches off a splitter set in place of a straight belt
-of a route already laid (`straight_pieces`: fed straight from behind, carrying
-on straight, so neither the splitter's input nor its outputs make a curve).
+of a route already laid (`straight_pieces`: fed straight from behind, so the
+splitter's input makes no curve; a curve right after it is allowed).
 A merge points a source into the side of a straight belt of a route -- past
 that route's last splitter -- and side-loads it onto one lane. A lane join
 routes the first source to the goal, then points the second into the other
@@ -52,13 +52,17 @@ wins. A split or a join is all or nothing.
 
 ## Lanes
 
-A straight belt, a curve fed by one plain belt, and an underground pair all
-keep the left lane on the left. A route ends with a straight join into the
-port, and turns only after a plain belt -- never right after an underground
-exit or a splitter, which is still to be confirmed in the game -- so it
-delivers what it carries unchanged; `lanes_at` adds what merges put on. That
-is the router's belief: `lanes.py` traces the finished build and is the one
-that checks lanes, and says so when the two disagree.
+A straight belt, a curve and an underground pair all keep the left lane on
+the left. A curve fed from one side only keeps both lanes whatever feeds it --
+a plain belt, an underground exit or a splitter output -- as checked in the
+game, so the route may turn right behind an exit. The route delivers what it
+carries unchanged; `lanes_at` adds what merges put on. That is the router's
+belief: `lanes.py` traces the finished build and is the one that checks
+lanes, and says so when the two disagree. Still untried in the game: a
+side-load onto an underground exit, and a fast-tier turn after one straight
+belt behind an exit. `straight_pieces` keeps a splitter half or a side-load
+off belts that are themselves curves or fed from the side; a straight belt
+before a curve may take a splitter.
 
 ## Reach
 
@@ -935,8 +939,8 @@ def _search(spec: RouteSpec, grid: Grid, rules: _Rules, max_nodes: int,
         return _manhattan(tile, via[s]) + rest[s] if s < len(via) else _manhattan(tile, goal)
 
     # A state: the next tile to fill, the way things move into it, via tiles
-    # covered so far, and whether the piece before it is an underground exit.
-    first = (start[0], start[1], spec.start.direction, 0, False)
+    # covered so far.
+    first = (start[0], start[1], spec.start.direction, 0)
     best: dict[tuple, float] = {first: 0.0}
     parent: dict[tuple, tuple[tuple, tuple[Piece, ...]]] = {}
     queue: list = []
@@ -944,9 +948,9 @@ def _search(spec: RouteSpec, grid: Grid, rules: _Rules, max_nodes: int,
 
     def push(state, g, turns, hops) -> None:
         nonlocal counter
-        x, y, d, s, _ = state
+        x, y, d, s = state
         counter += 1
-        heapq.heappush(queue, (g + h((x, y), s), g, turns, hops, y, x, d, s, state[4], counter, state))
+        heapq.heappush(queue, (g + h((x, y), s), g, turns, hops, y, x, d, s, counter, state))
 
     push(first, 0.0, 0, 0)
     expanded = 0
@@ -956,7 +960,7 @@ def _search(spec: RouteSpec, grid: Grid, rules: _Rules, max_nodes: int,
         _, g, turns, hops, *_, state = heapq.heappop(queue)
         if g > best.get(state, math.inf):
             continue
-        x, y, d, s, after_exit = state
+        x, y, d, s = state
         t = (x, y)
         if t == goal and d == goal_dir and s == len(via):
             found = state
@@ -973,7 +977,7 @@ def _search(spec: RouteSpec, grid: Grid, rules: _Rules, max_nodes: int,
         at_point_start = t == start and spec.start.port is None and state == first
         for flow in (d, CW[d], CCW[d]):
             turned = flow != d
-            if turned and (at_point_start or (rules.belt and after_exit)):
+            if turned and at_point_start:
                 continue
             if t in rules.via and (s >= len(via) or t != via[s]):
                 continue
@@ -981,7 +985,7 @@ def _search(spec: RouteSpec, grid: Grid, rules: _Rules, max_nodes: int,
             if rules.piece(piece) is not None:
                 continue
             covered = s + (1 if s < len(via) and t == via[s] else 0)
-            nxt = (*_step(t, flow), flow, covered, False)
+            nxt = (*_step(t, flow), flow, covered)
             moves.append((nxt, 1 + (spec.turn_cost if turned else 0), int(turned), 0, (piece,)))
         if spec.underground and t not in rules.via:
             for k in range(1, reach + 1):
@@ -993,7 +997,7 @@ def _search(spec: RouteSpec, grid: Grid, rules: _Rules, max_nodes: int,
                     continue
                 if grid.tunnel_conflict(spec.underground, t, exit_, reach) is not None:
                     continue
-                nxt = (*_step(exit_, d), d, s, True)
+                nxt = (*_step(exit_, d), d, s)
                 # A hair more per buried tile, so that of two hops past the same
                 # obstacle the shorter one wins and the entry is the last free
                 # tile before it.
@@ -1121,9 +1125,6 @@ def validate(pieces: list[Piece], grid: Grid, spec: RouteSpec, allow_tee: bool =
         for i, tile in enumerate(tiles):
             if any(j != i - 1 for j in own_push.get(tile, ())):
                 return f"the route side-loads into itself at {_where(tile)}"
-        for i in range(1, len(pieces)):
-            if i not in in_hop and flows[i] != flows[i - 1] and pieces[i - 1].io_type == "output":
-                return f"a curve right after an underground exit at {_where(tiles[i])}"
 
     reach = hop_reach(spec.underground) if pairs else 0
     for a, b in pairs:
@@ -1158,9 +1159,9 @@ def straight_pieces(result: RouteResult) -> list[int]:
     """Indices of a route's plain belts fed straight from behind and carrying on straight.
 
     Where a splitter half may replace the belt, or a side-load land on it,
-    without either making a curve: a splitter output pushing into the side of
-    a curve, or a side-load onto a belt fed only from the side, would change
-    what the game builds.
+    without the belt itself being a curve: a side-load onto a belt fed only
+    from the side would change what the game builds. A curve right after it
+    is fine: one fed by a splitter output keeps both lanes (checked in the game).
     """
     spec = result.spec
     if spec is None or not result.ok:
@@ -1180,8 +1181,7 @@ def straight_pieces(result: RouteResult) -> list[int]:
             fed = flows[i - 1] == flows[i] and (
                 (before.name == spec.surface and before.other is None) or before.io_type == "output"
             )
-        onward = i == len(pieces) - 1 or flows[i + 1] == flows[i]
-        if fed and onward:
+        if fed:
             found.append(i)
     return found
 

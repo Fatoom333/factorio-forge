@@ -156,8 +156,9 @@ ends:
   every further one (`<id>/1`, ...) branches off a splitter put in place of a
   belt of a route already laid. That belt must be a *straight piece*: a plain
   belt fed straight from behind (by the belt or underground exit before it,
-  or the port or point it starts from) and carrying on straight, so neither
-  the splitter's input nor either output makes a curve. Its other half and
+  or the port or point it starts from), so the splitter's input makes no
+  curve; a curve right after it is allowed (a curve fed by a splitter output
+  keeps both lanes, checked in the game). Its other half and
   the tile past it must be free. The splitter is the only one of the belt's
   speed unless `splitter` names one; only two-tile splitters split in v1.
   `split` (optional, aligned with `to[1:]`) pins a branch to a tile of the
@@ -179,8 +180,8 @@ ends:
   the source lane on the entrance's open side gets through
   (`lanes.hood_passes`: a feeder from the left passes its right lane, one
   from the right its left lane), onto the near lane; the other lane stops.
-  A source whose items are all on the blocked lane is refused. Still to be
-  confirmed in the game.
+  A source whose items are all on the blocked lane is refused. Checked in
+  the game.
 - **Lane join**: `from` is a list of two sources and `to` one destination.
   The first source is routed to the destination; the second points into the
   other side of one of its curves (`curve_pieces`: a turn fed by a plain
@@ -325,8 +326,11 @@ lanes, junction, merges, delivered lanes and reason.
   join, which builds a new head;
 - the router does not create underground entrances to filter lanes; an
   entrance can be a merge target only through `onto.at`;
-- side-loading onto an underground exit and a curve fed by anything but a
-  belt are not tracked; loaders, linked belts and drills are unknown sources
+- side-loading onto an underground exit is not tracked (not tried in the
+  game); a belt fed from one side only by an underground exit or a splitter
+  output is a curve and keeps its lanes (checked in the game); a fast-tier
+  turn after one straight belt behind an exit is not tried in the game;
+  a curve fed by anything else is not tracked; loaders, linked belts and drills are unknown sources
   or exits; an inserter dropping onto a curve is unknown;
 - lane rates and ratio deadlocks beyond `lanes-mixed`; compression, which
   lane an inserter prefers and side-load priority;
