@@ -136,6 +136,21 @@ class TestPlannedRates:
         planned, _ = plan.planned_from_request(the_plan, tmp_path / "plan.json")
         assert "block-short" in codes(plan.build(the_plan, planned))
 
+    def test_targets_in_a_plan_take_the_requests_choices(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        block, alone = one_block()
+        amount = next(r["amount"] for r in recipes.raw[block["recipe"]]["results"] if r.get("type") != "fluid")
+        by_request = self.request_for(tmp_path, block["recipe"], block["machine"],
+                                      alone.crafts_per_second * amount / 2, monkeypatch)
+        spec = json.loads((tmp_path / "request.json").read_text(encoding="utf-8"))
+        by_targets = {"label": "ordered", **{k: v for k, v in spec.items() if k != "said"}}
+        wanted, warned = plan.planned_from_request(by_request, tmp_path / "plan.json")
+        got, said = plan.planned_from_targets(by_targets)
+        assert warned == [] and said == []
+        assert got == pytest.approx(wanted)
+        by_targets["blocks"] = [block]
+        built = plan.build(by_targets)
+        assert built.blocks[0].planned_crafts_per_second == pytest.approx(alone.crafts_per_second / 2)
+
     def test_a_blocks_own_planned_rate_is_its_share(self) -> None:
         block, alone = one_block()
         cps = alone.crafts_per_second

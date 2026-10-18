@@ -264,7 +264,10 @@ list gets a note. A plan with no request file can say what is ordered itself,
 `"targets": [{"item": "electronic-circuit", "per_second": 1}]` (or
 `per_minute`), and gets the same bill and the same `planned_rate`. With
 neither, the report keeps only the rates at full load. A plan names its order
-once: `request` together with `targets` is refused.
+once: `request` together with `targets` is refused. Next to `targets` the plan
+takes the request's own `recipe_choices`, `machine_choices`, `tiers`, `effects`, `surface` and `boundary`; without
+`recipe_choices` a target that several recipes make is planned with whichever the bill picks, and
+the blocks of the recipe actually built are "not in the bill".
 
 **Reach** is read per prototype: `max_distance` of an underground belt,
 `max_underground_distance` of a pipe-to-ground's underground connection. It
