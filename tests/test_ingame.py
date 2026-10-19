@@ -386,6 +386,8 @@ class TestRunTree:
         calls: list = []
         monkeypatch.setattr(ingame.subprocess, "Popen", popen)
         monkeypatch.setattr(ingame.subprocess, "run", lambda cmd, **k: calls.append(cmd))
+        # The system folder exists only on Windows; any machine runs this test.
+        monkeypatch.setattr(ingame, "system_tool", lambda *parts: Path(__file__).resolve().parent / "System32" / parts[-1])
         with pytest.raises(subprocess.TimeoutExpired):
             ingame.run_tree(["pwsh", "-File", "x"], timeout=1)
         assert len(calls) == 1 and calls[0][1:] == ["/T", "/F", "/PID", "4242"]

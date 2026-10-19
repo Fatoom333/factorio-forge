@@ -122,7 +122,8 @@ class TestNotesCommand:
         from factorio_forge import cli
 
         assert cli.main(["notes", "nothing-here"]) == 1
-        assert "no profile" in capsys.readouterr().err
+        # "no profile named ..." where a profile is active, "no active profile ..." where none is
+        assert "profile" in capsys.readouterr().err
 
 
 class TestFromSave:
