@@ -347,6 +347,57 @@ Power is a test source of one gigawatt, so power is never the limit; fluid
 sources are infinity pipes, so a fluid supply is never the limit either. The
 rates measured are those of a build fed exactly what the plan declares.
 
+## Handing a blueprint over: `deliver`
+
+```bash
+factorio-forge deliver plan.json [-o folder] [--save NAME_OR_PATH] [--no-game-check]
+```
+
+`deliver` is `build` with one more step: after the build has no problems, the
+blueprint is pasted into the real game, without a window, on an empty scratch
+surface (the companion mod's `tools/headless-run.ps1 -Blueprint`, which runs
+`/forge-verify`; about 20-30 seconds). The model behind `check` is quick and can
+be wrong; the game is not. It is a separate command rather than a flag of
+`build` so that `build` stays the fast loop used while a plan is being edited,
+and the file named `<name>.txt` only ever holds a blueprint the game placed.
+
+| Result | Exit code | Files |
+| --- | --- | --- |
+| the game placed everything | 0 | `<name>.txt`, report, drawing |
+| the game placed less than forge wrote, or refused a kind of entity | 1 | `<name>.unverified.txt` instead of `<name>.txt`, and `<name>.game-refused-test.py` |
+| the build has problems (the game is not asked) | 1 | report only |
+| the run itself failed or timed out | 1 | `<name>.unverified.txt` |
+| no way to ask the game | 0 | `<name>.txt`, and the line `not checked in the game: <reason>` |
+
+Not being able to ask is: not Windows, no PowerShell, no Factorio found, no
+companion mod set up, the save not found, or Factorio already running. The
+reason is printed and written to the report as it is. `--no-game-check` skips on
+purpose, and says so the same way.
+
+The test stub is a ready-to-paste test for `tests/`: it holds the plan and what
+the game said, and asserts that the model finds a problem in that plan too. Once
+the model is taught the rule, the case stays as a regression. Names and counts
+come from the game (mods choose entity names), so they are never put into a
+comment or into code by concatenation; the stub contains them only as Python
+literals written with `repr`, and the tool parses the stub back before writing it.
+
+Setting it up. Point `deliver` at the companion mod's repository folder with the
+environment variable `FACTORIO_FORGE_COMPANION` (or the key `companion` in
+`config.json` in the forge home, or `--companion`). The mod zip is made from that
+folder into a temporary one; the repository is not written to. If the variable
+names a built `.zip` instead, name the runner script with
+`FACTORIO_FORGE_RUNNER` (key `runner`). The save is the one the active profile
+was made from, found in the game's saves folder; `--save` takes a name or a
+path. The runner works on a copy in a throwaway folder and refuses to start if
+the real save, mod list or settings change; nothing is written to them. The
+companion mod must be 0.7.1 or newer.
+
+What the check cannot say: the scratch surface is empty, so it answers "does
+this place on its own", not "does it fit onto the player's base" (that needs the
+blueprint pasted at real coordinates on a copy of the save). When entities
+overlap, the game may merge them and name none; the count of placed against
+expected still withholds the blueprint, but the verdict has no names to show.
+
 ## Still to come
 
 Circuit logic is not yet checked in any meaningful sense. A combinator with no

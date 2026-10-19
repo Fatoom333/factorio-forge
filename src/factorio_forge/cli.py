@@ -934,6 +934,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     measure.register(sub)
 
+    from . import ingame
+
+    ingame.register(sub)
+
     return parser
 
 
