@@ -66,8 +66,8 @@ The three grades above are how the checks think. The report shows two levels:
 - **error** — the build will not be placed or will not work: a collision, an
   input nothing feeds, the wrong item on a lane, a supply that falls short, a
   power network in pieces.
-- **facts** — what the build is: rates, belt load ("the copper-cable belt is
-  40% loaded"), which items ride which lane, entity and machine counts, and
+- **facts** — what the build is: rates, belt load ("the copper-cable lane is
+  80% loaded"; one lane is measured against one lane's capacity, and the slower of belt and underground counts), which items ride which lane, entity and machine counts, and
   what was assumed. A fact carries no verdict; the reader decides what it means.
 
 There is no level in between. A doubtful finding (a *worth a look*) is an
@@ -81,6 +81,9 @@ with `--all`. `report.json` has `errors` and `facts` arrays (each entry has
 `text`, `kind`, and where they apply `code`, `detail`, `position`, and the
 check's own `severity`). The older `findings` and `warnings` fields are still
 written for compatibility and are **deprecated**: read `errors` and `facts`.
+The build's own warnings (a request file that cannot be read, a part of the plan
+it ignored) are errors too, with `kind: "warning"`: they are failures, not
+assumptions.
 
 Every finding code, and how it is shown (a code marked "error; note: fact" is an
 error when the check graded it a problem or worth a look, and a fact when it

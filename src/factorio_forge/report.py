@@ -92,6 +92,7 @@ RULES: dict[str, str] = {
 _CHECK_HINTS: dict[str, str] = {
     "route-short-supply": "Declare more supply at the start of the connection, or lower what the destination is asked for.",
 }
+_WARNING_HINT = "The build ignored part of the plan or hit a problem while placing; fix this and build again."
 _GENERIC_HINT = "Check whether this is intended; if not, part of the build will not work."
 
 _RANK = {Severity.PROBLEM: 0, Severity.SUSPECT: 1, Severity.NOTE: 2}
@@ -178,30 +179,53 @@ def from_inspection(report) -> Presented:
     return out
 
 
-def _belt_load(result) -> Line | None:
-    """`the iron-plate belt is 40% loaded`, when the route knows its rate and belt."""
+def belt_capacity(surface: str, underground: str | None, lanes_used: int) -> tuple[float, str] | None:
+    """Items per second a belt route carries, and the prototype that limits it.
+
+    The slowest of the surface belt and its underground; one lane's share when
+    the route uses only one lane, both lanes otherwise. This is the rule the
+    route check (`route-belt-slow`) applies; keep the two the same.
+    """
+    from draftsman.data import entities as entity_data
+
     from . import layout
 
+    speeds = [surface] + ([underground] if underground else [])
+    slowest = min(speeds, key=lambda n: (entity_data.raw.get(n) or {}).get("speed") or float("inf"))
+    try:
+        cap = layout.lane_throughput(slowest) if lanes_used == 1 else layout.belt_throughput(slowest)
+    except layout.LayoutError:
+        return None
+    return cap, slowest
+
+
+def _belt_load(result) -> Line | None:
+    """`the iron-plate belt is 40% loaded`, when the route knows its rate and belt."""
     spec = result.spec
     if not result.ok or result.kind != "belt" or result.rate is None or spec is None:
         return None
-    try:
-        capacity = layout.belt_throughput(spec.surface)
-    except layout.LayoutError:
+    if result.lanes is not None:
+        lane_items = [i for i in result.lanes if i]
+    else:
+        lane_items = [i for i in (spec.start.items or spec.goal.items) if i]
+    found = belt_capacity(spec.surface, spec.underground, len(lane_items))
+    if found is None:
         return None
-    items = [i for i in dict.fromkeys(result.lanes or ()) if i]
+    capacity, limit = found
+    items = [i for i in dict.fromkeys(lane_items)]
     what = "/".join(items) if items else "route"
     share = 100 * result.rate / capacity if capacity else 0
+    noun = "lane" if len(lane_items) == 1 else "belt"
     return Line(
         FACT,
-        f"route {result.id}: the {what} belt is {share:.0f}% loaded ({result.rate:.4g}/s of {capacity:.4g}/s, {spec.surface})",
+        f"route {result.id}: the {what} {noun} is {share:.0f}% loaded ({result.rate:.4g}/s of {capacity:.4g}/s, {limit})",
         "route",
     )
 
 
-def _route_line(r) -> Line:
+def _route_line(r) -> Line | None:
     if not r.ok:
-        return Line(FACT, f"route {r.id}: not built ({r.reason})", "route")
+        return None  # the route-failed error already says why, and where
     text = f"route {r.id}: {r.kind} {r.length} tile(s)"
     if r.hops:
         text += f", {r.hops} underground pair(s)"
@@ -249,7 +273,9 @@ def from_build(result) -> Presented:
     for block in result.blocks:
         facts.extend(_block_lines(block))
     for r in result.routes:
-        facts.append(_route_line(r))
+        line = _route_line(r)
+        if line is not None:
+            facts.append(line)
         load = _belt_load(r)
         if load is not None:
             facts.append(load)
@@ -262,9 +288,20 @@ def from_build(result) -> Presented:
         tail = f" (blocks {', '.join(map(str, where))})" if len(result.blocks) > 1 and len(where) > 1 else \
             (f" (block {where[0]})" if len(result.blocks) > 1 else "")
         facts.append(Line(FACT, f"assumed: {note}{tail}", "assumed"))
+    # What the build says about itself while it runs (a request file that could
+    # not be read, a plan part it ignored, a library warning): failures, not
+    # assumptions, so they go with the errors, after the findings.
     for warning in result.warnings:
-        facts.append(Line(FACT, f"assumed: {warning}", "assumed"))
+        out.errors.append(Line(ERROR, warning, "warning", None, _WARNING_HINT))
     return out
+
+
+def _where(line: Line) -> str:
+    """` (x, y)`, unless the text already names that spot."""
+    if not line.position:
+        return ""
+    spot = f"({line.position[0]}, {line.position[1]})"
+    return "" if spot in line.text else f" {spot}"
 
 
 def format_lines(presented: Presented, head: str = "", *, facts: bool = True) -> list[str]:
@@ -274,16 +311,14 @@ def format_lines(presented: Presented, head: str = "", *, facts: bool = True) ->
         lines.append("")
         lines.append("errors:")
         for e in presented.errors:
-            where = f" ({e.position[0]}, {e.position[1]})" if e.position else ""
-            lines.append(f"  {e.text}{where}")
+            lines.append(f"  {e.text}{_where(e)}")
             if e.detail:
                 lines.append(f"      {e.detail}")
     if facts and presented.facts:
         lines.append("")
         lines.append("facts:")
         for f in presented.facts:
-            where = f" ({f.position[0]}, {f.position[1]})" if f.position else ""
-            lines.append("  " + f.text + where)
+            lines.append("  " + f.text + _where(f))
             if f.detail:
                 lines.append(f"      {f.detail}")
     return lines

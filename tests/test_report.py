@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import json
 import warnings
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -221,3 +222,127 @@ class TestCheckOutput:
         lines = capsys.readouterr().out.splitlines()
         assert lines[0] == "no errors"
         assert "errors:" not in lines
+
+
+def _belts_by_speed() -> list[str]:
+    from draftsman.data import entities as entity_data
+
+    from factorio_forge import layout
+
+    names = [n for n, e in entity_data.raw.items() if e.get("type") == "transport-belt" and "speed" in e]
+    return sorted(names, key=lambda n: layout.belt_throughput(n))
+
+
+def _route(lanes, rate, surface, underground=None, ok=True):
+    ends = SimpleNamespace(items=tuple(lanes))
+    spec = SimpleNamespace(surface=surface, underground=underground, start=ends, goal=ends)
+    return SimpleNamespace(id="r", kind="belt", ok=ok, rate=rate, lanes=tuple(lanes), spec=spec)
+
+
+class TestBeltLoad:
+    def test_one_lane_is_measured_against_one_lane(self) -> None:
+        from factorio_forge import layout
+
+        belt = _belts_by_speed()[0]
+        cap = layout.lane_throughput(belt)
+        line = report._belt_load(_route(("", "copper-cable"), cap / 2, belt))
+        assert line is not None and line.level == report.FACT
+        assert "copper-cable lane is 50% loaded" in line.text
+        assert f"{cap:.4g}/s" in line.text and belt in line.text
+
+    def test_two_lanes_are_measured_against_the_whole_belt(self) -> None:
+        from factorio_forge import layout
+
+        belt = _belts_by_speed()[0]
+        cap = layout.belt_throughput(belt)
+        line = report._belt_load(_route(("a", "b"), cap / 4, belt))
+        assert "belt is 25% loaded" in line.text
+
+    def test_the_slower_underground_sets_the_capacity(self) -> None:
+        from factorio_forge import layout
+
+        belts = _belts_by_speed()
+        if len({layout.belt_throughput(b) for b in belts}) < 2:
+            pytest.skip("the active data has only one belt speed")
+        slow, fast = belts[0], belts[-1]
+        for surface, underground in ((fast, slow), (slow, fast)):
+            line = report._belt_load(_route(("a", "b"), layout.belt_throughput(slow) / 2, surface, underground))
+            assert "50% loaded" in line.text and slow in line.text
+
+    def test_a_failed_route_has_no_load_and_no_fact_line(self) -> None:
+        belt = _belts_by_speed()[0]
+        failed = _route(("a", ""), 1.0, belt, ok=False)
+        assert report._belt_load(failed) is None
+        assert report._route_line(failed) is None
+
+
+class _Result:
+    """The parts of a build result `from_build` reads."""
+
+    def __init__(self, warnings=(), routes=()) -> None:
+        self.findings, self.blocks = [], []
+        self.routes, self.warnings, self.power_networks = list(routes), list(warnings), 1
+        self.blueprint = type("B", (), {"entities": []})()
+
+
+class TestBuildWarnings:
+    def test_a_build_warning_is_an_error_with_a_hint(self) -> None:
+        out = report.from_build(_Result(["request missing.json: no such file"]))
+        assert [e.kind for e in out.errors] == ["warning"]
+        assert out.errors[0].detail and "missing.json" in out.errors[0].text
+        assert not any(f.kind == "assumed" and "missing.json" in f.text for f in out.facts)
+        assert report.format_lines(out, "plan")[0] == "plan: 1 error"
+
+    def test_a_plan_naming_a_missing_request_file_counts_as_an_error(
+        self, plan_file, tmp_path, capsys: pytest.CaptureFixture
+    ) -> None:
+        data = json.loads(plan_file.read_text(encoding="utf-8"))
+        data["request"] = "no-such-request.json"
+        plan_file.write_text(json.dumps(data), encoding="utf-8")
+        assert cli.main(["build", str(plan_file), "--no-render", "-o", str(tmp_path / "out")]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].endswith("error") or lines[0].endswith("errors")
+        assert not lines[0].endswith("no errors")
+        assert any("no-such-request.json" in l for l in lines[: lines.index("facts:")])
+
+
+class TestPosition:
+    def test_a_position_already_in_the_text_is_not_repeated(self) -> None:
+        f = Finding(Severity.PROBLEM, "overlap", "nothing enters at (0, 12)", "", (0, 12))
+        text = chr(10).join(report.format_lines(report.from_findings([f])))
+        assert text.count("(0, 12)") == 1
+
+    def test_a_position_not_in_the_text_is_added(self) -> None:
+        f = Finding(Severity.PROBLEM, "overlap", "two things overlap", "", (3, 4))
+        assert "  two things overlap (3, 4)" in report.format_lines(report.from_findings([f]))
+
+
+class TestCheckHiddenFacts:
+    def _blueprint(self, tmp_path: Path) -> Path:
+        bp = Blueprint()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            bp.entities.append(prototypes.chest(), tile_position=(0, 0))
+        path = tmp_path / "bp.txt"
+        path.write_text(bp.to_string(), encoding="utf-8")
+        return path
+
+    def test_all_shows_the_facts_without_it_they_are_counted(
+        self, tmp_path, monkeypatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        fact = Finding(Severity.NOTE, "lanes-swapped", "lanes swapped", "", None)
+        real = inspection.inspect
+
+        def fake(bp):
+            out = real(bp)
+            out.findings = list(out.findings) + [fact]
+            return out
+
+        monkeypatch.setattr(inspection, "inspect", fake)
+        path = self._blueprint(tmp_path)
+        cli.main(["check", str(path)])
+        short = capsys.readouterr().out
+        assert "lanes swapped" not in short and "1 more fact hidden" in short
+        cli.main(["check", str(path), "--all"])
+        full = capsys.readouterr().out
+        assert "lanes swapped" in full and "hidden" not in full
