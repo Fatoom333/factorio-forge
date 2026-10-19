@@ -189,7 +189,7 @@ def world(companion: Path, tmp_path: Path, monkeypatch):
     binary = tmp_path / "factorio.exe"
     binary.write_text("")
     monkeypatch.setattr(ingame.sys, "platform", "win32")
-    monkeypatch.setattr(ingame.shutil, "which", lambda name: str(tmp_path / "powershell.exe"))
+    monkeypatch.setattr(ingame, "system_tool", lambda *parts: tmp_path / parts[-1])
     monkeypatch.setattr(paths, "factorio_binary", lambda: binary)
     monkeypatch.setattr(paths, "saves_dir", lambda: saves)
     monkeypatch.setattr(paths, "factorio_user_dir", lambda: tmp_path)
@@ -243,7 +243,7 @@ class TestLocate:
         if what == "platform":
             monkeypatch.setattr(ingame.sys, "platform", "linux")
         elif what == "no-shell":
-            monkeypatch.setattr(ingame.shutil, "which", lambda name: None)
+            monkeypatch.setattr(ingame, "system_tool", lambda *parts: None)
         elif what == "no-companion":
             monkeypatch.delenv(ingame.ENV_COMPANION)
         else:
@@ -388,7 +388,8 @@ class TestRunTree:
         monkeypatch.setattr(ingame.subprocess, "run", lambda cmd, **k: calls.append(cmd))
         with pytest.raises(subprocess.TimeoutExpired):
             ingame.run_tree(["pwsh", "-File", "x"], timeout=1)
-        assert calls == [["taskkill", "/T", "/F", "/PID", "4242"]]
+        assert len(calls) == 1 and calls[0][1:] == ["/T", "/F", "/PID", "4242"]
+        assert Path(calls[0][0]).name.lower() == "taskkill.exe" and Path(calls[0][0]).is_absolute()
         assert "proc.kill" in killed
         assert seen["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         assert seen["stdin"] == subprocess.DEVNULL
@@ -534,3 +535,17 @@ class TestDeliver:
         report = json.loads((tmp_path / "Demo-plan.report.json").read_text())
         assert report["warnings"] == ["rate was lowered"]
         assert "PLANNED = {'x': 1.0}" in (tmp_path / "Demo-plan.game-refused-test.py").read_text()
+
+
+class TestSystemTools:
+    def test_a_tool_is_taken_from_the_system_folder_not_from_path(self, tmp_path, monkeypatch):
+        (tmp_path / "System32").mkdir()
+        (tmp_path / "System32" / "taskkill.exe").write_bytes(b"")
+        monkeypatch.setenv("SystemRoot", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "taskkill.exe").write_bytes(b"")  # a planted copy in the current folder
+        assert ingame.system_tool("System32", "taskkill.exe") == tmp_path / "System32" / "taskkill.exe"
+
+    def test_a_missing_tool_is_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SystemRoot", str(tmp_path))
+        assert ingame.system_tool("System32", "taskkill.exe") is None

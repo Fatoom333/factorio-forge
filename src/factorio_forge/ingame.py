@@ -279,10 +279,24 @@ def stub_reads_back(source: str, plan: dict, verdict: Verdict, planned: dict | N
 # --------------------------------------------------------------------------
 
 
+def system_tool(*parts: str) -> Path | None:
+    """A Windows tool by its full path under %SystemRoot%, never looked up on PATH.
+
+    Looking a bare name up would run whatever file of that name sits in the
+    current folder or early on PATH; the system folder is the only one trusted.
+    """
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    tool = Path(root, *parts)
+    return tool if tool.is_file() else None
+
+
 def kill_tree(pid: int) -> None:
     """End a process and everything it started (the game is a child of the runner)."""
+    taskkill = system_tool("System32", "taskkill.exe")
+    if taskkill is None:
+        return
     try:
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(int(pid))], capture_output=True,
+        subprocess.run([str(taskkill), "/T", "/F", "/PID", str(int(pid))], capture_output=True,
                        check=False, timeout=30)
     except (OSError, subprocess.SubprocessError):
         pass
@@ -419,9 +433,10 @@ def locate(profile_save: str | None, *, save: str | None = None, companion: str 
 
     if not sys.platform.startswith("win"):
         raise NotChecked("the in-game check runs through PowerShell on Windows only")
-    shell = shutil.which("powershell") or shutil.which("pwsh")
-    if not shell:
-        raise NotChecked("PowerShell was not found")
+    shell = system_tool("System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    if shell is None:
+        raise NotChecked("Windows PowerShell was not found in the system folder")
+    shell = str(shell)
     binary = paths.factorio_binary()
     if binary is None:
         raise NotChecked("Factorio is not installed here, or its folder was not found")
