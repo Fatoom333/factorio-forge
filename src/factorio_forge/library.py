@@ -24,6 +24,7 @@ profile's notes::
 ``""`` for a lane nothing uses; a name stands for one item and ``a+b`` for
 several. A pipe port holds the one fluid's name. Optional fields: ``item_rates``,
 ``lanes_unknown`` and ``also_at`` (the other ends of the same pipe line) on a port, ``machines`` and ``recipes`` in the shape,
+``plan_targets`` in ``measured`` (the whole plan's delivered rates; ``rate`` is the block's own),
 ``notes`` and ``check`` on the block.
 
 Ports found in a cut-out blueprint
@@ -147,16 +148,23 @@ def remove(folder: Path, name: str) -> None:
 # --------------------------------------------------------------------------
 
 
+def is_file(source: str) -> bool:
+    """Whether `source` names an existing file (and so is not a blueprint string, whatever it starts with)."""
+    try:
+        return Path(source).is_file()
+    except (OSError, ValueError):  # a long blueprint string is no file name; neither is one with a NUL
+        return False
+
+
 def read_blueprint(source: str, index: int | None = None):
     """A Blueprint from a string or from a file holding one (a region export, a saved string)."""
     from draftsman.blueprintable import Blueprint, BlueprintBook, get_blueprintable_from_string
 
     text = source
-    if not source.lstrip().startswith("0"):
-        path = Path(source)
-        if not path.is_file():
-            raise LibraryError(f"{source!r} is neither a blueprint string nor a file")
-        text = path.read_text(encoding="utf-8-sig")
+    if is_file(source):
+        text = Path(source).read_text(encoding="utf-8-sig")
+    elif not source.lstrip().startswith("0"):
+        raise LibraryError(f"{source!r} is neither a blueprint string nor a file")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # overlaps and unknown names are the check's to report
@@ -320,12 +328,20 @@ def _belt_ports(entities: list, box: Box, lane_map: lanes.LaneMap, notes: list[s
             reach = inspection.inserter_reach(entity)
             if reach is not None:
                 drops.add(lanes._floor(reach[1]))
+    # an underground entrance and exit that belong together, both inside the box: a tunnel, not a way out of the box
+    paired = set()
+    for target, sources in lane_map.behind.items():
+        if lane_map.nodes[target].kind == "exit":
+            paired.add(target)
+            paired.update(sources)
     found = []
     for tile, node in sorted(lane_map.nodes.items()):
         ahead = _step(tile, node.direction)
         behind = _step(tile, OPPOSITE[node.direction])
         fed = bool(lane_map.behind.get(tile)) or bool(lane_map.sides.get(tile))
-        if node.kind in ("belt", "splitter", "exit") and not box.has(ahead):
+        # an entrance whose exit is not in the block (it lies beyond the edge) is where the line leaves
+        leaves = node.kind in ("belt", "splitter", "exit") or (node.kind == "entrance" and tile not in paired)
+        if leaves and not box.has(ahead):
             left, right = lane_map.at(tile)
             put_here = bool((left.unknown | right.unknown) & drops)
             if left.items or right.items or put_here:
@@ -335,7 +351,12 @@ def _belt_ports(entities: list, box: Box, lane_map: lanes.LaneMap, notes: list[s
                 })
             else:
                 notes.append(f"the belt leaving the box at {tuple(box.rel(tile))} carries nothing the block makes; taken for the tail of an input line")
-        if node.kind in ("belt", "splitter", "entrance") and not box.has(behind) and not fed:
+        # an exit whose entrance is not in the block (it lies beyond the edge) is where the line comes in
+        arrives = (node.kind in ("belt", "splitter", "entrance") and not box.has(behind) and not fed) or (
+            node.kind == "exit" and tile not in paired)
+        if arrives:
+            if node.kind == "exit" and not (box.has(ahead) and not box.has(behind)):
+                notes.append(f"the underground exit at {tuple(box.rel(tile))} has its entrance outside the block; its port stands at the exit")
             wanted, anything = _taken_downstream(lane_map, tile)
             if wanted or anything:
                 found.append({
@@ -536,7 +557,7 @@ def add_blueprint(folder: Path, name: str, source: str, *, index: int | None = N
     """Save a blueprint the player cut from their base."""
     check_name(name)
     blueprint = read_blueprint(source, index)
-    found_from = origin or (f"blueprint file {Path(source).name}" if not source.lstrip().startswith("0") else "a blueprint string")
+    found_from = origin or (f"blueprint file {Path(source).name}" if is_file(source) else "a blueprint string")
     entry = make_entry(name, blueprint, source=kind, found_from=found_from, why=why, allow_errors=allow_errors)
     save(folder, entry, replace)
     return entry
@@ -637,13 +658,33 @@ def _share(group) -> float | None:
     return group.shares.get("working") if group is not None else None
 
 
+def _block_rate(entry: dict, produced: dict, share: float | None) -> dict[str, float]:
+    """What this block makes, per second, by good: the run's production figure for its products, else its capacity times the share.
+
+    The production statistics count an item over the whole plan, so a good that two blocks make shows the sum.
+    """
+    shape = entry.get("shape") or {}
+    goods = [p["name"] for p in (recipe_data.raw.get(shape.get("recipe")) or {}).get("results") or []]
+    capacity: Counter = Counter()
+    for port in entry.get("ports") or []:
+        if port.get("dir") == "out":
+            for good, rate in (port.get("item_rates") or {}).items():
+                capacity[good] += rate
+    goods = goods or sorted(capacity)
+    rate = {g: round(float(produced[g]), 6) for g in goods if produced.get(g)}
+    if not rate and share is not None:
+        rate = {g: round(r * share, 6) for g, r in capacity.items()}
+    return rate
+
+
 def save_measured(plan_data: dict, result, folder: Path | None = None, found_from: str | None = None) -> SaveReport:
     """When a measured run met every target, keep the plan's blocks as blocks forge found working.
 
     `result` is a `measure.Comparison`. Blocks whose machines stood starved or blocked in the run are left
-    out (they did not work well even though the whole did), as are blocks the library already holds
-    (same blueprint) and blocks that cannot be built alone. Each is saved with source "forge", `why` saying how much
-    of the measured time its machines worked, and the measured numbers.
+    out (they did not work well even though the whole did), as are blocks whose machines had no power, blocks with
+    no measured machines of their own, blocks the library already holds (same blueprint) and blocks that cannot be
+    built alone. Each is saved with source "forge", `why` saying how much of the measured time its machines worked,
+    and `measured`: the working share, this block's own `rate` by good, and the plan's delivered rates under `plan_targets`.
     """
     report = SaveReport()
     if folder is None:
@@ -652,18 +693,23 @@ def save_measured(plan_data: dict, result, folder: Path | None = None, found_fro
         report.skipped.append("the whole plan: not every target was met, so no block is offered")
         return report
     held = {data.get("blueprint") for _, data in entries(folder)[0]}
-    total = sum(g.count for g in result.groups) or 0
-    overall = (sum(g.count * g.shares.get("working", 0.0) for g in result.groups) / total) if total else None
-    rates = {t.item: round(t.measured, 6) for t in result.targets}
+    plan_rates = {t.item: round(t.measured, 6) for t in result.targets}
+    produced = getattr(result, "produced", None) or {}
     for index, block in enumerate(plan_data.get("blocks") or []):
         label = block.get("id") or f"block {index}"
         recipe, machine = block.get("recipe"), block.get("machine")
-        group = next((g for g in result.groups if g.recipe == recipe and g.name == machine), None)
-        if group is not None and (group.starved or group.blocked):
+        group = next((g for g in result.groups if g.name == machine and (recipe is None or g.recipe == recipe)), None)
+        if group is None:
+            report.skipped.append(f"{label}: no measured machines of this block")
+            continue
+        if group.starved or group.blocked:
             why = "starved" if group.starved else "blocked"
             report.skipped.append(f"{label}: its machines stood {why} for a good part of the run")
             continue
-        share = _share(group) if group is not None else overall
+        if group.unpowered:
+            report.skipped.append(f"{label}: its machines stood without power for part of the run")
+            continue
+        share = _share(group)
         try:
             blueprint, ports = _alone(block)
             if blueprint.to_string() in held:
@@ -672,16 +718,20 @@ def save_measured(plan_data: dict, result, folder: Path | None = None, found_fro
             name = _free_name(folder, f"{recipe or 'block'}")
             box = bounding_box(list(blueprint.entities))
             share_text = f"{share * 100:.0f}% of the measured time" if share is not None else "an unmeasured share of the time"
-            counted = f"{group.count} x {group.name}" if group is not None else "the plan's machines"
+            lib_ports = _library_ports(ports, box)
             entry = make_entry(
                 name, blueprint, source="forge",
                 found_from=found_from or f"measure run of plan block {label}",
-                why=f"every target of the plan was met in a measured run; {counted} worked {share_text}",
-                ports=_library_ports(ports, box), hint=_hint(block))
+                why=f"every target of the plan was met in a measured run; {group.count} x {group.name} worked {share_text}",
+                ports=lib_ports, hint=_hint(block))
         except LibraryError as exc:
             report.skipped.append(f"{label}: {str(exc).splitlines()[0]}")
             continue
-        entry["measured"] = {"working_share": None if share is None else round(share, 4), "rate": rates}
+        entry["measured"] = {
+            "working_share": None if share is None else round(share, 4),
+            "rate": _block_rate(entry, produced, share),
+            "plan_targets": plan_rates,
+        }
         save(folder, entry)
         held.add(entry["blueprint"])
         report.saved.append(name)
@@ -697,13 +747,21 @@ def library_folder(profile_name: str | None) -> tuple[Path, str]:
     """The library folder of a profile (the active one when none is named), and the profile's name."""
     from .profile import Profile, ProfileError
 
+    from . import paths
+
     name = profile_name or Profile.active_profile_name()
     if not name:
         raise LibraryError("no active profile: name one with --profile, or activate one first")
+    if (name in (".", "..") or any(c in name for c in "/\\:\0") or name != name.strip()):
+        raise LibraryError(f"{name!r} is not a profile name (profiles: {', '.join(Profile.list_all()) or 'none'})")
     try:
-        return Profile.load(name).library_dir, name
+        folder = Profile.load(name).library_dir
     except ProfileError as exc:
         raise LibraryError(str(exc)) from exc
+    root = paths.profiles_root().resolve()
+    if root not in folder.resolve().parents:
+        raise LibraryError(f"the library of {name!r} would lie outside the profiles folder; not used")
+    return folder, name
 
 
 def active_folder() -> Path:

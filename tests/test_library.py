@@ -107,8 +107,14 @@ class TestPortsFromABlueprint:
         for mine, theirs in zip(found, planned):
             assert mine["at"] == rel(box, theirs)
             assert mine["direction"] == theirs["direction"]
-            assert [i.split("+") if i else [] for i in mine["items"]] == [list(set(i.split("+"))) if i else [] for i in theirs["items"]] or \
-                sorted(filter(None, mine["items"])) == sorted(filter(None, theirs["items"]))
+            # lane by lane: a port with its two lanes swapped is a different port. An in port is told by what the
+            # machines take (inserters pick from either lane), so there both lanes hold the union.
+            lanes_of = lambda items: [set(i.split("+")) - {""} for i in items]  # noqa: E731
+            if mine["dir"] == "in":
+                union = set().union(*lanes_of(theirs["items"]))
+                assert lanes_of(mine["items"]) == [union, union]
+            else:
+                assert lanes_of(mine["items"]) == lanes_of(theirs["items"])
             assert mine["rate"] == pytest.approx(theirs["rate"])
         assert [p["id"] for p in found] == ["belt-in-1", "belt-out-1"]
         assert entry["source"] == "player"
@@ -160,6 +166,15 @@ class TestPortsFromABlueprint:
         assert entry["ports"] == [] and entry["size"] == [3, 3]
         assert any("no ports" in n for n in entry["notes"])
 
+    def test_a_file_whose_name_starts_with_zero_is_read_as_a_file(self, profile: Profile, tmp_path: Path) -> None:
+        source = region_file(tmp_path, built((1, 0, 1, 0)).blueprint, "0-smelter.txt")
+        entry = library.add_blueprint(profile.library_dir, "zero", str(source))
+        assert entry["found_from"] == "blueprint file 0-smelter.txt" and len(entry["ports"]) == 2
+        nested = tmp_path / "0"
+        nested.mkdir()
+        entry = library.add_blueprint(profile.library_dir, "zero-dir", str(region_file(nested, built((1, 0, 1, 0)).blueprint)))
+        assert "region-1.txt" in entry["found_from"]
+
     def test_a_blueprint_string_works_as_well_as_a_file(self, profile: Profile) -> None:
         result = built((1, 0, 1, 0))
         entry = library.add_blueprint(profile.library_dir, "from-string", result.blueprint.to_string())
@@ -188,6 +203,57 @@ class TestPortsFromABlueprint:
             library.add_blueprint(profile.library_dir, "junk", "0eNotAString")
         with pytest.raises(library.LibraryError, match="neither"):
             library.add_blueprint(profile.library_dir, "nofile", str(tmp_path / "missing.txt"))
+
+
+def swapped(blueprint, tile: tuple[int, int], name: str, **fields):
+    """A copy of the blueprint with the belt on `tile` replaced by another entity."""
+    from draftsman.blueprintable import get_blueprintable_from_string
+
+    copy = get_blueprintable_from_string(blueprint.to_string())
+    old = next(e for e in copy.entities if (int(e.tile_position.x), int(e.tile_position.y)) == tile and e.type == "transport-belt")
+    copy.entities.remove(old)
+    copy.entities.append(name, tile_position=tile, **fields)
+    return copy
+
+
+def ports_of(blueprint) -> list[tuple]:
+    entities = list(blueprint.entities)
+    found = library.find_ports(entities, library.bounding_box(entities), [])
+    return [(p["kind"], p["dir"], tuple(p["at"]), p["direction"], tuple(p["items"]), p["rate"]) for p in found]
+
+
+class TestEdgesThatAreNotPlainBelts:
+    def test_an_underground_entrance_at_the_out_port_and_an_exit_at_the_in_port_keep_the_ports(self) -> None:
+        result = built((1, 0, 1, 0))
+        base = ports_of(result.blueprint)
+        assert [p[:2] for p in base] == [("belt", "in"), ("belt", "out")]
+        (_, _, in_at, direction, *_), (_, _, out_at, *_) = base
+        underground = prototypes.underground_belt()
+        out_swapped = swapped(result.blueprint, out_at, underground, direction=direction, io_type="input")
+        assert library.problems_in(out_swapped) == []
+        assert ports_of(out_swapped) == base
+        in_swapped = swapped(result.blueprint, in_at, underground, direction=direction, io_type="output")
+        assert library.problems_in(in_swapped) == []
+        assert ports_of(in_swapped) == base
+
+    def test_a_line_running_through_the_block_is_one_in_port_and_a_note_on_its_tail(self, profile: Profile, tmp_path: Path) -> None:
+        result = built((1, 0, 1, 0))
+        entry = library.add_blueprint(profile.library_dir, "through", str(region_file(tmp_path, result.blueprint)))
+        assert [p["dir"] for p in entry["ports"]].count("in") == 1
+        assert [p["dir"] for p in entry["ports"]].count("out") == 1  # only the line the block makes
+        tails = [n for n in entry["notes"] if "tail of an input line" in n]
+        assert len(tails) == 1  # the line that carries on out of the block is said to, not dropped
+
+    def test_a_splitter_at_the_edge_gives_an_out_port_for_each_of_its_halves(self) -> None:
+        result = built((1, 0, 1, 0))
+        base = ports_of(result.blueprint)
+        (_, _, out_at, direction, *_) = base[1]
+        copy = swapped(result.blueprint, out_at, prototypes.splitter(), direction=direction)
+        found = ports_of(copy)
+        outs = [p for p in found if p[1] == "out"]
+        assert len(outs) == 2 and {p[2][0] for p in outs} == {out_at[0]} and {p[2][1] for p in outs} == {out_at[1], out_at[1] + 1}
+        assert sum(p[5] for p in outs) == pytest.approx(base[1][5])
+        assert [p for p in found if p[1] == "in"] == [base[0]]
 
 
 # --------------------------------------------------------------------------
@@ -279,6 +345,15 @@ class TestCommands:
         assert cli.main(["library", "list", "--profile", "nobody"]) == 1
         assert "no profile named" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("name", ["../x", "..", "../..", "a/b", "a\\b", "C:x", "x\0y", " "])
+    def test_a_profile_name_that_is_a_path_is_refused_and_nothing_is_written(self, profile: Profile, tmp_path: Path, capsys, name: str) -> None:
+        source = region_file(tmp_path, built((1, 0, 1, 0)).blueprint)
+        before = {p for p in tmp_path.rglob("*")}
+        assert cli.main(["library", "add", "x", str(source), "--profile", name]) == 1
+        assert cli.main(["library", "list", "--profile", name]) == 1
+        assert "not a profile name" in capsys.readouterr().err
+        assert {p for p in tmp_path.rglob("*")} == before
+
     def test_no_active_profile_is_said(self, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(Profile, "active_profile_name", staticmethod(lambda: None))
         assert cli.main(["library", "list"]) == 1
@@ -337,13 +412,13 @@ class TestFromAPlan:
 # --------------------------------------------------------------------------
 
 
-def comparison(met: bool = True, groups: list | None = None, plan_data: dict | None = None):
+def comparison(met: bool = True, groups: list | None = None, plan_data: dict | None = None, produced: dict | None = None):
     plan_data = plan_data or two_block_plan()
     groups = groups if groups is not None else [
         measure.MachineGroup(b["machine"], b["recipe"], 2, {"working": 0.8, "waiting_input": 0.1}, {}) for b in plan_data["blocks"]
     ]
     target = SimpleNamespace(item="x", measured=1.0 if met else 0.1, met=met)
-    return SimpleNamespace(all_met=met, targets=[target], groups=groups)
+    return SimpleNamespace(all_met=met, targets=[target], groups=groups, produced=produced or {})
 
 
 class TestMeasuredSave:
@@ -354,9 +429,55 @@ class TestMeasuredSave:
         for name in report.saved:
             entry = library.load(profile.library_dir, name)
             assert entry["source"] == "forge" and "80%" in entry["why"] and "every target" in entry["why"]
-            assert entry["measured"]["working_share"] == pytest.approx(0.8) and entry["measured"]["rate"] == {"x": 1.0}
+            assert entry["measured"]["working_share"] == pytest.approx(0.8) and entry["measured"]["plan_targets"] == {"x": 1.0}
             assert entry["ports"] and entry["shape"]["recipe"]
         assert any(line.startswith("library: saved") for line in report.lines())
+
+    def test_a_blocks_measured_rate_is_its_own_products_not_the_plans_targets(self, profile: Profile) -> None:
+        from draftsman.data import recipes
+
+        the_plan = two_block_plan()
+        first, second = the_plan["blocks"]
+        mine = {p["name"] for p in recipes.raw[first["recipe"]]["results"]}
+        theirs = {p["name"] for p in recipes.raw[second["recipe"]]["results"]}
+        if mine & theirs:
+            pytest.skip("both blocks make the same good")
+        produced = {**{g: 0.25 for g in mine}, **{g: 0.75 for g in theirs}}
+        report = library.save_measured(the_plan, comparison(plan_data=the_plan, produced=produced), profile.library_dir)
+        by_recipe = {library.load(profile.library_dir, n)["shape"]["recipe"]: library.load(profile.library_dir, n) for n in report.saved}
+        assert set(by_recipe[first["recipe"]]["measured"]["rate"]) == mine
+        assert set(by_recipe[second["recipe"]]["measured"]["rate"]) == theirs
+        assert by_recipe[first["recipe"]]["measured"]["plan_targets"] == {"x": 1.0}
+
+    def test_without_production_figures_the_rate_is_the_out_capacity_times_the_share(self, profile: Profile) -> None:
+        the_plan = two_block_plan()
+        report = library.save_measured(the_plan, comparison(plan_data=the_plan), profile.library_dir)
+        assert report.saved
+        for name in report.saved:
+            entry = library.load(profile.library_dir, name)
+            capacity = {g: r for p in entry["ports"] if p["dir"] == "out" for g, r in p.get("item_rates", {}).items()}
+            assert capacity and entry["measured"]["rate"] == {g: pytest.approx(r * 0.8, abs=1e-5) for g, r in capacity.items()}
+
+    def test_a_block_whose_machines_lacked_power_is_left_out(self, profile: Profile) -> None:
+        the_plan = two_block_plan()
+        first, second = the_plan["blocks"]
+        if (first["machine"], first["recipe"]) == (second["machine"], second["recipe"]):
+            pytest.skip("both blocks run the same recipe on the same machine")
+        groups = [
+            measure.MachineGroup(first["machine"], first["recipe"], 2, {"working": 0.7, "no_power": 0.3}, {}),
+            measure.MachineGroup(second["machine"], second["recipe"], 2, {"working": 0.9}, {}),
+        ]
+        report = library.save_measured(the_plan, comparison(groups=groups, plan_data=the_plan), profile.library_dir)
+        assert len(report.saved) == 1 and "power" in report.skipped[0]
+
+    def test_a_block_with_no_measured_machines_of_its_own_is_left_out(self, profile: Profile) -> None:
+        the_plan = two_block_plan()
+        first, second = the_plan["blocks"]
+        if (first["machine"], first["recipe"]) == (second["machine"], second["recipe"]):
+            pytest.skip("both blocks run the same recipe on the same machine")
+        groups = [measure.MachineGroup(second["machine"], second["recipe"], 2, {"working": 0.9}, {})]
+        report = library.save_measured(the_plan, comparison(groups=groups, plan_data=the_plan), profile.library_dir)
+        assert len(report.saved) == 1 and "no measured machines" in report.skipped[0]
 
     def test_the_same_blocks_are_not_saved_twice(self, profile: Profile) -> None:
         the_plan = two_block_plan()

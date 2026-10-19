@@ -514,7 +514,10 @@ outside the box and what the block puts on it is known, an **in** port where the
 tile behind lies outside, nothing inside feeds it, and a machine downstream
 takes from it. A line that merely ends at the edge (the tail of an input line,
 the head of an output line) takes and gives nothing and is no port; the entry
-says which it left out. A pipe line is a port where it ends on the edge and
+says which it left out. An underground entrance whose exit lies beyond the edge
+is where an out line leaves, and an exit whose entrance lies beyond it is where
+an in line arrives; a tunnel with both ends in the block is no port. A splitter
+on the edge gives a port for each half. A pipe line is a port where it ends on the edge and
 carries on straight out of the box; a line along the block has two ends, one is
 the port and the other is listed in `also_at`. Whether a fluid goes in or out
 is the recipe's. Lane contents of an out port come from the lane tracer; an
@@ -532,9 +535,13 @@ machine, an underground pair or a pole line is typical.
 
 **Found by forge.** `measure result` offers the plan's blocks to the library
 when every target is met, as source `forge`, with `why` saying how much of the
-measured time the machines worked. Blocks whose machines stood starved or
-blocked in the run, blocks the library already holds and blocks that cannot be
-built alone are left out. The plan is `--plan`, or the spec's name without
+measured time the machines worked. `measured` holds the machines'
+working share, the block's own `rate` (the run's production figure for the
+recipe's products, else the out ports' capacity times the share) and the whole
+plan's delivered rates as `plan_targets`. Blocks whose machines stood starved,
+blocked or without power in the run, blocks with no measured machines of their
+own, blocks the library already holds and blocks that cannot be built alone are
+left out. The plan is `--plan`, or the spec's name without
 `.measure-spec`; `--no-library` turns the offer off. The list is the place to
 delete what is not wanted.
 

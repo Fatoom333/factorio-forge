@@ -729,6 +729,8 @@ def _offer_to_library(args, comparison: Comparison) -> None:
         guess = spec.with_name(stem + ".json") if stem else None
         plan_path = guess if guess is not None and guess.is_file() else None
     if plan_path is None:
+        if not args.spec:
+            return  # a run with only --target names no plan; nothing to say
         print("library: no plan known (pass --plan), so no block was offered; --no-library turns this off", file=sys.stderr)
         return
     try:
