@@ -37,6 +37,10 @@ makes the next revision of the plan better.
       "power": {"link": true, "pole": "medium-electric-pole"}   (optional: join the pole networks)
     }
 
+A block may instead be a library block: {"library": "<name>", "at": [x, y], "rotate": 0,
+"mirror": false, "recipe": "<optional swap>", "id": "..."}, a block kept in the active
+profile's `library/` and pasted whole (see `insert.py`). Its ports work like a rows block's.
+
 A connection joins an out port (or a point) to an in port (or a point) with
 belts or pipes; `route.py` finds the path, after the blocks and hand-placed
 entities and in plan order, so each route is an obstacle for the next. Ports
@@ -1163,7 +1167,10 @@ def _plan_rates(built: list[BuiltBlock], wanted: dict[int, float], planned: dict
         block.planned_crafts_per_second = rate
         # Per item, in proportion to the recipe: a route that brings one of a
         # port's two ingredients is sized for that one.
-        per_craft = {(f.direction, f.item): f.rate for f in layout.solid_flows(block.recipe, block.machine, 1)}
+        try:
+            per_craft = {(f.direction, f.item): f.rate for f in layout.solid_flows(block.recipe, block.machine, 1)}
+        except LayoutError:  # a library block that does not say its recipe
+            per_craft = {}
         for port in block.ports:
             if rate is None or not block.crafts_per_second:
                 port["planned_rate"] = None
@@ -1193,6 +1200,7 @@ def _out_line_heads(placed: list[rows.Placement], ports: list[rows.Port], belt: 
     return heads
 
 
+_LIBRARY_FIELDS = {"type", "library", "at", "rotate", "mirror", "recipe", "planned", "id"}
 _BLOCK_FIELDS = set(rows.RowBlockSpec.__dataclass_fields__) | {"type", "per_row", "at", "rotate", "planned", "id"}
 
 
@@ -1221,6 +1229,8 @@ def build(plan: dict, planned: dict[str, float] | None = None, cache=None) -> Bu
     """
     from draftsman.blueprintable import Blueprint
 
+    from . import insert
+
     plan = resolve_block_ids(plan)
 
     label = plan.get("label") or "factorio-forge layout"
@@ -1243,10 +1253,39 @@ def build(plan: dict, planned: dict[str, float] | None = None, cache=None) -> Bu
     power_link, power_pole = _power_options(plan)
     placements: list[rows.Placement] = []
     owner: list[int] = []  # the block each placed entity belongs to
+    prebuilt: dict[int, object] = {}  # placement index -> a ready entity (library blocks bring their own)
     for index, block in enumerate(plan.get("blocks") or []):
-        kind = block.get("type", "rows")
-        if kind != "rows":
-            raise PlanError(f"block {index}: unknown type {kind!r}; only 'rows' exists so far")
+        kind = block.get("type") or ("library" if "library" in block else "rows")
+        if kind not in ("rows", "library"):
+            raise PlanError(f"block {index}: unknown type {kind!r}; 'rows' and 'library' exist")
+        if kind == "library":
+            unknown = set(block) - _LIBRARY_FIELDS
+            if unknown or "library" not in block:
+                raise PlanError(f"block {index}: a library block takes library, at, rotate, mirror, recipe, planned, id"
+                                + (f"; not {', '.join(sorted(unknown))}" if unknown else ""))
+            if "planned" in block:
+                value = block["planned"]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                    raise PlanError(f"block {index}: planned is crafts per second, a number of at least 0")
+                wanted[index] = float(value)
+            pasted = insert.paste_block(block, index)
+            for k, obj in enumerate(pasted.objects):
+                prebuilt[len(placements) + k] = obj
+            placements.extend(pasted.placed)
+            owner.extend([index] * len(pasted.placed))
+            heads.extend(_out_line_heads(pasted.placed, pasted.ports, pasted.prototypes.get("belt")))
+            try:
+                per_second = (crafts_per_second(pasted.recipe, pasted.machine) * pasted.machines
+                              if pasted.recipe and pasted.machine else 0.0)
+            except LayoutError:
+                per_second = 0.0
+            built.append(BuiltBlock(
+                index=index, recipe=pasted.recipe, machine=pasted.machine, at=tuple(block.get("at") or (0, 0)),
+                width=pasted.width, height=pasted.height, machines=pasted.machines, rows=[],
+                ports=[{**asdict(p), "index": j} for j, p in enumerate(pasted.ports)],
+                crafts_per_second=per_second, notes=list(pasted.notes), prototypes=dict(pasted.prototypes),
+            ))
+            continue
         unknown = set(block) - _BLOCK_FIELDS
         if unknown:
             raise PlanError(f"block {index}: unknown field(s) {', '.join(sorted(unknown))}")
@@ -1290,7 +1329,10 @@ def build(plan: dict, planned: dict[str, float] | None = None, cache=None) -> Bu
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        for p in placements:
+        for i, p in enumerate(placements):
+            if i in prebuilt:
+                blueprint.entities.append(prebuilt[i])
+                continue
             entity = blueprint.entities.append(p.name, tile_position=(p.x, p.y))
             # Whether an entity turns at all is the entity class's to say.
             if getattr(entity, "rotatable", False):

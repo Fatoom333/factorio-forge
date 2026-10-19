@@ -40,7 +40,7 @@ from pathlib import Path
 
 from draftsman.data import recipes as recipe_data
 
-from . import bom, layout, request, rows
+from . import bom, insert, layout, request, rows
 from .categories import primary_category
 
 # Preferred tiers when the player's game says nothing about what is unlocked.
@@ -88,6 +88,8 @@ class Stage:
     column: int = 0
     x: int = 0
     y: int = 0
+    # What the library did for this stage: the block used, or why a block of its shape was passed over.
+    reuse: list[str] = field(default_factory=list)
 
     @property
     def recipe(self) -> str:
@@ -120,6 +122,7 @@ class Draft:
     issues: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
     links: list["Link"] = field(default_factory=list)
+    reused: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -175,9 +178,41 @@ def _row_counts(machines: int, rows_wanted: int) -> list[int]:
     return [base + (1 if i < extra else 0) for i in range(count)]
 
 
+def _library_stage(index: int, line: bom.MachineLine, tiers: dict[str, str]) -> tuple[Stage | None, list[str]]:
+    """A stage from a library block of the line's shape, with the recipe swapped in when the shape allows."""
+    try:
+        choice, said = insert.choose(line.recipe, line.machine, tiers, max(1, line.machines))
+        if choice is None:
+            return None, said
+        pasted = insert.paste(choice.entry, (0, 0), 0, False, line.recipe if choice.swapped else None, choice.name)
+    except (insert.PlanError, OSError) as exc:
+        return None, [f"library: {exc}"]
+    block = {"library": choice.name, "rotate": 0}
+    if choice.swapped:
+        block["recipe"] = line.recipe
+    stage = Stage(index, line, block, pasted.width, pasted.height, [], list(pasted.notes))
+    for j, p in enumerate(pasted.ports):
+        items = frozenset(part for lane in p.items for part in lane.split("+") if part)
+        stage.ports.append(Port(j, p.kind, p.io, items, tuple(p.items), p.x, p.y, p.direction, p.rate))
+    how = f", recipe swapped ({choice.entry['shape']['recipe']} -> {line.recipe})" if choice.swapped else ""
+    stage.reuse.append(f"stage {index}: library block {choice.name}{how}")
+    return stage, said
+
+
 def make_stage(index: int, line: bom.MachineLine, spec: request.Spec, tiers: dict[str, str]) -> Stage:
-    """One block for a line of the bill: as few rows as keep every machine fed."""
+    """One block for a line of the bill: a library block of its shape, or as few rows as keep every machine fed."""
     bonus = _speed_bonus(spec, line.recipe)
+    passed: list[str] = []
+    if not bonus:
+        reused, passed = _library_stage(index, line, tiers)
+        if reused is not None:
+            return reused
+    stage = _rows_stage(index, line, bonus, tiers)
+    stage.reuse.extend(f"stage {index}: {why}" for why in passed)
+    return stage
+
+
+def _rows_stage(index: int, line: bom.MachineLine, bonus: float, tiers: dict[str, str]) -> Stage:
     template = {
         "type": "rows", "recipe": line.recipe, "machine": line.machine,
         "belt": tiers["belt"], "inserter": tiers["inserter"], "long_inserter": tiers["long_inserter"],
@@ -638,11 +673,12 @@ def draft(spec: request.Spec, *, tweaks: Tweaks | None = None, spread: int = _FE
             issues.append(
                 f"{link.item} from stage {link.producer.index} goes to {len(link.ends)} stages by pipe: "
                 "pipes do not split, so route all but the first by hand")
+    reused = [text for s in stages for text in s.reuse]
     for stage in stages:
         for note in stage.notes:
             if note.startswith("a row holds more"):
                 issues.append(f"stage {stage.index} ({stage.recipe}): {note}")
-    return Draft(plan, stages, issues, assumed + [a for a in reviewed.assumptions if a.startswith("machines:")], links)
+    return Draft(plan, stages, issues, assumed + [a for a in reviewed.assumptions if a.startswith("machines:")], links, reused)
 
 
 # --------------------------------------------------------------------------
@@ -832,8 +868,11 @@ def run(args) -> int:
     print(f"{plan['label']}: {len(plan['blocks'])} blocks, {len(plan['connections'])} connections, "
           f"{len(plan['sources'])} sources")
     for stage in result_draft.stages:
+        shape = f"rows {stage.block['rows']}" if "rows" in stage.block else f"library {stage.block['library']}"
         print(f"  block {stage.index}: {stage.line.machines} x {stage.line.machine} on {stage.recipe}, "
-              f"rows {stage.block['rows']}, column {stage.column}, at ({stage.x}, {stage.y})")
+              f"{shape}, column {stage.column}, at ({stage.x}, {stage.y})")
+    for line in result_draft.reused:
+        print(line)
     for line in result_draft.assumptions:
         print(f"assumed: {line}")
     print(f"plan: {plan_path.resolve()}")
