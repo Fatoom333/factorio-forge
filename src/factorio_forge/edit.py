@@ -117,8 +117,11 @@ def apply_operation(plan: dict, op: list[str]) -> list[str]:
     name = f"block {index}" + (f" ({block['id']})" if isinstance(block.get("id"), str) else "")
     if verb == "move":
         dx, dy = _whole(op[2], "dx"), _whole(op[3], "dy")
-        x, y = block.get("at") or (0, 0)
-        block["at"] = [int(x) + dx, int(y) + dy]
+        try:
+            x, y = (int(v) for v in block.get("at") or (0, 0))
+        except (TypeError, ValueError):
+            raise EditError(f"{name}: at is not [x, y]") from None
+        block["at"] = [x + dx, y + dy]
         return [f"{name} moved by ({dx}, {dy}) to {block['at']}"]
     if verb == "set":
         return [_set_field(block, name, op[2])]
@@ -152,8 +155,8 @@ def _set_field(block: dict, name: str, text: str) -> str:
             parsed = _NUMBER_FIELDS[key](value)
         except ValueError:
             raise EditError(f"{key} is a number, not {value!r}") from None
-        if key == "rotate" and parsed not in (0, 4, 8, 12):
-            raise EditError(f"rotate is 0, 4, 8 or 12, not {parsed}")
+        if key == "rotate" and parsed % 90:
+            raise EditError(f"rotate is 0, 90, 180 or 270 degrees, not {parsed}")
     else:
         if not value:
             raise EditError(f"{key}= needs a value")
@@ -271,8 +274,20 @@ def _remove_block(plan: dict, index: int, name: str) -> list[str]:
     return said
 
 
-def load_plan_text(path: Path) -> dict:
-    return plan_module.load(path)
+def keep_request_reachable(data: dict, source: Path, target: Path) -> None:
+    """A relative `request` read from `source`'s folder is rewritten to read the same file from `target`'s."""
+    ref = data.get("request")
+    if not isinstance(ref, str) or not ref or Path(ref).is_absolute():
+        return
+    old = Path(source).resolve().parent
+    new = Path(target).resolve().parent
+    if old == new:
+        return
+    wanted = old / ref
+    try:
+        data["request"] = Path(os.path.relpath(wanted, new)).as_posix()
+    except ValueError:  # another drive: no relative path exists
+        data["request"] = str(wanted)
 
 
 def write_plan(plan: dict, path: Path) -> None:
@@ -621,7 +636,6 @@ class CacheStats:
     blocks_built: int = 0
     routes_reused: int = 0
     routes_built: int = 0
-    walked: int = 0  # routes whose search walked a whole table, so they depend on all of the grid
     reused_ids: list[str] = field(default_factory=list)
     built_ids: list[str] = field(default_factory=list)
 
@@ -704,8 +718,6 @@ class BuildCache:
         except OSError:
             pass
 
-    prune = save
-
     # -- blocks ------------------------------------------------------------
 
     def block(self, text: str, compute):
@@ -751,8 +763,6 @@ class BuildCache:
         finally:
             grid.watch(None)
         keep = not log.whole  # a search that walked a whole table depends on all of the grid: not kept
-        if log.whole:
-            self.stats.walked += 1
         record = {
             "area": grid._area if log.area_read else None,
             "inside": dict(log.inside),
@@ -876,7 +886,7 @@ def register(sub) -> None:
     edit.add_argument("-o", "--out-plan", help="write the edited plan here instead of over the original")
     edit.add_argument("--output", help="directory for the blueprint and report (default: beside the plan)")
     edit.add_argument("--no-cache", action="store_true", help="build everything again and keep no cache")
-    edit.add_argument("--render", action="store_true", help="also write the HTML drawing")
+    edit.add_argument("--no-render", action="store_true", help="skip the HTML drawing (build writes it by default)")
     edit.set_defaults(func=_cmd_edit)
 
 
@@ -890,7 +900,7 @@ def _take_options(words: list[str], args) -> list[str]:
     i = 0
     while i < len(words):
         word = words[i]
-        if word in ("--no-cache", "--render"):
+        if word in ("--no-cache", "--no-render"):
             setattr(args, word[2:].replace("-", "_"), True)
         elif word in ("-o", "--out-plan", "--output"):
             if i + 1 >= len(words):
@@ -924,18 +934,22 @@ def _cmd_edit(args) -> int:
         return 2
     written = Path(args.out_plan) if args.out_plan else plan_path
     if ops:
-        write_plan(data, written)
+        keep_request_reachable(data, plan_path, written)
     for line in said:
         print(line)
-    if ops:
-        print(f"plan:      {written.resolve()}")
 
     cache = None if args.no_cache else BuildCache(cache_folder(written))
     try:
         rebuilt = rebuild(data, written, cache)
     except plan_module.PlanError as exc:
+        # a plan that does not build is not written: the file on disk stays the last one that did
         print(str(exc), file=sys.stderr)
+        if ops:
+            print("edit: the plan was not written", file=sys.stderr)
         return 1
+    if ops:
+        write_plan(data, written)
+        print(f"plan:      {written.resolve()}")
     result = rebuilt.result
 
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", result.label).strip("-") or "layout"
@@ -946,7 +960,7 @@ def _cmd_edit(args) -> int:
     report_path = out / f"{slug}.report.json"
     report_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
     html_path = None
-    if args.render:
+    if not args.no_render:
         html_path = render.write_html(result.blueprint, out / f"{slug}.html", title=result.label,
                                       findings=result.findings)
 
@@ -955,6 +969,8 @@ def _cmd_edit(args) -> int:
           + ("" if cache is None else
              f"; blocks {s.blocks_reused} kept / {s.blocks_built} built, routes {s.routes_reused} kept / "
              f"{s.routes_built} built"))
+    for warning in rebuilt.warnings:
+        print(f"warning: {warning}")
     for r in result.routes:
         if not r.ok:
             print(f"  route {r.id}: FAILED - {r.reason}")

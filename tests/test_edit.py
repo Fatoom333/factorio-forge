@@ -16,9 +16,10 @@ import random
 import pytest
 from draftsman.data import recipes
 
-from factorio_forge import cli, edit, plan
+import prototypes
+from factorio_forge import cli, edit, plan, route, rows
 from test_plan import two_ingredient_chain
-from test_route import block_spec, point
+from test_route import block_spec, chests, point
 
 
 def chain_blocks(prefix: str, offset: tuple[int, int]):
@@ -140,6 +141,14 @@ class TestOperations:
         edit.apply_operations(counted, [["rows", "0", "-1"], ["rows", "0", "per=6"]])
         assert counted["blocks"][0]["rows"] == 2 and counted["blocks"][0]["per_row"] == 6
 
+    def test_rotate_takes_degrees_and_builds_as_written_by_hand(self, two_chains: dict) -> None:
+        edited = fresh(two_chains)
+        edit.apply_operation(edited, ["set", "a-maker", "rotate=90"])
+        assert edited["blocks"][0]["rotate"] == 90
+        by_hand = fresh(two_chains)
+        by_hand["blocks"][0]["rotate"] = 90
+        assert outcome(edited) == outcome(by_hand)
+
     @pytest.mark.parametrize("words, said", [
         (["wiggle", "0"], "unknown operation 'wiggle'; the operations are move, set, rows, remove"),
         (["move", "0", "1"], r"move <block> <dx> <dy> \(got 'move 0 1'\)"),
@@ -157,13 +166,17 @@ class TestOperations:
         (["set", "0", "recipe"], r"set <block> <field>=<value>"),
         (["set", "0", "recipe=none"], "cannot go without recipe"),
         (["set", "0", "modules=speed-module"], "no 'modules' yet"),
-        (["set", "0", "rotate=3"], "rotate is 0, 4, 8 or 12"),
+        (["set", "0", "rotate=3"], "rotate is 0, 90, 180 or 270"),
+        (["set", "0", "rotate=4"], "rotate is 0, 90, 180 or 270"),
+        (["move", "0", "1", "1"], "at is not"),
         (["rows", "0", "-1"], "keeps at least one"),
         (["rows", "0", "sideways"], r"rows <block> \+1 \| -1 \| per=<n>"),
     ])
     def test_a_bad_operation_is_one_line_and_changes_nothing(self, two_chains: dict, op: list[str], said: str) -> None:
         the_plan = fresh(two_chains)
         the_plan["blocks"][0]["rows"] = [2]
+        if "at is not" in said:
+            the_plan["blocks"][0]["at"] = "here"
         before = json.dumps(the_plan, sort_keys=True)
         with pytest.raises(edit.EditError, match=said):
             edit.apply_operation(the_plan, op)
@@ -255,7 +268,6 @@ class TestCachedBuild:
         cache = edit.BuildCache(None, identity="t")
         first = plan.build(fresh(two_chains), None, cache)
         tiles = [(p.x, p.y) for r in first.routes if r.id.startswith("a-share") for p in r.pieces]
-        from test_route import chests
 
         blocked = fresh(two_chains)
         blocked["entities"] = chests(tiles[len(tiles) // 2:len(tiles) // 2 + 1])
@@ -353,6 +365,27 @@ class TestCommand:
         assert err.strip().count("\n") == 0 and "colour" in err
         assert plan_file.read_text(encoding="utf-8") == before
 
+    def test_a_value_the_build_rejects_is_not_written(self, two_chains: dict, tmp_path, capsys) -> None:
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(two_chains), encoding="utf-8")
+        before = plan_file.read_text(encoding="utf-8")
+        assert cli.main(["edit", str(plan_file), "set", "a-maker", "recipe=no-such-recipe-at-all"]) == 1
+        assert "not written" in capsys.readouterr().err
+        assert plan_file.read_text(encoding="utf-8") == before
+
+    def test_a_copy_in_another_folder_still_finds_the_request(self, two_chains: dict, tmp_path, capsys) -> None:
+        (tmp_path / "req").mkdir()
+        (tmp_path / "req" / "request.json").write_text("{}", encoding="utf-8")
+        with_request = {**two_chains, "request": "request.json"}
+        (tmp_path / "req" / "plan.json").write_text(json.dumps(with_request), encoding="utf-8")
+        copy_file = tmp_path / "sub" / "copy.json"
+        copy_file.parent.mkdir()
+        cli.main(["edit", str(tmp_path / "req" / "plan.json"), "-o", str(copy_file), "move", "b-maker", "1", "0",
+                  "--no-cache", "--no-render"])
+        capsys.readouterr()
+        saved = json.loads(copy_file.read_text(encoding="utf-8"))
+        assert (copy_file.parent / saved["request"]).resolve() == (tmp_path / "req" / "request.json").resolve()
+
     def test_a_missing_plan_is_one_line(self, tmp_path, capsys) -> None:
         assert cli.main(["edit", str(tmp_path / "nope.json"), "move", "0", "1", "1"]) == 2
         assert "no plan at" in capsys.readouterr().err
@@ -403,3 +436,50 @@ class TestWatchedGrid:
 
     def test_sets_read_the_same_whatever_their_order(self) -> None:
         assert edit.canonical(frozenset({"b", "a", "c"})) == edit.canonical(frozenset({"c", "a", "b"}))
+
+
+# --------------------------------------------------------------------------
+# the route cache against the routing code
+# --------------------------------------------------------------------------
+
+
+def test_the_watched_grid_knows_every_table_of_the_grid() -> None:
+    """A table added to route.Grid but not watched would let a cached route go stale unseen."""
+    import dataclasses
+
+    names = {f.name for f in dataclasses.fields(route.Grid)}
+    assert names - {"area", "tunnels"} == set(edit._TABLES)
+
+
+def routes_only_plan() -> dict:
+    """A belt with a hop, a split belt and a pipe, with no blocks: obstacles are what an edit changes."""
+    belt, underground, _ = prototypes.belt_set()
+    pipe = rows._default_pipe("pipe")
+    return {"label": "routes only", "blocks": [], "entities": chests([(6, 0)]), "connections": [
+        {"id": "hop", "kind": "belt", "belt": belt, "underground": underground,
+         "from": point(0, 0, items=["a"]), "to": point(16, 0)},
+        {"id": "fork", "kind": "belt", "belt": belt, "underground": underground,
+         "from": point(0, 20, items=["b"]), "to": [point(16, 20), point(16, 26)]},
+        {"id": "water", "kind": "pipe", "pipe": pipe, "from": point(0, 40, items=["water"]), "to": point(16, 40)},
+    ]}
+
+
+def test_a_walk_of_obstacles_over_belts_a_split_and_a_pipe_matches_clean_builds() -> None:
+    rng = random.Random(11)
+    cache = edit.BuildCache(None, identity="t")
+    current = routes_only_plan()
+    outcome(current, cache)
+    for step in range(12):
+        candidate = fresh(current)
+        y = rng.choice([0, 20, 26, 40, rng.randint(-3, 45)])
+        x = rng.randint(1, 15)
+        if rng.random() < 0.3 and candidate["entities"]:
+            candidate["entities"].pop(rng.randrange(len(candidate["entities"])))
+        else:
+            candidate["entities"] += chests([(x, y)])
+        cache.used = set()
+        cached, clean = outcome(candidate, cache), outcome(candidate)
+        assert cached == clean, f"step {step}: a chest at ({x}, {y}) differs from a clean build"
+        if cached[0] == "ok":
+            current = candidate
+    assert cache.stats.routes_reused > 0

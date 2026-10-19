@@ -386,7 +386,7 @@ words, and a block is its index or its id:
 | Operation | Does |
 |---|---|
 | `move <block> <dx> <dy>` | shifts the block by whole tiles |
-| `set <block> <field>=<value>` | sets `recipe`, `machine`, `belt`, `inserter`, `long_inserter`, `pole`, `pipe`, `pipe_to_ground`, `stack`, `align`, `speed_bonus`, `stack_size`, `input_belts`, `planned` or `rotate`; `<field>=none` clears an optional one |
+| `set <block> <field>=<value>` | sets `recipe`, `machine`, `belt`, `inserter`, `long_inserter`, `pole`, `pipe`, `pipe_to_ground`, `stack`, `align`, `speed_bonus`, `stack_size`, `input_belts`, `planned` or `rotate` (degrees: 0, 90, 180, 270); `<field>=none` clears an optional one |
 | `rows <block> +1` / `-1` / `per=<n>` | one row more (it copies the last) or fewer, or `n` machines in every row |
 | `remove <block>` | drops the block and every connection and source that names it, and every merge left without its route; indices after it are renumbered |
 
@@ -394,9 +394,11 @@ Several operations may follow one another: `edit plan.json move red 0 5 set red
 recipe=advanced-circuit`. An unknown block, field or verb is one line on the error
 output and nothing is written. `edit` does not touch what the plan holds as tiles
 (`via`, `at` points, `entities`, `reserve` rectangles): moving a block does not
-move them. If the edited plan no longer builds -- a connection that expected the
-old recipe's items, say -- the plan is still written and the message says what to
-fix next. The plan is written back as indented JSON, so hand formatting is lost. `edit plan.json` with no operation only rebuilds. `speed_bonus` is the
+move them. The plan is built before it is written: if the edited plan no longer builds -- a
+connection that expected the old recipe's items, say, or a recipe name that does not
+exist -- the build error is printed, the file on disk stays as it was, and with `-o`
+into another folder a relative `request` is rewritten to still find its file. The
+drawing is written as `build` writes it (`--no-render` skips it). The plan is written back as indented JSON, so hand formatting is lost. `edit plan.json` with no operation only rebuilds. `speed_bonus` is the
 nearest thing to modules a block has; there is no `modules=` field yet.
 
 The rebuild keeps a cache in `.<plan name>.cache/` beside the plan, as one file
