@@ -496,3 +496,81 @@ class TestFluidBlocks:
                 assert now["items"] == was["items"]
         problems = lambda r: sorted(f.code for f in r.findings if f.severity is inspection.Severity.PROBLEM)  # noqa: E731
         assert problems(mirrored) == problems(plain)
+
+
+class TestMalformedShape:
+    @pytest.mark.parametrize("shape_damage", [
+        {"solid_in": "one"}, {"tiers": ["x"]}, {"recipe": ["a"]}, {"fluid_out": -1}, {"machine": 3}, {"solid_out": True},
+    ])
+    def test_a_bad_shape_is_left_out_and_said_and_chain_still_runs(self, library, shape_damage) -> None:
+        recipe, machine = setup_1011()
+        good = store(library, make_entry("good", recipe, machine, (2,)))
+        bad = make_entry("bad-one", recipe, machine, (2,))
+        bad["shape"].update(shape_damage)
+        store(library, bad)
+        skipped: list[str] = []
+        assert [e["name"] for e in insert.entries(library, skipped)] == ["good"]
+        assert len(skipped) == 1 and skipped[0].startswith("library: bad-one skipped: ")
+        choice, said = insert.choose(recipe, machine, tiers_of(good), 1)
+        assert choice.name == "good" and said == skipped
+        stage = chain.make_stage(0, line_for(recipe, machine, 2), NO_BONUS, tiers_of(good))
+        assert stage.block["library"] == "good"
+        assert any("bad-one skipped" in t for t in stage.reuse)
+
+    def test_a_name_with_a_trailing_newline_is_refused(self) -> None:
+        with pytest.raises(plan.PlanError):
+            insert.check_name("abc\n")
+
+
+class TestChainOrientation:
+    def test_a_block_turned_on_its_side_is_turned_back(self, library) -> None:
+        recipe, machine = setup_1011()
+        entry = make_entry("upright", recipe, machine, (2,))
+        store(library, entry)
+        turned = plan.build({"blocks": [{"library": "upright", "rotate": 90}]})
+        sideways = dict(entry, name="sideways", blueprint=turned.blueprint.to_string(), size=[turned.blocks[0].width, turned.blocks[0].height],
+                        ports=[{"id": f"p{p['index']}", "kind": p["kind"], "dir": p["io"], "at": [p["x"], p["y"]],
+                                "direction": p["direction"], "items": list(p["items"]), "rate": p["rate"]}
+                               for p in turned.blocks[0].ports])
+        (library / "upright.json").unlink()
+        store(library, sideways)
+        stage = chain.make_stage(0, line_for(recipe, machine, 2), NO_BONUS, tiers_of(entry))
+        assert stage.block["library"] == "sideways"
+        for p in stage.ports:
+            if p.kind == "belt":
+                assert p.direction == 4 and p.x == (0 if p.io == "in" else stage.width - 1)
+        assert plan.build({"blocks": [{**stage.block, "at": [0, 0]}]}).blocks[0].machines == 2
+
+    def test_a_block_whose_ports_cannot_run_west_to_east_is_passed_over(self, library) -> None:
+        recipe, machine = setup_1011()
+        entry = make_entry("odd", recipe, machine, (2,))
+        for p in entry["ports"]:
+            if p["kind"] == "belt":
+                p["at"] = [1, 1]  # neither edge
+        store(library, entry)
+        stage = chain.make_stage(0, line_for(recipe, machine, 2), NO_BONUS, tiers_of(entry))
+        assert stage.block.get("type") == "rows"
+        assert any("ports do not run west to east" in t for t in stage.reuse)
+
+    def test_a_block_far_bigger_than_the_stage_is_passed_over(self, library) -> None:
+        recipe, machine = setup_1011()
+        entry = store(library, make_entry("huge", recipe, machine, (4, 4)))
+        stage = chain.make_stage(0, line_for(recipe, machine, 1), NO_BONUS, tiers_of(entry))
+        assert stage.block.get("type") == "rows"
+        assert any("far more than" in t for t in stage.reuse)
+
+
+class TestSplitterPriority:
+    @pytest.mark.parametrize("rotate", ROTATIONS)
+    def test_a_mirror_swaps_the_sides_of_a_priority(self, library, rotate: int) -> None:
+        from draftsman.blueprintable import Blueprint
+
+        name = next((n for n, d in entities.raw.items() if d.get("type") == "splitter"), None)
+        if name is None:
+            pytest.skip("the active data has no splitter")
+        bp = Blueprint()
+        bp.entities.append(name, tile_position=(0, 0), direction=4, input_priority="left", output_priority="right")
+        entry = {"name": "split", "blueprint": bp.to_string(), "ports": []}
+        for mirror, want in ((False, ("left", "right")), (True, ("right", "left"))):
+            got = insert.paste(entry, (0, 0), rotate, mirror).objects[0]
+            assert (got.input_priority, got.output_priority) == want

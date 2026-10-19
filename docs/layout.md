@@ -470,6 +470,14 @@ The output says `stage N: library block NAME` (with `recipe swapped (A -> B)`
 when it was), and why a block of the right shape was passed over. Only the
 block is reused; its links to the neighbours are routed fresh like any other.
 
+A block is turned or mirrored so that its belt in ports enter from the west and
+its out ports leave to the east, as a rows block does; one that cannot be made
+to stand that way, one with more than twice the machines the stage needs, and a
+file that is malformed (a bad `shape`, for one) are passed over and named in the
+output. A mirror also swaps `left` and `right` in a splitter's input and output
+priority; other entity settings are copied as they are. Of a pipe port only `at`
+is used; the optional `also_at` tiles are not exposed.
+
 ## Small edits, and a rebuild that keeps what did not change
 
 A block may carry an `id` (a text without spaces, not a number, unique in the

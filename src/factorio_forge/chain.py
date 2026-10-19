@@ -184,10 +184,13 @@ def _library_stage(index: int, line: bom.MachineLine, tiers: dict[str, str]) -> 
         choice, said = insert.choose(line.recipe, line.machine, tiers, max(1, line.machines))
         if choice is None:
             return None, said
-        pasted = insert.paste(choice.entry, (0, 0), 0, False, line.recipe if choice.swapped else None, choice.name)
+        pasted = insert.paste(choice.entry, (0, 0), choice.rotate, choice.mirror,
+                              line.recipe if choice.swapped else None, choice.name)
     except (insert.PlanError, OSError) as exc:
         return None, [f"library: {exc}"]
-    block = {"library": choice.name, "rotate": 0}
+    block = {"library": choice.name, "rotate": choice.rotate}
+    if choice.mirror:
+        block["mirror"] = True
     if choice.swapped:
         block["recipe"] = line.recipe
     stage = Stage(index, line, block, pasted.width, pasted.height, [], list(pasted.notes))
@@ -196,7 +199,8 @@ def _library_stage(index: int, line: bom.MachineLine, tiers: dict[str, str]) -> 
         stage.ports.append(Port(j, p.kind, p.io, items, tuple(p.items), p.x, p.y, p.direction, p.rate))
     how = f", recipe swapped ({choice.entry['shape']['recipe']} -> {line.recipe})" if choice.swapped else ""
     stage.reuse.append(f"stage {index}: library block {choice.name}{how}")
-    return stage, said
+    stage.reuse.extend(f"stage {index}: {why}" for why in said)
+    return stage, []
 
 
 def make_stage(index: int, line: bom.MachineLine, spec: request.Spec, tiers: dict[str, str]) -> Stage:

@@ -1167,10 +1167,9 @@ def _plan_rates(built: list[BuiltBlock], wanted: dict[int, float], planned: dict
         block.planned_crafts_per_second = rate
         # Per item, in proportion to the recipe: a route that brings one of a
         # port's two ingredients is sized for that one.
-        try:
-            per_craft = {(f.direction, f.item): f.rate for f in layout.solid_flows(block.recipe, block.machine, 1)}
-        except LayoutError:  # a library block that does not say its recipe
-            per_craft = {}
+        # a library block may not say its recipe; a rows block always does
+        per_craft = ({(f.direction, f.item): f.rate for f in layout.solid_flows(block.recipe, block.machine, 1)}
+                     if block.recipe and block.machine else {})
         for port in block.ports:
             if rate is None or not block.crafts_per_second:
                 port["planned_rate"] = None

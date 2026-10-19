@@ -55,7 +55,7 @@ _DIRECTIONS = (0, 4, 8, 12)
 
 def check_name(name) -> str:
     """A library name: lowercase letters, digits and dashes. Never a path."""
-    if not isinstance(name, str) or not _NAME.match(name):
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise PlanError(f"library block name {name!r}: lowercase letters, digits and dashes only")
     return name
 
@@ -88,19 +88,24 @@ def read_entry(name: str, directory: Path | None = None) -> dict:
     return entry
 
 
-def entries(directory: Path | None = None) -> list[dict]:
-    """Every readable entry of the library, by name; broken files are left out."""
+def entries(directory: Path | None = None, skipped: list[str] | None = None) -> list[dict]:
+    """Every readable entry of the library, by name; broken files are left out.
+
+    When `skipped` is a list, a line for each file left out ("library: <name> skipped: <why>") is added to it.
+    """
     try:
         folder = Path(directory) if directory is not None else library_dir()
     except (PlanError, OSError):
         return []
     found = []
     for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
-        if not _NAME.match(path.stem):
+        if not _NAME.fullmatch(path.stem):
             continue
         try:
             found.append(read_entry(path.stem, folder))
-        except PlanError:
+        except PlanError as exc:
+            if skipped is not None:
+                skipped.append(f"library: {path.stem} skipped: {str(exc).split(': ', 1)[-1]}")
             continue
     return found
 
@@ -137,8 +142,20 @@ def _check_entry(name: str, entry) -> None:
         if isinstance(rate, bool) or not isinstance(rate, (int, float)) or rate < 0:
             raise bad(f"port {i}: 'rate' is a number of at least 0")
     shape = entry.get("shape")
-    if shape is not None and not isinstance(shape, dict):
-        raise bad("'shape' is an object")
+    if shape is not None:
+        if not isinstance(shape, dict):
+            raise bad("'shape' is an object")
+        for key in ("machine", "recipe"):
+            if shape.get(key) is not None and not isinstance(shape[key], str):
+                raise bad(f"shape: '{key}' is a name")
+        for key in ("solid_in", "fluid_in", "solid_out", "fluid_out"):
+            value = shape.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise bad(f"shape: '{key}' is a whole number of at least 0")
+        tiers = shape.get("tiers")
+        if tiers is not None and not (isinstance(tiers, dict)
+                                      and all(isinstance(k, str) and isinstance(v, str) for k, v in tiers.items())):
+            raise bad("shape: 'tiers' maps a role to a name")
 
 
 # --------------------------------------------------------------------------
@@ -147,8 +164,6 @@ def _check_entry(name: str, entry) -> None:
 
 
 def _count(value) -> int:
-    if isinstance(value, (list, tuple, dict)):
-        return len(value)
     return int(value or 0)
 
 
@@ -306,6 +321,11 @@ def paste(entry: dict, at=(0, 0), rotate: int = 0, mirror: bool = False, recipe:
         if mirror and (entity_data.raw.get(e.name) or {}).get("type") == "assembling-machine" \
                 and getattr(e, "mirror", None) is not None:
             obj.mirror = not e.mirror
+        if mirror:
+            for attr in ("input_priority", "output_priority"):
+                side = getattr(e, attr, None)
+                if side in ("left", "right"):
+                    setattr(obj, attr, "right" if side == "left" else "left")
         obj.tile_position = (x + dx, y + dy)
         is_machine = e.name == machine
         machines += is_machine
@@ -390,6 +410,25 @@ class Choice:
     entry: dict
     swapped: bool
     machines: int
+    rotate: int = 0
+    mirror: bool = False
+
+
+def west_to_east(entry: dict) -> tuple[int, bool] | None:
+    """The first (rotate, mirror) that makes every belt in port enter from the west and every out port leave east.
+
+    That is how a rows block stands at rotate 0 and what the chain's layout assumes. None when no turn fits.
+    """
+    for mirror in (False, True):
+        for rotate in (0, 90, 180, 270):
+            try:
+                pasted = paste(entry, (0, 0), rotate, mirror)
+            except PlanError:
+                return None
+            belts = [p for p in pasted.ports if p.kind == "belt"]
+            if all(p.direction == 4 and p.x == (0 if p.io == "in" else pasted.width - 1) for p in belts):
+                return rotate, mirror
+    return None
 
 
 def _machines_in(entry: dict, machine: str) -> int:
@@ -414,7 +453,7 @@ def choose(recipe: str, machine: str, tiers: dict[str, str], machines_needed: in
     except PlanError:
         return None, skipped
     found: list[tuple[int, int, Choice]] = []
-    for entry in entries(directory):
+    for entry in entries(directory, skipped):
         shape = entry.get("shape") or {}
         if shape.get("machine") != machine or not shape.get("recipe"):
             continue
@@ -436,7 +475,15 @@ def choose(recipe: str, machine: str, tiers: dict[str, str], machines_needed: in
         if count < machines_needed:
             skipped.append(f"library block {entry.get('name')} has {count} machine(s), the stage needs {machines_needed}")
             continue
-        found.append((int(swapped), count, Choice(str(entry.get("name")), entry, swapped, count)))
+        if count > 2 * machines_needed:
+            skipped.append(f"library block {entry.get('name')} has {count} machine(s), far more than the "
+                           f"{machines_needed} the stage needs")
+            continue
+        turn = west_to_east(entry)
+        if turn is None:
+            skipped.append(f"library block {entry.get('name')}: ports do not run west to east")
+            continue
+        found.append((int(swapped), count, Choice(str(entry.get("name")), entry, swapped, count, *turn)))
     if not found:
         return None, skipped
     found.sort(key=lambda t: (t[0], t[1], t[2].name))
