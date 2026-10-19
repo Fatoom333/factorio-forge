@@ -86,13 +86,40 @@ block, its output split by a splitter), blocks in the order of the flow,
 belts between each output and the next input, `sources` for raw inputs. You
 check and correct the draft; you do not lay the stages out by hand.
 
-> SYNTAX TO FILL AFTER MERGE: exact `chain` command and options.
+```
+factorio-forge chain work/<design>/request.json -o work/<design>/plan.json
+factorio-forge chain advanced-circuit=1 --surface nauvis --boundary plastic-bar -o work/<design>/plan.json
+```
+
+The order is a request file (as for `review`) or `item=rate` words (per
+second; `=60/m` per minute; `--boundary` and `--surface` go with the words).
+It writes the plan, builds it once and prints the usual output; `--no-build`
+writes the plan only. Read it like any build: errors first. A spot that fails
+is retried in at most two other placements; what still fails is listed, and
+the rest of the draft stands. Pipes do not split: a fluid with several
+consumers gets one pipe, the others are yours to add. Then refine with `edit`.
 
 ## Edit: small changes without a rebuild from scratch
 
 `edit` applies short operations to a plan -- move a block, change a recipe,
-machine, modules or a belt, add or remove a row. Only the touched block and
+machine, belt or tier, add or remove a row. Only the touched block and
 its belts are rebuilt; the rest comes from the previous build's cache. Do not
 rewrite the whole plan for a small change.
 
-> SYNTAX TO FILL AFTER MERGE: exact `edit` operations.
+```
+factorio-forge edit work/<design>/plan.json move 2 0 5
+factorio-forge edit work/<design>/plan.json set red recipe=advanced-circuit rows red +1
+factorio-forge edit work/<design>/plan.json remove 3 -o work/<design>/plan-b.json
+```
+
+A block is its index or its `id` (give blocks an `id` so connections survive a
+removal). Operations: `move B dx dy`; `set B field=value` -- `recipe`,
+`machine`, `belt`, `inserter`, `long_inserter`, `pole`, `pipe`,
+`pipe_to_ground`, `stack`, `align`, `speed_bonus`, `planned`, `stack_size`,
+`input_belts`, `rotate` (0, 90, 180 or 270), `none` clears an optional field;
+`rows B +1|-1|per=n`; `remove B`. Modules are not a block field yet. The plan
+is built before it is written: a bad operation or a value the build rejects
+leaves the file as it was and prints one line. Tiles given in the plan by hand
+(`via`, points, `entities`, `reserve`) do not move with a block. With no
+operation, `edit` only rebuilds and fills its cache (a hidden folder beside
+the plan); the result always equals a full build.

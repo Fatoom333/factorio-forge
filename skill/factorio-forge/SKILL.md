@@ -82,7 +82,7 @@ checkout. JSON may be saved with or without a UTF-8 BOM (Windows PowerShell
    in one message, with a default beside each question. -> `reference/request.md`
 2. **Plan.** Machine counts come from `review`; `options` gives the numbers
    per block. Decide the layout and write `plan.json`. A whole multi-stage
-   order: `chain` drafts it, if the command exists (`factorio-forge --help`). -> `reference/plans.md`
+   order: `chain` drafts it in one command. -> `reference/plans.md`
 3. **Build.** `factorio-forge build work/<design>/plan.json`. -> `reference/build.md`
 4. **Read the output, look, revise.** Fix the plan, never the output. Use the
    text tile map while iterating (`map`), render once at the end.
@@ -91,19 +91,18 @@ checkout. JSON may be saved with or without a UTF-8 BOM (Windows PowerShell
 6. **Hand over.** Read `reference/lessons.md` and `reference/not-checked.md`
    first.
 
-New commands, in one line each:
+Commands for these steps, one line each:
 
 - `chain` -- draft plan for a whole order at once; see `reference/plans.md`.
 - `edit` -- small plan edits without a full rebuild; see `reference/plans.md`.
 - `notes` / `notes <topic>` -- the notes index and one section; see `reference/profile.md`.
-- In-game check before delivery -- see `reference/measure.md`.
+- `deliver` -- build, then place it in the game without a window before handing it over; see `reference/measure.md`.
 
 ## Reading the build output
 
 The output has two levels. **Errors** -- the blueprint will not stand or will
 not work (a collision, an unconnected input, the wrong item on a lane): fix
-every one before anything is handed over (until the output is reshaped these
-are findings of severity `problem`; `suspect` and `note` are facts). **Facts** -- rates, belt loads, lane
+every one before anything is handed over. **Facts** -- rates, belt loads, lane
 fill, counts of entities: they are yours to weigh. A belt of copper at 40 %
 may be exactly what the player wants; decide, and mention what matters. There
 is no middle level of "warnings" and no rule per kind of fact. Errors come

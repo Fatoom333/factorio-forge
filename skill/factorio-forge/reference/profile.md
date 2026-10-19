@@ -8,7 +8,8 @@ a standing preference, or tiers and unlocks are in question.
 ```
 factorio-forge list-profiles        # which save profiles exist, which is active
 factorio-forge activate-profile NAME
-factorio-forge notes [NAME]         # where the profile's notes.md and reference blueprints are
+factorio-forge notes [NAME]         # the index of the profile's notes (one line per file or section)
+factorio-forge notes [NAME] TOPIC   # the notes on one topic or item, in any words
 factorio-forge available            # belts, inserters, poles the player has; bonuses
 factorio-forge show-style NAME      # measured spacing, alignment, symmetry, orientation
 ```
@@ -19,7 +20,10 @@ profile yet: `factorio-forge create-profile <save>`.
 
 ## Notes
 
-Every profile has a `notes.md`: the base's accumulated preferences in the
+Every profile has notes: a `notes.md` and, as they grow, topic files in
+`notes/`. At the start read only the index (`notes`) and open a topic when the
+request touches it (`notes красные схемы` finds a note tagged
+`advanced-circuit`). They hold the base's accumulated preferences in the
 player's own words -- conventions to follow, things to avoid, corrections made
 to earlier designs. What the notes say beats the generic defaults in this
 skill. When the player corrects a design, or states a standing preference
@@ -36,7 +40,11 @@ Notes index: `notes` shows an index, one line per file or section (what
 it covers, which items and blocks, by internal name); `notes <topic>` opens
 one. Read the index at step 0 and open only the sections the request touches.
 
-> SYNTAX TO FILL AFTER MERGE: exact `notes` index and `notes <topic>` forms.
+`factorio-forge notes` -- the index of the active profile; `notes NAME` -- another
+profile's; `notes [NAME] TOPIC` -- the matching notes, where TOPIC is a file name,
+a heading, a tag or an item in any words the name lookup knows. A note file may
+start with a `tags:` line (or front matter) naming the items it is about; the
+index is rebuilt only when a note file changes.
 
 ## The game's export (what is unlocked)
 

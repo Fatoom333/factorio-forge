@@ -671,9 +671,11 @@ def _cmd_spec(args) -> int:
     except (plan.PlanError, MeasureError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    problems = [f for f in result.problems]
-    if problems:
-        print(f"warning: the plan has {len(problems)} problem(s); the run will measure it as it is", file=sys.stderr)
+    from . import report
+
+    errors = [f for f in result.findings if report.level(f) == report.ERROR]
+    if errors:
+        print(f"warning: the plan has {len(errors)} error(s); the run will measure it as it is", file=sys.stderr)
     out = Path(args.output) if args.output else Path(args.plan).resolve().with_suffix(".measure-spec.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")

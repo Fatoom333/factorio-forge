@@ -39,3 +39,5 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+# edit keeps a build cache beside each plan
+.*.cache/
