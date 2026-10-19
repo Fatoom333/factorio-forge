@@ -26,6 +26,7 @@ exact geometry, and compiler and checker feedback comes back to the model.
 | `fluids.py` | Which fluid a recipe puts in which fluid box; which pipes form one network |
 | `plan.py` | A plan of blocks and hand-placed entities in, a blueprint and a report out |
 | `route.py` | The belts and pipes between ports: a search that obeys the game's rules, or the reason it cannot |
+| `chain.py` | A draft plan for every stage of an order: blocks in flow order, every connection, every source |
 
 ## Capacity: lanes, not belts
 
@@ -371,6 +372,67 @@ free chain within the wire reach inside the search area -- the build's extent
 plus `routing.margin`, at least four tiles). Poles are wired by the same
 generator as the rest, which holds a pole to five wires; if that leaves the
 networks apart the report says so.
+
+## A whole chain from an order
+
+`factorio-forge chain` turns an order into a draft plan for every stage in one
+command, then builds it once:
+
+```
+factorio-forge chain advanced-circuit=1 --boundary iron-plate,copper-plate,plastic-bar -o plan.json
+factorio-forge chain request.json -o plan.json        # a request file, as for `review`
+```
+
+`item=rate` is per second; `item=60/m` is per minute. With a request file the
+tiers, machines, recipes and boundary come from it; with words they come from
+`review`'s defaults (the best the player has unlocked, else a fast belt,
+fast inserters and a medium pole, said as an assumption). Beside the plan it
+writes the blueprint, report and drawing, as `build` does, and lists what it
+left to the player.
+
+What the draft contains:
+
+- **One block per recipe** of the bill of materials. A stage gets as few rows
+  as keep its machines fed; several rows are mirrored, so its input ports
+  repeat. Blocks are named by index in the bill's order.
+- **Columns in flow order.** A stage stands as late as it can: stages that
+  take only raw goods at the left edge, the ordered product at the right,
+  each stage in the column before its first user. Within a column, a block is
+  lined up with the port it feeds (a straight belt); where a block's feeders
+  compete, they are spread in the order of the ports they feed, so the feeder
+  of the top port stands highest and no two belts cross.
+- **Shared stages.** An intermediate the bill counts once for several users
+  stays one block. Its out port is one connection with a list of
+  destinations, which the router splits with one splitter per branch.
+- **Ports with two goods.** The good wanted at more ports is routed to the
+  port; the other joins it: a raw good as a belt head beside the port
+  (`onto`, lane `auto`), a product from its own out port (`onto`). If the
+  routed belt fills both lanes, the two are joined a lane each instead, with a
+  `via` tile off the straight line so the belt has the turn a join needs.
+- **Raw goods.** A port that takes only raw goods is a `sources` entry at the
+  port, with the rate the bill needs there. Every other raw good starts a belt
+  head beside its port, as a connection with a `rate`. `targets` and the
+  request's choices go into the plan, and `power` has `link` on.
+- **Fluids.** Pipe connections from the out port of the stage that makes the
+  fluid. A pipe cannot split, so a fluid used by several stages is piped to
+  the first and the rest is listed. A fluid nobody in the chain makes is
+  listed too.
+
+**Mending, at most twice.** If the build has problems at the end of some
+connection, each such block gets two other placements, one after the other:
+more room (moved right, its feeders twice as far apart, its raw belts start
+further out), then the other side (its feeders swapped above and below, join
+`via` on the other side). The first clean build stops it; of a set of
+failed ones the one with the fewest problems is kept, the earliest on a tie.
+A connection the plan check refuses outright is left out and listed, so the
+rest of the chain still builds.
+
+**Left to the player**, as `left to you:` lines: a raw fluid, a fluid piped to
+more than one stage, a good that has to reach two ports in different ways
+(one out port starts one connection), a port that takes three or more goods
+on one belt, a stage whose row holds more machines than its belt keeps fed.
+A draft with a problem left is not wrong output: it is the starting point of
+the next edit, and the build's own findings say where.
 
 ## Small edits, and a rebuild that keeps what did not change
 

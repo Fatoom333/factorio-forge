@@ -672,7 +672,17 @@ def snap_cell(blueprint, bounds: Bounds) -> tuple[float, float, float, float] | 
     )
 
 
-SEVERITY_COLOUR = {"problem": "#e0574f", "suspect": "#e0a23f", "note": "#5b9bd5"}
+LEVEL_COLOUR = {"error": "#e0574f", "fact": "#5b9bd5"}
+
+
+def _level(finding) -> str:
+    """`error` or `fact`, as the build output says it (report.py holds the rules)."""
+    from . import report
+
+    try:
+        return report.level(finding)
+    except (AttributeError, TypeError):
+        return report.FACT
 
 
 def _variant_colour(base_hex: str, name: str) -> str:
@@ -1118,8 +1128,8 @@ def render_svg(blueprint, findings: Iterable = ()) -> str:
         position = getattr(finding, "position", None)
         if position is None:
             continue
-        severity = getattr(getattr(finding, "severity", None), "value", "note")
-        colour = SEVERITY_COLOUR.get(severity, SEVERITY_COLOUR["note"])
+        level = _level(finding)
+        colour = LEVEL_COLOUR[level]
         fx, fy = px(position[0] + 0.5, position[1] + 0.5)
         summary = getattr(finding, "summary", "")
         parts.append(
@@ -1127,7 +1137,7 @@ def render_svg(blueprint, findings: Iterable = ()) -> str:
             f'fill="none" stroke="{colour}" stroke-width="3"/>'
             f'<circle cx="{fx:.1f}" cy="{fy:.1f}" r="{CELL * 0.42:.1f}" fill="{colour}" '
             f'opacity=".18"/>'
-            f"<title>{html.escape(f'{severity}: {summary}')}</title></g>"
+            f"<title>{html.escape(f'{level}: {summary}')}</title></g>"
         )
 
     parts.append("</svg>")
@@ -1449,24 +1459,22 @@ def _parameters_card(blueprint) -> str:
 
 
 def _findings_card(findings: list) -> str:
-    """What the checks said, grouped by how sure they are."""
+    """What the checks said: errors first, then facts, as the build output has them."""
     if not findings:
         return ""
     groups: dict[str, list] = {}
     for finding in findings:
-        severity = getattr(getattr(finding, "severity", None), "value", "note")
-        groups.setdefault(severity, []).append(finding)
+        groups.setdefault(_level(finding), []).append(finding)
 
     blocks = []
-    for severity, heading in (
-        ("problem", "almost certainly wrong"),
-        ("suspect", "worth a look"),
-        ("note", "notes"),
+    for level, heading in (
+        ("error", "errors: will not stand or will not work"),
+        ("fact", "facts"),
     ):
-        items = groups.get(severity)
+        items = groups.get(level)
         if not items:
             continue
-        colour = SEVERITY_COLOUR[severity]
+        colour = LEVEL_COLOUR[level]
         rows = "".join(
             f'<div><span class="swatch" style="background:{colour}"></span>'
             f"{html.escape(getattr(f, 'summary', ''))}"

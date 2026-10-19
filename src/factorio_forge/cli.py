@@ -804,6 +804,14 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0 if result.ready else 1
 
 
+def _cmd_chain(args: argparse.Namespace) -> int:
+    """An order in; a draft plan for every stage, built once, out."""
+    from . import chain
+
+    code = chain.run(args)
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="factorio-forge",
@@ -927,6 +935,17 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("-o", "--output", help="directory to write into (default: beside the plan)")
     build.add_argument("--no-render", action="store_true")
     build.set_defaults(func=_cmd_build)
+
+    chain_cmd = sub.add_parser(
+        "chain", help="an order (request.json, or item=rate words) to a draft plan for every stage, built once"
+    )
+    chain_cmd.add_argument("order", nargs="+", help="a request JSON file, or words like advanced-circuit=1 (per second; =60/m per minute)")
+    chain_cmd.add_argument("-o", "--output", default="chain-plan.json", help="the plan file to write (default: chain-plan.json)")
+    chain_cmd.add_argument("--boundary", help="comma-separated goods that arrive from outside (with item=rate words)")
+    chain_cmd.add_argument("--surface", help="the planet or surface (with item=rate words)")
+    chain_cmd.add_argument("--no-build", action="store_true", help="write the plan only")
+    chain_cmd.add_argument("--no-render", action="store_true")
+    chain_cmd.set_defaults(func=_cmd_chain)
 
     from . import measure
 
