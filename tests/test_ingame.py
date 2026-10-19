@@ -95,71 +95,89 @@ class TestStub:
 
     def test_the_stub_is_python_that_reads_back_as_the_case(self) -> None:
         v = self.verdict()
-        source = ingame.test_stub(self.PLAN, v)
+        source = ingame.test_stub(self.PLAN, v, {"x": 1.5})
         ast.parse(source)
         namespace: dict = {}
-        exec(compile(source.split("\n\n\ndef ")[0].replace("from factorio_forge import plan as plan_module\n", ""),
-                     "<stub>", "exec"), namespace)
-        assert namespace["PLAN"] == self.PLAN
+        literals = [n for n in ast.parse(source).body
+                    if isinstance(n, ast.Assign) and n.targets[0].id in
+                    ("PLAN", "PLANNED", "GAME_MISSING", "GAME_REFUSED")]
+        exec(compile(ast.Module(body=literals, type_ignores=[]), "<stub>", "exec"), namespace)
+        assert namespace["PLAN"] == self.PLAN and namespace["PLANNED"] == {"x": 1.5}
         assert namespace["GAME_REFUSED"] == {HOSTILE: 2}
         assert namespace["GAME_MISSING"] == {"q'\"": 1}
-        assert ingame.stub_reads_back(source, self.PLAN, v)
+        assert ingame.stub_reads_back(source, self.PLAN, v, {"x": 1.5})
 
     def test_no_game_text_reaches_a_comment_or_the_code_around_the_literals(self) -> None:
         source = ingame.test_stub(self.PLAN, self.verdict())
         tree = ast.parse(source)
-        # Nothing but the literals carries the names: removing the three
-        # assignments leaves text without a trace of them.
+        # Nothing but the literals carries the names: removing the assignments
+        # leaves text without a trace of them.
         rest = "\n".join(
             line for line in source.splitlines()
             if not line.startswith(("PLAN = ", "GAME_MISSING = ", "GAME_REFUSED = ")))
         assert "evil" not in rest and "import os" not in rest
-        assert [n.names[0].name for n in tree.body if isinstance(n, ast.ImportFrom)] == ["plan"]
+        imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+        assert {a.name for n in imports for a in n.names} == {"pytest", "entities", "recipes", "plan"}
         assert "\n'" not in source and "\x1b" not in source and "\r" not in source
 
     def test_a_stub_that_does_not_read_back_is_caught(self) -> None:
         v = self.verdict()
         assert not ingame.stub_reads_back("PLAN = {", self.PLAN, v)
         assert not ingame.stub_reads_back(ingame.test_stub(self.PLAN, v), {"other": 1}, v)
+        assert not ingame.stub_reads_back(ingame.test_stub(self.PLAN, v), self.PLAN, v, {"x": 1})
 
-    def test_the_stub_asks_the_model_to_see_a_problem(self) -> None:
-        source = ingame.test_stub({}, verdict_of(placed=0, refused={"x": 1}))
+    def test_the_stub_asks_the_model_to_see_a_problem_and_keeps_the_suite_green(self) -> None:
+        source = ingame.test_stub({}, verdict_of(placed=0, refused={"x": 1}), {"x": 2})
         assert "result.problems" in source
+        assert "pytest.mark.xfail(strict=True" in source  # red only once the model learns the rule
+        assert "plan_module.build(PLAN, PLANNED or None)" in source  # the rates deliver used
+
+    def test_the_stub_skips_where_the_data_lacks_a_name_of_the_plan(self, tmp_path) -> None:
+        from draftsman.data import entities as entity_data
+        from draftsman.data import recipes as recipe_data
+
+        entity, recipe = next(iter(entity_data.raw)), next(iter(recipe_data.raw))
+        plan_dict = {"a": [entity, {"r": recipe}], "label": HOSTILE}
+        source = ingame.test_stub(plan_dict, verdict_of(placed=1, refused={HOSTILE: 1}))
+        assert "allow_module_level=True" in source
+        found = {n.targets[0].id: ast.literal_eval(n.value) for n in ast.parse(source).body
+                 if isinstance(n, ast.Assign) and n.targets[0].id.startswith("NEEDS_")}
+        assert entity in found["NEEDS_ENTITIES"] and recipe in found["NEEDS_RECIPES"]
+        assert HOSTILE not in found["NEEDS_ENTITIES"]
+        # Made for a mod that the active data does not have: the module skips.
+        fake = source.replace(repr(entity), repr("no-such-entity-in-any-mod"))
+        path = tmp_path / "stub_case.py"
+        path.write_text(fake, encoding="utf-8")
+        with pytest.raises(pytest.skip.Exception):
+            exec(compile(fake, str(path), "exec"), {"__name__": "stub_case"})
 
 
 # --------------------------------------------------------------------------
-# the companion zip and the setup
+# the setup
 # --------------------------------------------------------------------------
 
 
 @pytest.fixture
 def companion(tmp_path: Path) -> Path:
-    root = tmp_path / "companion"
+    root = tmp_path / "source" / "companion"
     (root / "tools").mkdir(parents=True)
-    (root / "locale" / "en").mkdir(parents=True)
     (root / "info.json").write_text(json.dumps({"name": "demo-mod", "version": "1.2.3"}))
     (root / "control.lua").write_text("-- lua")
-    (root / "locale" / "en" / "strings.cfg").write_text("[forge]")
     (root / "tools" / "headless-run.ps1").write_text("# runner")
-    (root / "tools" / "lint.py").write_text("# not shipped")
+    (root / "tools" / "build.ps1").write_text("# builder")
     return root
 
 
-class TestPack:
-    def test_the_zip_has_one_folder_with_forward_slashes(self, companion: Path, tmp_path: Path) -> None:
-        archive = ingame.pack_companion(companion, tmp_path)
-        assert archive.name == "demo-mod_1.2.3.zip"
-        names = zipfile.ZipFile(archive).namelist()
-        assert "demo-mod_1.2.3/info.json" in names and "demo-mod_1.2.3/locale/en/strings.cfg" in names
-        assert all("\\" not in n and n.startswith("demo-mod_1.2.3/") for n in names)
-        assert not any("tools" in n for n in names)
-
-    @pytest.mark.parametrize("info", ["not json", json.dumps({"name": "../x", "version": "1.0.0"}),
-                                      json.dumps({"name": "ok", "version": "1.0"})])
-    def test_an_odd_info_json_is_not_packed(self, companion: Path, tmp_path: Path, info: str) -> None:
-        (companion / "info.json").write_text(info)
-        with pytest.raises(ingame.NotChecked):
-            ingame.pack_companion(companion, tmp_path)
+def fake_build(cmd: list[str]) -> subprocess.CompletedProcess:
+    """What the companion's build.ps1 does: a zip in dist/ next to tools/."""
+    script = Path(cmd[cmd.index("-File") + 1])
+    info = json.loads((script.parent.parent / "info.json").read_text())
+    dist = script.parent.parent / "dist"
+    dist.mkdir(exist_ok=True)
+    folder = f"{info['name']}_{info['version']}"
+    with zipfile.ZipFile(dist / f"{folder}.zip", "w") as z:
+        z.writestr(f"{folder}/info.json", json.dumps(info))
+    return subprocess.CompletedProcess(cmd, 0, "built", "")
 
 
 @pytest.fixture
@@ -181,44 +199,96 @@ def world(companion: Path, tmp_path: Path, monkeypatch):
     return SimpleNamespace(companion=companion, saves=saves, binary=binary)
 
 
+def scripted(build=fake_build):
+    """A stand-in for the process runner that knows the build script."""
+    def run(cmd, **kwargs):
+        if "build.ps1" in cmd[-1]:
+            return build(cmd)
+        raise AssertionError("only the build script may run here")
+    return run
+
+
 class TestLocate:
     def test_the_environment_variable_names_the_companion(self, world, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv(ingame.ENV_COMPANION, str(world.companion))
-        setup = ingame.locate("Mine", work=tmp_path)
+        setup = ingame.locate("Mine", work=tmp_path, run=scripted())
         assert setup.runner == world.companion / "tools" / "headless-run.ps1"
         assert setup.save == world.saves / "Mine.zip" and setup.mod_zip.name == "demo-mod_1.2.3.zip"
 
+    def test_the_zip_comes_from_the_companions_own_build_script_in_a_copy(self, world, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv(ingame.ENV_COMPANION, str(world.companion))
+        work = tmp_path / "work"
+        work.mkdir()
+        setup = ingame.locate("Mine", work=work, run=scripted())
+        assert work in setup.mod_zip.parents
+        assert not (world.companion / "dist").exists()  # the repository is not written to
+
     def test_the_config_file_works_too(self, world, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(paths, "load_config", lambda: {"companion": str(world.companion)})
-        assert ingame.locate("Mine", work=tmp_path).runner.name == "headless-run.ps1"
+        assert ingame.locate("Mine", work=tmp_path, run=scripted()).runner.name == "headless-run.ps1"
 
-    def test_a_zip_needs_the_runner_named_separately(self, world, tmp_path, monkeypatch) -> None:
-        archive = ingame.pack_companion(world.companion, tmp_path)
+    def test_a_built_zip_needs_the_runner_named_separately(self, world, tmp_path, monkeypatch) -> None:
+        archive = tmp_path / "demo-mod_1.2.3.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("demo-mod_1.2.3/info.json", json.dumps({"name": "demo-mod", "version": "1.2.3"}))
         monkeypatch.setenv(ingame.ENV_COMPANION, str(archive))
-        with pytest.raises(ingame.NotChecked, match=ingame.ENV_RUNNER):
+        with pytest.raises(ingame.CheckFailed, match=ingame.ENV_RUNNER):
             ingame.locate("Mine", work=tmp_path)
         monkeypatch.setenv(ingame.ENV_RUNNER, str(world.companion / "tools" / "headless-run.ps1"))
         assert ingame.locate("Mine", work=tmp_path).mod_zip == archive
 
-    @pytest.mark.parametrize("what", ["platform", "no-shell", "no-companion", "no-game", "no-save", "no-profile-save"])
-    def test_each_missing_piece_is_a_plain_reason(self, world, tmp_path, monkeypatch, what) -> None:
+    @pytest.mark.parametrize("what", ["platform", "no-shell", "no-companion", "no-game"])
+    def test_a_machine_that_cannot_ask_the_game_is_not_checked(self, world, tmp_path, monkeypatch, what) -> None:
         monkeypatch.setenv(ingame.ENV_COMPANION, str(world.companion))
-        save = "Mine"
         if what == "platform":
             monkeypatch.setattr(ingame.sys, "platform", "linux")
         elif what == "no-shell":
             monkeypatch.setattr(ingame.shutil, "which", lambda name: None)
         elif what == "no-companion":
             monkeypatch.delenv(ingame.ENV_COMPANION)
-        elif what == "no-game":
+        else:
             monkeypatch.setattr(paths, "factorio_binary", lambda: None)
+        with pytest.raises(ingame.NotChecked) as caught:
+            ingame.locate("Mine", work=tmp_path, run=scripted())
+        assert str(caught.value) and "\n" not in str(caught.value)
+
+    @pytest.mark.parametrize("what", [
+        "missing-folder", "no-runner", "no-save", "no-profile-save", "bad-info", "too-old", "no-build-script",
+        "build-fails", "build-makes-nothing"])
+    def test_a_setup_that_is_named_but_broken_fails_instead_of_passing_quietly(
+            self, world, tmp_path, monkeypatch, what) -> None:
+        monkeypatch.setenv(ingame.ENV_COMPANION, str(world.companion))
+        save, build = "Mine", fake_build
+        if what == "missing-folder":
+            monkeypatch.setenv(ingame.ENV_COMPANION, str(tmp_path / "nowhere"))
+        elif what == "no-runner":
+            monkeypatch.setenv(ingame.ENV_RUNNER, str(tmp_path / "gone.ps1"))
         elif what == "no-save":
             save = "Missing"
-        else:
+        elif what == "no-profile-save":
             save = None
-        with pytest.raises(ingame.NotChecked) as caught:
-            ingame.locate(save, work=tmp_path)
+        elif what == "bad-info":
+            (world.companion / "info.json").write_text("not json")
+        elif what == "too-old":
+            (world.companion / "info.json").write_text(json.dumps({"name": "demo-mod", "version": "0.7.0"}))
+        elif what == "no-build-script":
+            (world.companion / "tools" / "build.ps1").unlink()
+        elif what == "build-fails":
+            build = lambda cmd: subprocess.CompletedProcess(cmd, 1, "", "boom\nlast words")  # noqa: E731
+        else:
+            build = lambda cmd: subprocess.CompletedProcess(cmd, 0, "", "")  # noqa: E731
+        with pytest.raises(ingame.CheckFailed) as caught:
+            ingame.locate(save, work=tmp_path, run=scripted(build))
         assert str(caught.value) and "\n" not in str(caught.value)
+
+    def test_a_zip_of_an_old_companion_fails(self, world, tmp_path, monkeypatch) -> None:
+        archive = tmp_path / "old.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("demo-mod_0.7.0/info.json", json.dumps({"name": "demo-mod", "version": "0.7.0"}))
+        monkeypatch.setenv(ingame.ENV_COMPANION, str(archive))
+        monkeypatch.setenv(ingame.ENV_RUNNER, str(world.companion / "tools" / "headless-run.ps1"))
+        with pytest.raises(ingame.CheckFailed, match="0.7.1"):
+            ingame.locate("Mine", work=tmp_path)
 
 
 class TestCheckInGame:
@@ -226,6 +296,8 @@ class TestCheckInGame:
         monkeypatch.setenv(ingame.ENV_COMPANION, str(world.companion))
 
         def run(cmd, **kwargs):
+            if "build.ps1" in cmd[-1]:
+                return fake_build(cmd)
             if seen is not None:
                 seen.append((cmd, kwargs))
             if raises:
@@ -260,9 +332,9 @@ class TestCheckInGame:
         v = ingame.check_in_game("bp", entities=2, profile_save="Mine", run=run)
         assert v.status == "refused" and v.refused == {"x": 1}
 
-    def test_factorio_already_running_skips_the_check(self, world, monkeypatch) -> None:
+    def test_factorio_already_running_withholds(self, world, monkeypatch) -> None:
         v = ingame.check_in_game("bp", entities=1, profile_save="Mine", run=self.runner(world, monkeypatch, code=2))
-        assert v.status == "not-checked" and "already running" in v.reason
+        assert v.status == "failed" and "already running" in v.reason and not v.delivered
 
     def test_a_runner_that_stops_is_a_failure_not_a_pass(self, world, monkeypatch) -> None:
         v = ingame.check_in_game("bp", entities=1, profile_save="Mine", run=self.runner(world, monkeypatch, code=1))
@@ -276,11 +348,70 @@ class TestCheckInGame:
         run = self.runner(world, monkeypatch, raises=subprocess.TimeoutExpired("x", 1))
         assert ingame.check_in_game("bp", entities=1, profile_save="Mine", run=run).status == "failed"
 
+    def test_a_runner_that_cannot_start_withholds(self, world, monkeypatch) -> None:
+        run = self.runner(world, monkeypatch, raises=OSError("no such shell"))
+        v = ingame.check_in_game("bp", entities=1, profile_save="Mine", run=run)
+        assert v.status == "failed" and not v.delivered
+
+    def test_a_missing_save_withholds(self, world, monkeypatch) -> None:
+        run = self.runner(world, monkeypatch)
+        assert ingame.check_in_game("bp", entities=1, profile_save="Nope", run=run).status == "failed"
+
     def test_nothing_set_up_never_starts_a_process(self, world, monkeypatch) -> None:
         def run(*a, **k):
             raise AssertionError("must not run")
         v = ingame.check_in_game("bp", entities=1, profile_save="Mine", run=run)
         assert v.status == "not-checked" and ingame.ENV_COMPANION in v.reason
+
+
+class TestRunTree:
+    """The default runner ends the shell AND what it started when time runs out."""
+
+    def test_a_timeout_ends_the_whole_tree_then_raises(self, monkeypatch) -> None:
+        killed: list = []
+
+        class Hung:
+            pid = 4242
+
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired("x", timeout)
+
+            def kill(self):
+                killed.append("proc.kill")
+        seen: dict = {}
+
+        def popen(cmd, **kwargs):
+            seen.update(kwargs)
+            return Hung()
+        calls: list = []
+        monkeypatch.setattr(ingame.subprocess, "Popen", popen)
+        monkeypatch.setattr(ingame.subprocess, "run", lambda cmd, **k: calls.append(cmd))
+        with pytest.raises(subprocess.TimeoutExpired):
+            ingame.run_tree(["pwsh", "-File", "x"], timeout=1)
+        assert calls == [["taskkill", "/T", "/F", "/PID", "4242"]]
+        assert "proc.kill" in killed
+        assert seen["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        assert seen["stdin"] == subprocess.DEVNULL
+
+    def test_a_finished_run_is_returned_whole(self, monkeypatch) -> None:
+        class Done:
+            pid, returncode = 1, 0
+
+            def communicate(self, timeout=None):
+                return "out", "err"
+        monkeypatch.setattr(ingame.subprocess, "Popen", lambda cmd, **k: Done())
+        done = ingame.run_tree(["x"], timeout=1)
+        assert (done.returncode, done.stdout, done.stderr) == (0, "out", "err")
+
+    def test_a_timeout_in_check_in_game_says_the_tree_was_ended(self, world, monkeypatch) -> None:
+        monkeypatch.setenv(ingame.ENV_COMPANION, str(world.companion))
+
+        def run(cmd, **kwargs):
+            if "build.ps1" in cmd[-1]:
+                return fake_build(cmd)
+            raise subprocess.TimeoutExpired(cmd, 1)
+        v = ingame.check_in_game("bp", entities=1, profile_save="Mine", run=run)
+        assert v.status == "failed" and "process tree" in v.reason
 
 
 # --------------------------------------------------------------------------
@@ -302,7 +433,7 @@ def built(monkeypatch):
 
     def build(data, planned=None):
         return SimpleNamespace(label="Demo plan", blueprint=FakeBlueprint(), power_networks=1,
-                               problems=state.problems, routes=state.routes, findings=[],
+                               problems=state.problems, routes=state.routes, findings=[], warnings=[],
                                to_dict=lambda: {"label": "Demo plan"})
     monkeypatch.setattr(plan, "load", lambda path: {"label": "Demo plan"})
     monkeypatch.setattr(plan, "build", build)
@@ -376,8 +507,30 @@ class TestDeliver:
         assert run_deliver(tmp_path, verdict_of()) == 0
         assert not (tmp_path / "Demo-plan.unverified.txt").exists()
 
-    def test_a_refusal_warns_about_an_older_delivered_file(self, tmp_path, built, capsys) -> None:
+    def test_a_refusal_moves_an_older_delivered_file_aside(self, tmp_path, built, capsys) -> None:
         run_deliver(tmp_path, verdict_of())
         capsys.readouterr()
         assert run_deliver(tmp_path, verdict_of(placed=1, refused={"x": 1})) == 1
-        assert "from an earlier build" in capsys.readouterr().out
+        assert not (tmp_path / "Demo-plan.txt").exists()
+        assert (tmp_path / "Demo-plan.stale.txt").exists() and (tmp_path / "Demo-plan.unverified.txt").exists()
+        assert "from another build" in capsys.readouterr().out
+
+    def test_a_failed_run_moves_an_older_delivered_file_aside_too(self, tmp_path, built) -> None:
+        run_deliver(tmp_path, verdict_of())
+        assert run_deliver(tmp_path, ingame.Verdict("failed", "Factorio is already running")) == 1
+        assert not (tmp_path / "Demo-plan.txt").exists() and (tmp_path / "Demo-plan.stale.txt").exists()
+
+    def test_the_report_carries_the_request_warnings_like_build(self, tmp_path, built, monkeypatch) -> None:
+        warnings_seen = []
+
+        def build(data, planned=None):
+            return SimpleNamespace(label="Demo plan", blueprint=FakeBlueprint(), power_networks=1, problems=[],
+                                   routes=[], findings=[], warnings=warnings_seen,
+                                   to_dict=lambda: {"warnings": list(warnings_seen)})
+        monkeypatch.setattr(plan, "load", lambda path: {"label": "Demo plan", "request": {"x": 1}})
+        monkeypatch.setattr(plan, "planned_from_request", lambda data, path: ({"x": 1.0}, ["rate was lowered"]))
+        monkeypatch.setattr(plan, "build", build)
+        assert run_deliver(tmp_path, verdict_of(placed=1, refused={"x": 1})) == 1
+        report = json.loads((tmp_path / "Demo-plan.report.json").read_text())
+        assert report["warnings"] == ["rate was lowered"]
+        assert "PLANNED = {'x': 1.0}" in (tmp_path / "Demo-plan.game-refused-test.py").read_text()

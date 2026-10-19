@@ -10,8 +10,12 @@ checks use a model of the game; the game is the judge.
 * the game refused some  -> ``<name>.unverified.txt`` is written instead, exit
   code 1, and ``<name>.game-refused-test.py`` holds the case as a test stub, so
   that the model learns what the game just taught;
-* no way to ask the game -> delivered as ``build`` would, with the line
-  ``not checked in the game: <reason>``.
+* no way to ask the game at all (not Windows, no PowerShell, no Factorio, no
+  companion set up) -> delivered as ``build`` would, with the line
+  ``not checked in the game: <reason>``;
+* a check that was set up but could not run (the game is open, the save or the
+  runner is missing, the run hung or died) -> withheld like a refusal, but
+  without a test stub.
 
 Everything the game sends back (entity names above all, mods choose them) is
 data. It is validated, shown through ``repr`` and put into code only as a
@@ -20,7 +24,8 @@ Python literal.
 Where the companion lives is not guessed. ``FACTORIO_FORGE_COMPANION`` (or the
 ``companion`` key of ``config.json`` in the forge home) names its repository
 folder, or a built ``.zip`` of the mod; with a zip, the runner script comes from
-``FACTORIO_FORGE_RUNNER`` (or the ``runner`` key).
+``FACTORIO_FORGE_RUNNER`` (or the ``runner`` key). A repository folder is copied
+into a temporary one and built there with its own ``tools/build.ps1``.
 """
 
 from __future__ import annotations
@@ -47,10 +52,18 @@ DEFAULT_TIMEOUT_S = 300
 _SLACK_S = 60
 # How many kinds of one list are shown in the verdict.
 _SHOWN = 12
+# Building the companion zip from its own script.
+BUILD_TIMEOUT_S = 120
+# /forge-verify over RCON without a player needs this companion or newer.
+MIN_COMPANION = (0, 7, 1)
 
 
 class NotChecked(Exception):
-    """The game cannot be asked; the message says why, in one line."""
+    """The game cannot be asked on this machine; the blueprint is delivered unchecked."""
+
+
+class CheckFailed(Exception):
+    """The check was set up but cannot run; the blueprint is withheld."""
 
 
 # --------------------------------------------------------------------------
@@ -162,26 +175,70 @@ def _literal(value: object) -> str:
     return repr(str(value))
 
 
-def test_stub(plan: dict, verdict: Verdict) -> str:
+def _strings(value: object) -> set[str]:
+    """Every string anywhere inside JSON-shaped data."""
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        return {s for k, v in value.items() for s in _strings(k) | _strings(v)}
+    if isinstance(value, (list, tuple)):
+        return {s for v in value for s in _strings(v)}
+    return set()
+
+
+def needed_names(plan: dict, verdict: Verdict) -> tuple[list[str], list[str]]:
+    """The entity and recipe names of this plan that the active data knows.
+
+    The stub skips itself where the data lacks one of them (other mods, other
+    profile), the way the tests that read recorded game runs do.
+    """
+    try:
+        from draftsman.data import entities as entity_data
+        from draftsman.data import recipes as recipe_data
+    except ImportError:
+        return [], []
+    words = _strings(plan) | set(verdict.refused)
+    return (sorted(w for w in words if w in entity_data.raw),
+            sorted(w for w in words if w in recipe_data.raw))
+
+
+def test_stub(plan: dict, verdict: Verdict, planned: dict | None = None) -> str:
     """Python source of a test that turns the game's refusal into a regression.
 
     The test builds the same plan and expects the model to see a problem too.
-    The plan and the names the game gave are written with ``repr`` only: no
-    game-chosen text reaches a comment, an identifier or a string by
-    concatenation.
+    It is marked as an expected failure (strict), so the suite stays green until
+    the model learns the rule and then flags the mark for removal; it skips
+    itself where the active data lacks a name the plan uses. The plan and the
+    names the game gave are written with ``repr`` only: no game-chosen text
+    reaches a comment, an identifier or a string by concatenation.
     """
+    entities, recipes = needed_names(plan, verdict)
     return (
         "# The game refused this blueprint although forge's own checks passed.\n"
-        "# Teach the model what the game knows, then keep this test.\n"
+        "# Teach the model what the game knows, then remove the xfail mark.\n"
+        "import pytest\n"
+        "from draftsman.data import entities as entity_data\n"
+        "from draftsman.data import recipes as recipe_data\n"
+        "\n"
         "from factorio_forge import plan as plan_module\n"
         "\n"
         f"PLAN = {_literal(plan)}\n"
+        f"PLANNED = {_literal(planned)}\n"
         f"GAME_MISSING = {_literal(dict(sorted(verdict.missing.items())))}\n"
         f"GAME_REFUSED = {_literal(dict(sorted(verdict.refused.items())))}\n"
+        f"NEEDS_ENTITIES = {_literal(entities)}\n"
+        f"NEEDS_RECIPES = {_literal(recipes)}\n"
+        "\n"
+        "_absent = (sorted(set(NEEDS_ENTITIES) - set(entity_data.raw))\n"
+        "           + sorted(set(NEEDS_RECIPES) - set(recipe_data.raw)))\n"
+        "if _absent:\n"
+        "    pytest.skip('the active game data does not know ' + repr(_absent[0]), allow_module_level=True)\n"
         "\n"
         "\n"
+        "@pytest.mark.xfail(strict=True, raises=AssertionError,\n"
+        "                   reason='the model does not know this rule yet; remove this mark once it is taught')\n"
         "def test_the_model_sees_what_the_game_refused():\n"
-        "    result = plan_module.build(PLAN)\n"
+        "    result = plan_module.build(PLAN, PLANNED or None)\n"
         "    assert result.problems, (\n"
         "        'the game refused part of this blueprint, but the model finds no problem: '\n"
         "        + repr((GAME_MISSING, GAME_REFUSED))\n"
@@ -193,51 +250,141 @@ def test_stub(plan: dict, verdict: Verdict) -> str:
 test_stub.__test__ = False  # type: ignore[attr-defined]
 
 
-def stub_reads_back(source: str, plan: dict, verdict: Verdict) -> bool:
+def stub_reads_back(source: str, plan: dict, verdict: Verdict, planned: dict | None = None) -> bool:
     """True when the stub parses and its literals read back as what was meant."""
     try:
         tree = ast.parse(source)
         found = {}
         for node in tree.body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-                found[node.targets[0].id] = ast.literal_eval(node.value)
-    except (SyntaxError, ValueError):
+                try:
+                    found[node.targets[0].id] = ast.literal_eval(node.value)
+                except ValueError:
+                    pass  # `_absent = ...` is code, not a literal
+    except SyntaxError:
         return False
+    entities, recipes = needed_names(plan, verdict)
     return (found.get("PLAN") == json.loads(json.dumps(plan))
+            and found.get("PLANNED") == (json.loads(json.dumps(planned)) if planned is not None else None)
             and found.get("GAME_MISSING") == dict(verdict.missing)
-            and found.get("GAME_REFUSED") == dict(verdict.refused))
+            and found.get("GAME_REFUSED") == dict(verdict.refused)
+            and found.get("NEEDS_ENTITIES") == entities
+            and found.get("NEEDS_RECIPES") == recipes
+            and "pytest.mark.xfail(strict=True" in source
+            and "allow_module_level=True" in source)
+
+
+# --------------------------------------------------------------------------
+# running a process, and ending all of it
+# --------------------------------------------------------------------------
+
+
+def kill_tree(pid: int) -> None:
+    """End a process and everything it started (the game is a child of the runner)."""
+    try:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(int(pid))], capture_output=True,
+                       check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def run_tree(cmd: list[str], *, timeout: float, **_ignored) -> subprocess.CompletedProcess:
+    """Run an argument list; on a timeout the whole process tree is ended, then it raises.
+
+    ``subprocess.run`` would end only the shell, leaving the game server it
+    started running (and the runner's own clean-up unrun).
+    """
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", creationflags=flags)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc.pid)
+        try:
+            proc.kill()
+            proc.communicate(timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _tail(done: subprocess.CompletedProcess) -> str:
+    lines = [ln for ln in (done.stderr or done.stdout or "").splitlines() if ln.strip()][-3:]
+    return ": " + safe(" | ".join(lines), 400) if lines else ""
 
 
 # --------------------------------------------------------------------------
 # finding the runner, the mod and the save
 # --------------------------------------------------------------------------
 
-_PACKED = ("info.json", "changelog.txt", "LICENSE")
+
+def _version(text: object) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", text) if isinstance(text, str) else None
+    return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
 
 
-def pack_companion(source: Path, dest: Path) -> Path:
-    """A mod zip made from the companion's source folder, in ``dest``.
+def _check_info(raw: bytes | str, where: str) -> tuple[str, str]:
+    """Name and version out of a companion's info.json; CheckFailed when odd or too old."""
+    try:
+        info = json.loads(raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw)
+        name, version = str(info["name"]), str(info["version"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise CheckFailed(f"the companion's info.json in {safe(where)} cannot be read ({safe(exc)})") from exc
+    parsed = _version(version)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or parsed is None:
+        raise CheckFailed(f"the companion's info.json in {safe(where)} has an odd name or version")
+    if parsed < MIN_COMPANION:
+        need = ".".join(map(str, MIN_COMPANION))
+        raise CheckFailed(f"the companion is version {version}; /forge-verify needs {need} or newer")
+    return name, version
 
-    The game wants one top-level folder ``<name>_<version>`` holding info.json,
-    with forward slashes in the entry names (what the companion's own build
-    script does). Only files the game reads go in.
+
+def build_companion(source: Path, work: Path, shell: str, run) -> Path:
+    """The companion's mod zip, made by a copy of its own tools/build.ps1.
+
+    The repository is copied into `work` first, so the script's ``dist/`` lands
+    there and the repository is never written to; the file list stays the
+    companion's own.
     """
     try:
-        info = json.loads((source / "info.json").read_text(encoding="utf-8-sig"))
-        name, version = str(info["name"]), str(info["version"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise NotChecked(f"the companion folder has no readable info.json ({safe(exc)})") from exc
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        raise NotChecked("the companion's info.json has an odd name or version")
-    folder = f"{name}_{version}"
-    files = sorted(source.glob("*.lua"))
-    files += [source / n for n in _PACKED if (source / n).is_file()]
-    files += sorted(source.glob("locale/*/*.cfg"))
-    archive = dest / f"{folder}.zip"
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
-        for path in files:
-            z.write(path, f"{folder}/{path.relative_to(source).as_posix()}")
+        name, version = _check_info((source / "info.json").read_bytes(), str(source))
+    except OSError as exc:
+        raise CheckFailed(f"the companion folder has no readable info.json ({safe(exc)})") from exc
+    if not (source / "tools" / "build.ps1").is_file():
+        raise CheckFailed(f"the companion folder {safe(source)} has no tools/build.ps1")
+    copy = work / "companion"
+    try:
+        shutil.copytree(source, copy, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", "dist", "node_modules", "__pycache__"))
+    except (OSError, shutil.Error) as exc:
+        raise CheckFailed(f"the companion folder could not be copied ({safe(exc)})") from exc
+    cmd = [shell, "-NoProfile", "-NonInteractive", "-File", str(copy / "tools" / "build.ps1")]
+    try:
+        done = run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                   timeout=BUILD_TIMEOUT_S, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise CheckFailed(f"building the companion took longer than {BUILD_TIMEOUT_S} s") from exc
+    except OSError as exc:
+        raise CheckFailed(f"the companion's build script could not be started ({safe(exc)})") from exc
+    archive = copy / "dist" / f"{name}_{version}.zip"
+    if done.returncode != 0 or not archive.is_file():
+        raise CheckFailed(f"building the companion failed (code {done.returncode}){_tail(done)}")
     return archive
+
+
+def _zip_info(archive: Path) -> None:
+    """A built companion zip must be a mod of an accepted version."""
+    try:
+        with zipfile.ZipFile(archive) as z:
+            hits = [n for n in z.namelist() if re.fullmatch(r"[^/]+/info\.json", n)]
+            if len(hits) != 1:
+                raise CheckFailed(f"{safe(archive)} does not hold one <mod>/info.json")
+            raw = z.read(hits[0])
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise CheckFailed(f"{safe(archive)} cannot be read as a zip ({safe(exc)})") from exc
+    _check_info(raw, str(archive))
 
 
 @dataclass
@@ -261,8 +408,13 @@ def _setting(env: str, key: str) -> str | None:
 
 
 def locate(profile_save: str | None, *, save: str | None = None, companion: str | None = None,
-           work: Path) -> Setup:
-    """Everything the check needs, or NotChecked with the reason."""
+           work: Path, run=run_tree) -> Setup:
+    """Everything the check needs.
+
+    NotChecked when this machine cannot ask the game at all (not Windows, no
+    PowerShell, no Factorio, no companion named); CheckFailed when the player
+    set it up but something named is wrong or missing.
+    """
     from . import paths
 
     if not sys.platform.startswith("win"):
@@ -270,40 +422,41 @@ def locate(profile_save: str | None, *, save: str | None = None, companion: str 
     shell = shutil.which("powershell") or shutil.which("pwsh")
     if not shell:
         raise NotChecked("PowerShell was not found")
-
+    binary = paths.factorio_binary()
+    if binary is None:
+        raise NotChecked("Factorio is not installed here, or its folder was not found")
     where = companion or _setting(ENV_COMPANION, "companion")
     if not where:
         raise NotChecked(f"no companion mod is set up (set {ENV_COMPANION} to its folder or a built zip; see docs/checking.md)")
+
     where_path = Path(where).expanduser()
     runner_text = _setting(ENV_RUNNER, "runner")
     if where_path.is_dir():
         runner = Path(runner_text).expanduser() if runner_text else where_path / RUNNER_RELATIVE
-        mod_zip = None
     elif where_path.is_file() and where_path.suffix.lower() == ".zip":
         if not runner_text:
-            raise NotChecked(f"{ENV_COMPANION} is a zip; {ENV_RUNNER} must name headless-run.ps1")
-        runner, mod_zip = Path(runner_text).expanduser(), where_path
+            raise CheckFailed(f"{ENV_COMPANION} is a zip; {ENV_RUNNER} must name headless-run.ps1")
+        runner = Path(runner_text).expanduser()
     else:
-        raise NotChecked(f"{ENV_COMPANION} names neither a folder nor a .zip that exists")
+        raise CheckFailed(f"{ENV_COMPANION} names neither a folder nor a .zip that exists")
     if not runner.is_file():
-        raise NotChecked(f"the runner script was not found at {safe(runner)}")
-    if mod_zip is None:
-        mod_zip = pack_companion(where_path, work)
-
-    binary = paths.factorio_binary()
-    if binary is None:
-        raise NotChecked("Factorio is not installed here, or its folder was not found")
+        raise CheckFailed(f"the runner script was not found at {safe(runner)}")
+    if where_path.is_dir():
+        mod_zip = build_companion(where_path, work, shell, run)
+    else:
+        _zip_info(where_path)
+        mod_zip = where_path
 
     chosen = save or profile_save
     if not chosen:
-        raise NotChecked("the active profile does not name its save; pass --save")
+        raise CheckFailed("the active profile does not name its save; pass --save")
     candidate = Path(chosen).expanduser()
     if not candidate.is_file():
         saves = paths.saves_dir()
         name = chosen if chosen.lower().endswith(".zip") else chosen + ".zip"
         candidate = (saves / name) if saves else Path(name)
     if not candidate.is_file():
-        raise NotChecked(f"the save {safe(chosen)} was not found")
+        raise CheckFailed(f"the save {safe(chosen)} was not found")
     return Setup(shell, runner, mod_zip, candidate, binary, paths.factorio_user_dir())
 
 
@@ -320,14 +473,16 @@ def command(setup: Setup, blueprint_file: Path, out: Path, timeout_s: int) -> li
 
 def check_in_game(blueprint: str, *, entities: int | None, profile_save: str | None,
                   save: str | None = None, companion: str | None = None,
-                  timeout_s: int = DEFAULT_TIMEOUT_S, run=subprocess.run) -> Verdict:
+                  timeout_s: int = DEFAULT_TIMEOUT_S, run=run_tree) -> Verdict:
     """Ask the game whether `blueprint` places. Never raises for a missing setup."""
     with tempfile.TemporaryDirectory(prefix="forge-deliver-") as tmp:
         work = Path(tmp)
         try:
-            setup = locate(profile_save, save=save, companion=companion, work=work)
+            setup = locate(profile_save, save=save, companion=companion, work=work, run=run)
         except NotChecked as exc:
             return Verdict("not-checked", str(exc))
+        except CheckFailed as exc:
+            return Verdict("failed", str(exc))
         out = work / "out"
         out.mkdir()
         bp = work / "blueprint.txt"
@@ -336,16 +491,14 @@ def check_in_game(blueprint: str, *, entities: int | None, profile_save: str | N
             done = run(command(setup, bp, out, timeout_s), capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=timeout_s + _SLACK_S, check=False)
         except subprocess.TimeoutExpired:
-            return Verdict("failed", f"the game did not answer within {timeout_s + _SLACK_S} s")
+            return Verdict("failed", f"the game did not answer within {timeout_s + _SLACK_S} s; the process tree was ended")
         except OSError as exc:
-            return Verdict("not-checked", f"the runner could not be started ({safe(exc)})")
+            return Verdict("failed", f"the runner could not be started ({safe(exc)})")
         if done.returncode == 2:
-            return Verdict("not-checked", "Factorio is already running; close it and deliver again")
+            return Verdict("failed", "Factorio is already running; close it and deliver again")
         result = out / "verify.json"
         if done.returncode != 0 or not result.is_file():
-            tail = [ln for ln in (done.stderr or done.stdout or "").splitlines() if ln.strip()][-3:]
-            return Verdict("failed", f"the runner stopped with code {done.returncode}"
-                           + (": " + safe(" | ".join(tail), 400) if tail else ""))
+            return Verdict("failed", f"the runner stopped with code {done.returncode}{_tail(done)}")
         try:
             report = json.loads(result.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError) as exc:
@@ -380,6 +533,7 @@ def deliver(args: argparse.Namespace, check=None) -> int:
         if data.get("request"):
             planned, warned = plan_module.planned_from_request(data, plan_path)
         result = plan_module.build(data, planned)
+        result.warnings.extend(warned)
     except plan_module.PlanError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -421,11 +575,15 @@ def deliver(args: argparse.Namespace, check=None) -> int:
     name = f"{slug}.txt" if verdict.delivered else f"{slug}.unverified.txt"
     blueprint_path = out / name
     blueprint_path.write_text(blueprint, encoding="utf-8")
-    other = out / (f"{slug}.unverified.txt" if verdict.delivered else f"{slug}.txt")
     if verdict.delivered:
-        other.unlink(missing_ok=True)  # this tool's own earlier refusal; it is stale now
-    elif other.exists():
-        print(f"warning: {other.resolve()} is from an earlier build, not this one")
+        (out / f"{slug}.unverified.txt").unlink(missing_ok=True)  # this tool's own earlier refusal; stale now
+    else:
+        earlier = out / f"{slug}.txt"
+        if earlier.exists():
+            # Never leave a blueprint of an older plan beside the refusal of this one.
+            stale = out / f"{slug}.stale.txt"
+            os.replace(earlier, stale)
+            print(f"note: the earlier {earlier.name} was from another build; moved to {stale.name}")
     report = result.to_dict()
     report["game_check"] = verdict.to_dict()
     report_path = out / f"{slug}.report.json"
@@ -434,8 +592,8 @@ def deliver(args: argparse.Namespace, check=None) -> int:
         render.write_html(result.blueprint, out / f"{slug}.html", title=result.label, findings=result.findings)
 
     if verdict.status == "refused":
-        stub = test_stub(data, verdict)
-        if stub_reads_back(stub, data, verdict):
+        stub = test_stub(data, verdict, planned)
+        if stub_reads_back(stub, data, verdict, planned):
             stub_path = out / f"{slug}.game-refused-test.py"
             stub_path.write_text(stub, encoding="utf-8")
             print(f"test stub: {stub_path.resolve()} (copy it into tests/ and teach the model what the game refused)")

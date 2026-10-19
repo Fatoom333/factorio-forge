@@ -359,38 +359,50 @@ surface (the companion mod's `tools/headless-run.ps1 -Blueprint`, which runs
 `/forge-verify`; about 20-30 seconds). The model behind `check` is quick and can
 be wrong; the game is not. It is a separate command rather than a flag of
 `build` so that `build` stays the fast loop used while a plan is being edited,
-and the file named `<name>.txt` only ever holds a blueprint the game placed.
+and `<name>.txt` holds either a blueprint the game placed, or one written when the
+game could not be asked at all (`game_check.status` in the report says which; the
+run prints it too). A refused or failed run never leaves a `<name>.txt`: an older
+one from a previous build is moved to `<name>.stale.txt`.
 
 | Result | Exit code | Files |
 | --- | --- | --- |
 | the game placed everything | 0 | `<name>.txt`, report, drawing |
 | the game placed less than forge wrote, or refused a kind of entity | 1 | `<name>.unverified.txt` instead of `<name>.txt`, and `<name>.game-refused-test.py` |
 | the build has problems (the game is not asked) | 1 | report only |
-| the run itself failed or timed out | 1 | `<name>.unverified.txt` |
-| no way to ask the game | 0 | `<name>.txt`, and the line `not checked in the game: <reason>` |
+| the check was set up but cannot run (Factorio already open, save or runner not found, companion too old or unreadable, the run died or hung) | 1 | `<name>.unverified.txt`, no stub |
+| this machine cannot ask the game at all | 0 | `<name>.txt`, and the line `not checked in the game: <reason>` |
 
-Not being able to ask is: not Windows, no PowerShell, no Factorio found, no
-companion mod set up, the save not found, or Factorio already running. The
-reason is printed and written to the report as it is. `--no-game-check` skips on
+Not being able to ask is only: not Windows, no PowerShell, no Factorio found, or
+no companion mod named. Once a companion is named, a mistake (a wrong path, a
+missing save, a game left open) is a failed check, not a quiet pass. The reason
+is printed and written to the report as it is. `--no-game-check` skips on
 purpose, and says so the same way.
 
-The test stub is a ready-to-paste test for `tests/`: it holds the plan and what
-the game said, and asserts that the model finds a problem in that plan too. Once
-the model is taught the rule, the case stays as a regression. Names and counts
+The test stub is a ready-to-paste test for `tests/`: it holds the plan (and the
+rates `deliver` used) and what the game said, and asserts that the model finds a
+problem in that plan too. It skips itself where the active data lacks an entity
+or recipe the plan uses, and is marked as an expected failure (strict), so
+pasting it keeps the suite green; once the model is taught the rule the test
+starts to pass, pytest reports it, and you remove the `xfail` mark so the case
+stays as a regression. Names and counts
 come from the game (mods choose entity names), so they are never put into a
 comment or into code by concatenation; the stub contains them only as Python
 literals written with `repr`, and the tool parses the stub back before writing it.
 
 Setting it up. Point `deliver` at the companion mod's repository folder with the
 environment variable `FACTORIO_FORGE_COMPANION` (or the key `companion` in
-`config.json` in the forge home, or `--companion`). The mod zip is made from that
-folder into a temporary one; the repository is not written to. If the variable
+`config.json` in the forge home, or `--companion`). The folder is copied into a
+temporary one and the copy's own `tools/build.ps1` makes the mod zip there, so
+the file list is the companion's and the repository is not written to. If the variable
 names a built `.zip` instead, name the runner script with
 `FACTORIO_FORGE_RUNNER` (key `runner`). The save is the one the active profile
 was made from, found in the game's saves folder; `--save` takes a name or a
-path. The runner works on a copy in a throwaway folder and refuses to start if
-the real save, mod list or settings change; nothing is written to them. The
-companion mod must be 0.7.1 or newer.
+path. The runner works on a copy in a throwaway folder and checks afterwards that the
+real saves, mod list and mod settings did not change; if they did it exits 1 and
+`deliver` withholds the blueprint. The companion mod must be 0.7.1 or newer (an
+older one fails the check up front). If the run hangs, `deliver` ends the shell
+and everything it started (`taskkill /T`); the runner's throwaway folder is then
+left behind in the temp folder.
 
 What the check cannot say: the scratch surface is empty, so it answers "does
 this place on its own", not "does it fit onto the player's base" (that needs the
