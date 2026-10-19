@@ -743,10 +743,176 @@ class TestSplits:
         with pytest.raises(plan.PlanError, match="'splitter'"):
             build([{"kind": "belt", "belt": belt, "from": point(0, 0), "to": [point(12, 0), point(12, 6)]}])
 
-    def test_pipes_do_not_split(self) -> None:
+    def test_a_lane_join_is_for_belts(self) -> None:
         pipe, _ = pipe_pair()
-        with pytest.raises(plan.PlanError, match="pipes join whatever they touch"):
-            build([{"kind": "pipe", "pipe": pipe, "from": point(0, 0), "to": [point(12, 0), point(12, 6)]}])
+        with pytest.raises(plan.PlanError, match="lane join is for belts"):
+            build([{"kind": "pipe", "pipe": pipe, "from": [point(0, 0), point(0, 6)], "to": point(12, 0)}])
+
+
+class TestPipeBranches:
+    """One fluid from one trunk to several consumers; any other touch stays refused."""
+
+    @staticmethod
+    def two_plants():
+        recipe, machine = prototypes.crafting_setup(0, 1, 1, 0)
+        block = block_spec(recipe, machine, [2])
+        second = {**block, "at": [0, 14]}
+        first = plan.build({"blocks": [block, second]})
+        ports = [next(p for p in ports_of(first, b) if p["kind"] == "pipe" and p["io"] == "in") for b in (0, 1)]
+        return block, second, ports
+
+    @staticmethod
+    def trunk(ports, **extra) -> dict:
+        fluid = ports[0]["items"][0]
+        source = point(min(p["x"] for p in ports) - 12, ports[0]["y"], items=[fluid])
+        return {"id": "water", "kind": "pipe", "from": source,
+                "to": [{"block": 0, "port": ports[0]["index"]}, {"block": 1, "port": ports[1]["index"]}], **extra}
+
+    @staticmethod
+    def shared(result) -> bool:
+        """Whether one fluid network holds machines of both blocks (the second stands from y = 14 down)."""
+        entities_ = list(result.blueprint.entities)
+        nets, _ = fluids.networks(entities_)
+        for net in nets:
+            ys = {entities_[i].tile_position.y for i, _ in net.machine_boxes}
+            if any(y < 14 for y in ys) and any(y >= 14 for y in ys):
+                return True
+        return False
+
+    def test_one_trunk_feeds_two_machines(self) -> None:
+        block, second, ports = self.two_plants()
+        if ports[0]["items"] != ports[1]["items"]:
+            pytest.skip("the two copies of one block take different fluids")
+        # Control: the first consumer alone leaves the second without its fluid.
+        alone = build([{**self.trunk(ports), "to": {"block": 0, "port": ports[0]["index"]}}], blocks=[block, second])
+        assert not self.shared(alone)
+
+        result = build([self.trunk(ports)], blocks=[block, second])
+        trunk, branch = result.routes
+        assert trunk.ok and branch.ok, (trunk.reason, branch.reason)
+        assert (trunk.id, branch.id) == ("water/0", "water/1")
+        assert self.shared(result), "no single network holds machines of both blocks"
+        assert "fluids-mixed" not in codes(result)
+        assert "route-pipe-flow" in codes(result)
+
+    def test_the_branch_is_laid_from_the_consumer_and_joins_the_trunk(self) -> None:
+        block, second, ports = self.two_plants()
+        result = build([self.trunk(ports)], blocks=[block, second])
+        trunk, branch = result.routes
+        assert branch.spec.start.port == (1, ports[1]["index"])
+        sides = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        assert any((x + dx, y + dy) in tiles_of(trunk) for x, y in tiles_of(branch) for dx, dy in sides)
+
+    def test_the_fact_reports_demand_and_runs(self) -> None:
+        block, second, ports = self.two_plants()
+        result = build([self.trunk(ports)], blocks=[block, second])
+        (fact,) = [f for f in result.findings if f.code == "route-pipe-flow"]
+        assert fact.severity is inspection.Severity.NOTE
+        assert "block 0 port" in fact.summary and "block 1 port" in fact.summary and "tiles" in fact.summary
+
+    def test_a_demand_over_what_a_connection_passes_is_a_suspect(self) -> None:
+        block, second, ports = self.two_plants()
+        huge = route.PIPE_CONNECTION_LIMIT * 2
+        recipe_fluid = ports[0]["items"][0]
+        spec = plan.build({"blocks": [block, second]})
+        for b in spec.blocks:
+            for p in b.ports:
+                if p["kind"] == "pipe" and p["io"] == "in":
+                    p["rate"] = huge
+        # Rates come from the built ports, so call the router with the big ones.
+        built = spec.blocks
+        goals = []
+        for b, p in zip((0, 1), ports):
+            port = next(q for q in built[b].ports if q["index"] == p["index"])
+            goals.append(route.Endpoint(port["x"], port["y"], port["direction"], (recipe_fluid,), huge, (b, p["index"])))
+        source = route.Endpoint(-12, ports[0]["y"], EAST, (recipe_fluid,))
+        pipe, ptg = pipe_pair()
+        trunk = route.TrunkSpec("t", "pipe", source, tuple(goals), ((), ()), pipe, ptg)
+        entities_ = list(spec.blueprint.entities)
+        grid = route.grid_of(entities_, route.search_area(entities_, [(-12, ports[0]["y"])], 8), set())
+        done = route.route_trunk(trunk, grid)
+        assert all(r.ok for r in done), [r.reason for r in done]
+        assert any(f.severity is inspection.Severity.SUSPECT and f.code == "route-pipe-flow" for f in done[0].notes)
+
+    def test_another_fluid_is_still_kept_apart(self) -> None:
+        pipe, ptg = pipe_pair()
+        result = build([
+            {"kind": "pipe", "from": point(0, 0, items=["fluid-a"]), "to": point(16, 0), "pipe": pipe,
+             "pipe_to_ground": ptg},
+            {"kind": "pipe", "from": point(8, -3, SOUTH, items=["fluid-b"]), "to": point(8, 3, SOUTH), "pipe": pipe,
+             "pipe_to_ground": ptg},
+        ])
+        a, b = result.routes
+        assert a.ok and b.ok, (a.reason, b.reason)
+        entities_ = list(result.blueprint.entities)
+        index = lambda r: {i for i, e in enumerate(entities_)  # noqa: E731
+                           if (e.tile_position.x, e.tile_position.y) in tiles_of(r)}
+        mine, theirs = index(a), index(b)
+        nets, _ = fluids.networks(entities_)
+        for net in nets:
+            members = {node[0] for node in net.nodes}
+            assert not (members & mine and members & theirs), "the two fluids share a network"
+
+    def test_the_same_fluid_may_touch(self) -> None:
+        pipe, ptg = pipe_pair()
+        result = build([
+            {"kind": "pipe", "from": point(0, 0, items=["fluid-a"]), "to": point(16, 0), "pipe": pipe,
+             "pipe_to_ground": ptg},
+            {"kind": "pipe", "from": point(8, -3, SOUTH, items=["fluid-a"]), "to": point(8, 3, SOUTH), "pipe": pipe,
+             "pipe_to_ground": ptg},
+        ])
+        a, b = result.routes
+        assert a.ok and b.ok, (a.reason, b.reason)
+
+    def test_the_branches_fluid_must_match(self) -> None:
+        block, second, ports = self.two_plants()
+        wrong = self.trunk(ports)
+        wrong["from"] = {**wrong["from"], "items": ["not-the-same-fluid"]}
+        with pytest.raises(plan.PlanError, match="would join"):
+            build([wrong], blocks=[block, second])
+
+    def test_a_branch_ends_at_a_port(self) -> None:
+        block, second, ports = self.two_plants()
+        bad = self.trunk(ports)
+        bad["to"] = [bad["to"][0], point(40, 40)]
+        with pytest.raises(plan.PlanError, match="branch ends at a block's in port"):
+            build([bad], blocks=[block, second])
+
+    def test_a_second_source_joins_a_route_of_its_fluid(self) -> None:
+        block, second, ports = self.two_plants()
+        fluid = ports[0]["items"][0]
+        trunk = {**self.trunk(ports), "to": {"block": 0, "port": ports[0]["index"]}}
+        left = trunk["from"]["at"][0]
+        tap = {"id": "more", "kind": "pipe", "from": point(left, ports[0]["y"] + 5, items=[fluid]),
+               "onto": {"route": "water"}}
+        result = build([trunk, tap], blocks=[block, second])
+        first, joined = result.routes
+        assert first.ok and joined.ok, (first.reason, joined.reason)
+        assert "fluids-mixed" not in codes(result)
+
+        wrong = {**tap, "from": point(left, ports[0]["y"] + 5, items=["not-the-same-fluid"])}
+        with pytest.raises(plan.PlanError, match="would join"):
+            build([trunk, wrong], blocks=[block, second])
+
+    def test_a_pipe_joins_no_tile_and_no_lane(self) -> None:
+        block, second, ports = self.two_plants()
+        trunk = {**self.trunk(ports), "to": {"block": 0, "port": ports[0]["index"]}}
+        tap = {"kind": "pipe", "from": point(-20, 0, items=[ports[0]["items"][0]]), "onto": {"at": [0, 0]}}
+        with pytest.raises(plan.PlanError, match="joins a route"):
+            build([trunk, tap], blocks=[block, second])
+
+    def test_the_cache_and_a_plain_build_agree(self) -> None:
+        from factorio_forge import edit
+
+        block, second, ports = self.two_plants()
+        the_plan = {"label": "branches", "blocks": [block, second], "connections": [self.trunk(ports)]}
+        plain = plan.build(the_plan)
+        cache = edit.BuildCache()
+        for _ in range(2):  # the second run reads the first back
+            cached = plan.build(the_plan, cache=cache)
+            assert cache.stats.routes_built + cache.stats.routes_reused > 0
+            assert [(r.id, r.ok, [(p.name, p.x, p.y, p.direction) for p in r.pieces]) for r in cached.routes] == \
+                   [(r.id, r.ok, [(p.name, p.x, p.y, p.direction) for p in r.pieces]) for r in plain.routes]
 
 
 def two_ingredient_block():

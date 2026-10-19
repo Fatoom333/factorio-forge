@@ -126,6 +126,7 @@ graded it a note):
 | `route-belt-slow` | error | a belt or lane carries less than the route needs |
 | `route-short-supply` | error | the start supplies less than the destination wants |
 | `route-split-cascade` | fact | several destinations behind a chain of splitters share unevenly |
+| `route-pipe-flow` | fact (error above 6000/s) | one fluid trunk feeds several destinations: demand and each run in tiles; what a long run carries is not judged |
 | `route-no-underground` | fact | no underground goes with the belt; the route stays on the surface |
 | `route-underground-speed` | fact | underground and belt run at different speeds |
 | `route-tiles-unchecked` | fact | the map's tiles are unknown to the tool (water, lava) |

@@ -166,6 +166,20 @@ ends:
   first route and the side the other half goes on. All or nothing: if any
   destination fails, nothing of the connection is placed. With three or more
   destinations the splitters cascade (`route-split-cascade`).
+- **Pipe branch**: for a pipe (`"kind": "pipe"`, or a pipe port) `to` as a
+  list is not a splitter but a trunk of one fluid. The first destination gets
+  the trunk (sub-route `<id>/0`); every further destination must be a block's
+  in port and is routed from that port to the nearest pipe of what is laid so
+  far, joining it there (`<id>/1`, ...), so a branch may hang off a branch.
+  Pipes have no direction, so branches are laid from the destination end.
+  Every destination must want the source's fluid. All or nothing. The report
+  gives `route-pipe-flow`: the summed demand and each destination's run from
+  the source in tiles. How much a run of that length carries is not judged;
+  only a demand above 6000/s, the most one fluid connection passes
+  (wiki.factorio.com/Fluid_system), is a suspect. A second source joins the
+  same way with `onto` (`{"route": id}`, or the in port the route ends at):
+  `{"kind": "pipe", "from": ..., "onto": {"route": "water"}}`. A lane join
+  (`from` as a list) is for belts only.
 - **Merge**: `onto` instead of `to` side-loads the source onto one lane of an
   earlier route (`{"route": id}`, a sub-route `id/k` too), of the route into
   an in port (`{"block": b, "port": j}`), or of a belt standing at a tile
@@ -195,8 +209,9 @@ ends:
   wins (length, turns, hops). Ties go by plan order, then position: the same
   plan always builds the same blueprint.
 - **Ports**: an out port may be a `from` once and an in port a `to` once; a
-  port inside `onto` is not a use. Pipes do not split or merge: route to a
-  point beside the pipe instead.
+  port inside `onto` is not a use. A pipe route may end on, or branch from,
+  the pipes of a route of the same fluid (see Pipe branch); it never touches
+  a pipe of another fluid or a pipe it did not lay.
 
 **Inputs.** A hand-placed belt head (nothing feeding it from behind or from
 a side) is declared with `inputs`: `items` is `[left, right]`, one item for
@@ -287,7 +302,12 @@ direction of its underground connection, not from an assumption.
   tile, so a route never side-loads into a foreign belt either.
 - A pipe piece is refused if one of its connections meets a foreign
   connection pointing back with a category in common -- the rule
-  `fluids.networks` joins pieces by. Only the first piece may join what stands
+  `fluids.networks` joins pieces by -- unless that connection belongs to a
+  pipe a route laid for the same fluid: forge did not branch pipes before and
+  now does, for one fluid only. The game itself refuses to join two networks
+  holding different fluids, and two empty unfiltered networks would merge and
+  then fail when two fluids arrive, which is why a touch with anything else
+  stays refused. Only the first piece may join what stands
   behind the start, and only the last what stands where it points. A
   pipe-to-ground has no side connections, which is why it is the generic way
   past a pipe of another fluid.
@@ -335,11 +355,12 @@ lanes, junction, merges, delivered lanes and reason.
   or exits; an inserter dropping onto a curve is unknown;
 - lane rates and ratio deadlocks beyond `lanes-mixed`; compression, which
   lane an inserter prefers and side-load priority;
-- splitting or merging pipes; ripping up one route for another; running the
+- branching pipes of different fluids (the same fluid branches, see Pipe
+  branch); ripping up one route for another; running the
   lane tracker in `factorio-forge check` on any blueprint; bill lines with no
   block in the plan;
 - map terrain (water, cliffs, ore, an existing base -- `reserve` stands in);
-  pipe throughput and pumps; pieces larger than one tile besides a two-tile
+  how much a long pipe run carries, and pumps; pieces larger than one tile besides a two-tile
   splitter; rails and robots.
 
 ## Power between blocks
@@ -414,9 +435,9 @@ What the draft contains:
   head beside its port, as a connection with a `rate`. `targets` and the
   request's choices go into the plan, and `power` has `link` on.
 - **Fluids.** Pipe connections from the out port of the stage that makes the
-  fluid. A pipe cannot split, so a fluid used by several stages is piped to
-  the first and the rest is listed. A fluid nobody in the chain makes is
-  listed too.
+  fluid. A fluid used by several stages is fed from one trunk: the nearest
+  stage gets the pipe and the others branch off it (pipe branch). A fluid
+  nobody in the chain makes is listed.
 
 **Mending, at most twice.** If the build has problems at the end of some
 connection, each such block gets two other placements, one after the other:
@@ -427,8 +448,7 @@ failed ones the one with the fewest problems is kept, the earliest on a tie.
 A connection the plan check refuses outright is left out and listed, so the
 rest of the chain still builds.
 
-**Left to the player**, as `left to you:` lines: a raw fluid, a fluid piped to
-more than one stage, a good that has to reach two ports in different ways
+**Left to the player**, as `left to you:` lines: a raw fluid, a good that has to reach two ports in different ways
 (one out port starts one connection), a port that takes three or more goods
 on one belt, a stage whose row holds more machines than its belt keeps fed.
 A draft with a problem left is not wrong output: it is the starting point of

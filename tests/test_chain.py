@@ -148,6 +148,16 @@ class TestWiring:
         assert [(l.item, l.out.kind, l.mode) for l in links] == [("water-ish", "pipe", "to")]
         assert any("other" in i and "by hand" in i for i in issues)
 
+    def test_a_fluid_used_by_two_stages_gets_every_consumer(self) -> None:
+        maker = stage(0, "maker", {}, {"water-ish": 2}, [port(0, "out", ["water-ish"], 9, 3, kind="pipe")])
+        users = [stage(i, f"user{i}", {"water-ish": 1}, {f"z{i}": 1},
+                       [port(0, "in", ["water-ish"], 0, 2, kind="pipe"), out_port(1, f"z{i}")]) for i in (1, 2)]
+        issues: list[str] = []
+        links, _, _ = chain.wire([maker, *users], set(), issues)
+        (link,) = links
+        assert {(s.index, p.index) for s, p in link.ends} == {(1, 0), (2, 0)}
+        assert not issues
+
     def test_a_good_the_bill_marks_as_arriving_is_not_taken_from_a_stage(self) -> None:
         stages = three_stage_chain()
         links, feeds, _ = chain.wire(stages, {"cable"}, [])
@@ -247,6 +257,20 @@ class TestPlanShape:
         assert cable["from"] == {"block": 0, "port": 1, "items": ["cable"]}
         assert cable["to"] == [{"block": 1, "port": 0}, {"block": 2, "port": 1}] or \
             cable["to"] == [{"block": 2, "port": 1}, {"block": 1, "port": 0}]
+
+    def test_a_shared_fluid_is_one_pipe_connection_to_every_consumer(self) -> None:
+        maker = stage(0, "maker", {}, {"water-ish": 2}, [port(0, "out", ["water-ish"], 9, 3, kind="pipe")])
+        users = [stage(i, f"user{i}", {"water-ish": 1}, {f"z{i}": 1},
+                       [port(0, "in", ["water-ish"], 0, 2, kind="pipe"), out_port(1, f"z{i}")]) for i in (1, 2)]
+        stages = [maker, *users]
+        links, feeds, joins = chain.wire(stages, set(), [])
+        chain.lay_out(stages, links)
+        spec = request.parse({"targets": [{"item": "z1", "per_second": 1}]})
+        tiers = {"belt": "b", "inserter": "i", "long_inserter": "l", "pole": "p"}
+        plan = chain.to_plan(stages, links, feeds, joins, spec, tiers, "test")
+        (water,) = [c for c in plan["connections"] if c.get("kind") == "pipe"]
+        assert water["from"]["items"] == ["water-ish"]
+        assert sorted((t["block"], t["port"]) for t in water["to"]) == [(1, 0), (2, 0)]
 
     def test_raw_goods_on_a_shared_port_merge_onto_the_port_and_alone_they_are_sources(self) -> None:
         plan, _ = self.planned()

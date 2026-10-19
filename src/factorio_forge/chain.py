@@ -560,8 +560,7 @@ def to_plan(stages: list[Stage], links: list[Link], feeds: list[Feed], joins: li
         ends = sorted(link.ends, key=lambda e: (e[0].column, abs(_absolute(*e)[1] - _absolute(link.producer, link.out)[1])))
         conn: dict = {"id": f"{link.item}-{link.producer.index}", "from": _ref(link)}
         if link.out.kind == "pipe":
-            conn["kind"] = "pipe"
-            ends = ends[:1]  # pipes do not split; the rest is reported by the caller
+            conn["kind"] = "pipe"  # a fluid used by several stages: one trunk, a branch to each
         targets = [{"block": c.index, "port": p.index} for c, p in ends]
         conn["to"] = targets if len(targets) > 1 else targets[0]
         connections.append(conn)
@@ -633,11 +632,6 @@ def draft(spec: request.Spec, *, tweaks: Tweaks | None = None, spread: int = _FE
     lay_out(stages, links, tweaks, spread)
     name = label or "chain-" + "-".join(i for i, _ in spec.targets)
     plan = to_plan(stages, links, feeds, joins, spec, tiers, name, tweaks)
-    for link in links:
-        if link.out.kind == "pipe" and len(link.ends) > 1:
-            issues.append(
-                f"{link.item} from stage {link.producer.index} goes to {len(link.ends)} stages by pipe: "
-                "pipes do not split, so route all but the first by hand")
     for stage in stages:
         for note in stage.notes:
             if note.startswith("a row holds more"):
