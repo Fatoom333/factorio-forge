@@ -17,10 +17,12 @@ loads, lane fill, entity counts. Errors are fixed before anything is handed
 over; facts are for you to weigh.
 
 > FIELD NAMES AND PRINTED FORM TO FILL AFTER MERGE (the two-level output).
+> Until then the build prints three strengths: severity `problem` is an error;
+> `suspect` and `note` are facts. The list below uses that form.
 
 What the output contains:
 
-- **findings** with severity `problem` must be fixed before handing anything
+- **findings** with severity `problem` (errors) must be fixed before handing anything
   over: overlaps, unpowered machines, `fluids-mixed`,
   `fluid-box-unconnected`, `power-split`;
 - **rows**: machines against capacity;

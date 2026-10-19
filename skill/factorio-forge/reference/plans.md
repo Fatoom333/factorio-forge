@@ -78,7 +78,7 @@ request; the other blocks of that recipe share the rest.
   the tools compute capacity; the base is evidence of style, not of
   correctness.
 
-## Chain: a draft plan for a whole order (new)
+## Chain: a draft plan for a whole order
 
 `chain` turns the bill of materials of a multi-stage order into a draft plan
 at once: one block per recipe (a stage shared by several consumers is one
@@ -88,7 +88,7 @@ check and correct the draft; you do not lay the stages out by hand.
 
 > SYNTAX TO FILL AFTER MERGE: exact `chain` command and options.
 
-## Edit: small changes without a rebuild from scratch (new)
+## Edit: small changes without a rebuild from scratch
 
 `edit` applies short operations to a plan -- move a block, change a recipe,
 machine, modules or a belt, add or remove a row. Only the touched block and

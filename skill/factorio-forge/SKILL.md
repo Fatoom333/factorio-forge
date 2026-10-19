@@ -72,8 +72,9 @@ checkout. JSON may be saved with or without a UTF-8 BOM (Windows PowerShell
 0. **Profile and notes.** `factorio-forge list-profiles`; activate the
    player's save (`activate-profile NAME`, or `create-profile <save>` if none).
    Every number comes from the active profile; the wrong profile is wrong in
-   ways nothing flags. Read the notes **index** (`factorio-forge notes`) and
-   open only the sections the request touches. What the notes say beats this
+   ways nothing flags. Read the notes **index** (`factorio-forge notes`; if it prints file
+   locations instead of an index, open the files) and open only the sections
+   the request touches. What the notes say beats this
    skill's defaults. Player corrections and standing preferences go into the
    notes, not into this skill. -> `reference/profile.md`
 1. **Request.** `find` every thing the player names (never from memory, mods
@@ -81,7 +82,7 @@ checkout. JSON may be saved with or without a UTF-8 BOM (Windows PowerShell
    in one message, with a default beside each question. -> `reference/request.md`
 2. **Plan.** Machine counts come from `review`; `options` gives the numbers
    per block. Decide the layout and write `plan.json`. A whole multi-stage
-   order: `chain` drafts it (one line below). -> `reference/plans.md`
+   order: `chain` drafts it, if the command exists (`factorio-forge --help`). -> `reference/plans.md`
 3. **Build.** `factorio-forge build work/<design>/plan.json`. -> `reference/build.md`
 4. **Read the output, look, revise.** Fix the plan, never the output. Use the
    text tile map while iterating (`map`), render once at the end.
@@ -101,7 +102,8 @@ New commands, in one line each:
 
 The output has two levels. **Errors** -- the blueprint will not stand or will
 not work (a collision, an unconnected input, the wrong item on a lane): fix
-every one before anything is handed over. **Facts** -- rates, belt loads, lane
+every one before anything is handed over (until the output is reshaped these
+are findings of severity `problem`; `suspect` and `note` are facts). **Facts** -- rates, belt loads, lane
 fill, counts of entities: they are yours to weigh. A belt of copper at 40 %
 may be exactly what the player wants; decide, and mention what matters. There
 is no middle level of "warnings" and no rule per kind of fact. Errors come

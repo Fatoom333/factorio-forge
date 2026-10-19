@@ -22,7 +22,7 @@ line still filling: `measure result` says so, and advises a longer warm-up.
 Full description and how to read the result: `docs/checking.md`, section
 "Measuring what a build makes".
 
-## In-game check before delivery (new)
+## In-game check before delivery
 
 Before a finished blueprint is handed over it is placed in the game without a
 window (an abstract blueprint on an empty site, a concrete place on a copy of

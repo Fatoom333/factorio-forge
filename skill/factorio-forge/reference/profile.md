@@ -32,7 +32,7 @@ blueprints the notes were measured from. A note tagged with a `reference/`
 file holds only for that blueprint; when the player gives a new version,
 replace the file and re-measure every note that names it.
 
-Notes index (new): `notes` shows an index, one line per file or section (what
+Notes index: `notes` shows an index, one line per file or section (what
 it covers, which items and blocks, by internal name); `notes <topic>` opens
 one. Read the index at step 0 and open only the sections the request touches.
 

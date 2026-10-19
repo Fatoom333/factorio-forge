@@ -14,12 +14,12 @@ entities").
 | `lanes-missing`: an ingredient never arrives | merge it onto the route into that port, or declare what the player feeds there in the plan's `sources` |
 | `lanes-wrong-item`: a lane brings an item the block does not use | the wrong belt reaches this port; fix the connection or the source |
 | `lanes-nothing`: nothing reaches an in port | connect it, or declare the outside supply in `sources` |
-| `lanes-unknown` (suspect at a block's in port) | something undeclared rides the lane: declare it in `sources`, then the port can be checked |
+| `lanes-unknown` (at a block's in port) | something undeclared rides the lane: declare it in `sources`, then the port can be checked |
 | `lanes-rate`: declared sources bring less than the port needs | raise the source, or add a belt; totals are compared, not each item |
-| `lanes-not-taken`: nothing takes an item on a lane | a wrong item, or the wrong port; problem when it shares the lane with a used item (it will block it) |
+| `lanes-not-taken`: nothing takes an item on a lane | a wrong item, or the wrong port; an error when it shares the lane with a used item (it will block it) |
 | `lanes-mixed`: two used items on one lane | give each its own lane (merge onto the other lane, or a lane join) |
 | `lanes-starved`: machines never get an ingredient | something upstream is missing it; follow the belts their inserters take from |
-| `lanes-swapped` (note) | nothing to do: inserters take from both lanes |
+| `lanes-swapped` | nothing to do: inserters take from both lanes |
 | `block-short`: the request needs more than the block makes | more machines or rows, or a faster machine |
 | `route-lanes-disagree` | the router and the lane tracker differ about the game; report it, check that spot in game |
 
