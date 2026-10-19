@@ -20,7 +20,9 @@ resolves to, and eventually the building style measured from its blueprints.
                      mod-settings.dat
     data/            game data extracted for this set, and no other
     blueprints/      reference blueprints, the source of the base's style
-    notes.md         accumulated preferences, in the player's own words
+    notes/           accumulated preferences, in the player's own words, one
+                     Markdown file per topic (a lone notes.md still counts)
+    notes-index.json cached index of the notes, rebuilt when they change
 ```
 
 The `<name>` is the save name reduced to something safe on every platform, so
@@ -149,4 +151,4 @@ sender's own installation and mods, which is not ours to redistribute and would
 be wrong for the recipient anyway; they regenerate it from their own copy of the
 game. `mods/` holds hard links to mod archives, which is likewise someone else's
 work to distribute. What is worth sharing is `profile.json`, `blueprints/` and
-`notes.md`.
+the notes (`notes/` or `notes.md`).

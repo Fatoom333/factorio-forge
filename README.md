@@ -121,8 +121,12 @@ blueprints you already use — and generating inside that profile's conventions.
   exports them from inside the game, where the game itself acts as the parser.
 - **Your building style** is measured from reference blueprints rather than
   asked for in a questionnaire, and kept with the profile.
-- **Your preferences and corrections** accumulate in the profile's `notes.md`,
-  in your own words, and are read back when designing.
+- **Your preferences and corrections** accumulate in the profile's `notes/`
+  folder (one file per topic; a lone `notes.md` also works), in your own words.
+  `factorio-forge notes` prints an index built from them, one line per file or
+  section with the items it mentions; `factorio-forge notes <topic or item>`
+  prints the matching notes ("красная схема" finds the ones about
+  `advanced-circuit`). The index is rebuilt only when a note changes.
 
 ## Requirements
 

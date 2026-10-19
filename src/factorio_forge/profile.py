@@ -11,7 +11,9 @@ Each profile owns:
     mods/           an isolated mod folder for this set alone
     data/           game data extracted for this set, and no other
     blueprints/     reference blueprints, the source of the base's style
-    notes.md        accumulated preferences, in the player's own words
+    notes/          accumulated preferences, in the player's own words, one
+                    file per topic (a lone notes.md of an older profile counts
+                    as one topic); see notes.py
 
 The isolation is not decorative. Draftsman extracts prototype data into one
 fixed directory inside its own installation, and there is no setting to move
@@ -343,6 +345,10 @@ class Profile:
     @property
     def notes_path(self) -> Path:
         return self.directory / "notes.md"
+
+    @property
+    def notes_dir(self) -> Path:
+        return self.directory / "notes"
 
     @property
     def style_path(self) -> Path:
