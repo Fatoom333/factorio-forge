@@ -59,6 +59,81 @@ output, and then the real findings go unread too. So findings are graded:
 The test suite has as many tests for what must **not** be reported as for what
 must.
 
+## What the reader sees: errors and facts
+
+The three grades above are how the checks think. The report shows two levels:
+
+- **error** — the build will not be placed or will not work: a collision, an
+  input nothing feeds, the wrong item on a lane, a supply that falls short, a
+  power network in pieces.
+- **facts** — what the build is: rates, belt load ("the copper-cable lane is
+  80% loaded"; one lane is measured against one lane's capacity, and the slower of belt and underground counts), which items ride which lane, entity and machine counts, and
+  what was assumed. A fact carries no verdict; the reader decides what it means.
+
+There is no level in between. A doubtful finding (a *worth a look*) is an
+error, and its text says what to check; if in doubt whether something breaks
+the build, it is reported as one. The grading stays inside (`Finding`,
+`Severity` are unchanged); `report.py` only maps it to the two levels.
+
+`build` and `check` print one line first — `N errors` or `no errors` — then the
+errors, then the facts. `check` shows the facts that came from findings only
+with `--all`. `report.json` has `errors` and `facts` arrays (each entry has
+`text`, `kind`, and where they apply `code`, `detail`, `position`, and the
+check's own `severity`). The older `findings` and `warnings` fields are still
+written for compatibility and are **deprecated**: read `errors` and `facts`.
+The build's own warnings (a request file that cannot be read, a part of the plan
+it ignored) are errors too, with `kind: "warning"`: they are failures, not
+assumptions.
+
+Every finding code, and how it is shown (a code marked "error; note: fact" is an
+error when the check graded it a problem or worth a look, and a fact when it
+graded it a note):
+
+| Code | Shown as | Meaning |
+| --- | --- | --- |
+| `overlap` | error | two entities that cannot stand on the same tiles |
+| `unknown-prototypes` | error | entity types missing from the game data in use |
+| `belts-head-on` | error | two belts face each other |
+| `underground-unpaired` | error; note: fact | an underground belt or pipe with no other end |
+| `inserter-idle` | error | an inserter with nothing to take or nowhere to put |
+| `inserter-loop` | error | an inserter that moves things from a machine back into it |
+| `inserter-backwards` | error; note: fact | an inserter that looks turned the wrong way round |
+| `filters-ignored` | error | filters set where filtering is off |
+| `condition-without-wire` | error | a circuit condition with no wire to read |
+| `combinator-unwired` | error; note: fact | a combinator no wire reaches |
+| `constant-empty` | error | a constant combinator holding no signals |
+| `machine-no-recipe` | error; note: fact | a machine with no recipe (a note when the blueprint is parameterised) |
+| `unpowered` | error | an entity no pole's supply area covers |
+| `pole-isolated` | error | a pole out of wire reach of every other |
+| `power-split` | error | the poles form several separate networks |
+| `signal-without-rail` | error; note: fact | a rail signal not beside a rail |
+| `fluid-box-unconnected` | error | a fluid connection that leads nowhere |
+| `fluids-mixed` | error | two different fluids in one pipe network |
+| `lanes-not-taken` | error | an item arrives on a lane nothing takes it from |
+| `lanes-mixed` | error | two items share a lane |
+| `lanes-nothing` | error; note: fact | nothing arrives where a block wants something |
+| `lanes-missing` | error | an item a block needs does not arrive |
+| `lanes-wrong` | error | the right items on the wrong lanes |
+| `lanes-wrong-item` | error | a different item arrives than the block needs |
+| `lanes-starved` | error | a block stays short of an input |
+| `lanes-rate` | error; note: fact | declared supply is below what the order asks for (note: below full load) |
+| `lanes-unknown` | error; note: fact | what enters a point is not declared, so the lane cannot be checked |
+| `route-lanes-disagree` | error | a route's lanes and the traced lanes differ |
+| `lanes-overflow` | fact | a lane fills and a splitter sends the rest the other way |
+| `lanes-swapped` | fact | lanes arrive in the opposite order; the block takes from both |
+| `lanes-unchecked` | fact | lanes past a point are not tracked, with the reason |
+| `route-failed` | error | a connection that could not be routed |
+| `route-belt-slow` | error | a belt or lane carries less than the route needs |
+| `route-short-supply` | error | the start supplies less than the destination wants |
+| `route-split-cascade` | fact | several destinations behind a chain of splitters share unevenly |
+| `route-no-underground` | fact | no underground goes with the belt; the route stays on the surface |
+| `route-underground-speed` | fact | underground and belt run at different speeds |
+| `route-tiles-unchecked` | fact | the map's tiles are unknown to the tool (water, lava) |
+| `block-short` | error | a block makes less than the order needs |
+
+A new check cannot ship without a row here: a test reads the source for finding
+codes and fails on any that `report.RULES` does not map.
+
 ## Edges
 
 Most blueprints are fragments meant to join onto something else. A belt running
