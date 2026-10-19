@@ -255,6 +255,10 @@ ln -s "$PWD/skill/factorio-forge" ~/.claude/skills/factorio-forge
 
 Скопировать вместо ссылки: `cp -r skill/factorio-forge ~/.claude/skills/`.
 
+Скилл — это короткий `SKILL.md` и тематические файлы в
+`skill/factorio-forge/reference/`; Claude открывает их, только когда заходит
+речь о теме, поэтому подключайте ссылкой или копируйте папку целиком.
+
 Скилл запускает инструменты питоном из этой папки
 (`.venv\Scripts\python.exe -m factorio_forge.cli` в Windows,
 `.venv/bin/python -m factorio_forge.cli` в остальных системах), поэтому Claude

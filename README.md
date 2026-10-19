@@ -249,6 +249,10 @@ ln -s "$PWD/skill/factorio-forge" ~/.claude/skills/factorio-forge
 
 To copy instead: `cp -r skill/factorio-forge ~/.claude/skills/`.
 
+The skill is a short `SKILL.md` plus topic files in
+`skill/factorio-forge/reference/` that Claude opens only when a topic comes
+up, so link or copy the whole folder.
+
 The skill runs the tools with this checkout's Python
 (`.venv\Scripts\python.exe -m factorio_forge.cli` on Windows,
 `.venv/bin/python -m factorio_forge.cli` elsewhere), so Claude has to know
