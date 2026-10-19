@@ -73,8 +73,8 @@ The checker walks the same `range(1, reach + 1)`.
 ## Not done
 
 Balancers, splitter priority and filters, swapping the lanes of a belt already
-laid, splitting or merging pipes, ripping up other routes, map terrain, pipe
-throughput, pieces larger than one tile (bar a two-tile splitter).
+laid, ripping up other routes, map terrain, pipe
+throughput beyond a rough fact (`route_trunk`), pieces larger than one tile (bar a two-tile splitter).
 Routes go greedily in plan order: an earlier one is an obstacle for a later
 one. The only rip-up is of a route's own path, when via tiles make it come
 back over itself (see `route`).
@@ -302,6 +302,36 @@ class JoinSpec:
     hop_cost: float = DEFAULT_HOP_COST
 
 
+@dataclass(frozen=True)
+class TrunkSpec:
+    """One pipe source to several destinations of one fluid, branching off a trunk."""
+
+    id: str
+    kind: str  # "pipe"
+    source: Endpoint
+    goals: tuple[Endpoint, ...]  # the first may be a point; the others are in ports
+    vias: tuple[tuple[tuple[int, int], ...], ...]  # aligned with goals
+    surface: str
+    underground: str | None
+    turn_cost: float = DEFAULT_TURN_COST
+    hop_cost: float = DEFAULT_HOP_COST
+
+
+@dataclass(frozen=True)
+class TapSpec:
+    """A pipe source that joins a pipe route already laid, carrying the same fluid."""
+
+    id: str
+    kind: str  # "pipe"
+    source: Endpoint
+    onto_route: str
+    surface: str
+    underground: str | None
+    via: tuple[tuple[int, int], ...] = ()
+    turn_cost: float = DEFAULT_TURN_COST
+    hop_cost: float = DEFAULT_HOP_COST
+
+
 # --------------------------------------------------------------------------
 # prototypes
 # --------------------------------------------------------------------------
@@ -423,6 +453,21 @@ def _where(tile) -> str:
     return f"({tile[0]}, {tile[1]})"
 
 
+@dataclass(frozen=True)
+class PipeOwner:
+    """Who owns a fluid connection a route laid, and what flows in it.
+
+    Reads as the prototype name wherever a message prints it; `Grid.same_fluid`
+    is what lets a later pipe of that fluid join it.
+    """
+
+    name: str
+    fluid: str
+
+    def __str__(self) -> str:
+        return self.name
+
+
 @dataclass
 class Grid:
     area: tuple[int, int, int, int]
@@ -457,8 +502,12 @@ class Grid:
         self.belt_fed.setdefault(tile, f"{name} at {_where(source)} pushes items into it")
         self.feeders.setdefault(tile, set()).add(source)
 
-    def add(self, pieces: list[Piece]) -> None:
-        """Make a placed route an obstacle for the routes after it."""
+    def add(self, pieces: list[Piece], fluid: str | None = None) -> None:
+        """Make a placed route an obstacle for the routes after it.
+
+        A pipe route says which `fluid` it carries, so that a later pipe of the
+        same fluid may join it (see `same_fluid`).
+        """
         pending: Piece | None = None
         for piece in pieces:
             tile = (piece.x, piece.y)
@@ -479,7 +528,7 @@ class Grid:
                 self.belt_entry[tile] = piece.direction
             for c in connections_for(piece.name, tile, piece.direction):
                 self.fluid_targets.setdefault(c.target, []).append(c)
-                self.fluid_owner[c.inner] = piece.name
+                self.fluid_owner[c.inner] = PipeOwner(piece.name, fluid) if fluid else piece.name
             if kind in ("underground-belt", "pipe-to-ground"):
                 if pending is not None and pending.name == piece.name:
                     axis = "x" if pending.y == piece.y else "y"
@@ -530,6 +579,13 @@ class Grid:
             for o in self.fluid_targets.get(c.inner, ())
             if o.inner == c.target and o.direction == OPPOSITE[c.direction] and o.categories & c.categories
         ]
+
+    def same_fluid(self, o: fluids.Connection, fluid: str | None) -> bool:
+        """Whether a foreign connection belongs to a pipe a route laid for this same fluid."""
+        if not fluid:
+            return False
+        owner = self.fluid_owner.get(o.inner)
+        return isinstance(owner, PipeOwner) and owner.fluid == fluid
 
     def tunnel_conflict(self, name: str, a: tuple[int, int], b: tuple[int, int], reach: int) -> str | None:
         """Why a hop of `name` from a to b would pair with something it should not, or None."""
@@ -706,6 +762,7 @@ class _Rules:
         self.behind_start = _step(self.start_tile, OPPOSITE[spec.start.direction])
         self.goal_tile = spec.goal_tile
         self.via = set(spec.via)
+        self.fluid = pipe_fluid(spec)
         self._cache: dict[tuple, str | None] = {}
 
     def tile(self, tile: tuple[int, int]) -> str | None:
@@ -740,6 +797,8 @@ class _Rules:
             return self._cache[key]
         for c in connections_for(piece.name, tile, piece.direction):
             for o in self.grid.joins(c):
+                if self.grid.same_fluid(o, self.fluid):
+                    continue  # the same fluid: a branch or a merge, not a mix
                 if tile == self.start_tile and o.inner == self.behind_start:
                     continue
                 if tile == self.last_tile and o.inner == self.goal_tile:
@@ -845,6 +904,13 @@ def _lanes(spec: RouteSpec) -> tuple[str, ...] | None:
     if spec.kind == "pipe" and spec.goal.items:
         return spec.goal.items
     return None
+
+
+def pipe_fluid(spec: RouteSpec) -> str | None:
+    """The fluid a pipe route carries, when either end says."""
+    if spec.kind != "pipe":
+        return None
+    return next((e.items[0] for e in (spec.start, spec.goal) if e.items), None)
 
 
 def _rate(spec: RouteSpec) -> float | None:
@@ -1542,6 +1608,179 @@ def route_join(spec: JoinSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
         result.junction = junction
     grid.__dict__.update(trial.__dict__)
     return [base, joined]
+
+
+# --------------------------------------------------------------------------
+# pipe branches and merges
+# --------------------------------------------------------------------------
+
+# What one fluid connection can pass, per second: "theoretical maximum throughput limit of 6000 fluid per
+# second" (wiki.factorio.com/Fluid_system; the game's max_fluid_flow is 100 per tick, the same 6000/s).
+# The game data has a pipeline extent of 320 tiles by default (utility-constants default_pipeline_extent,
+# overridable per fluid box); how the game measures it was not checked in play, so a run's length is
+# reported beside the demand and only a demand above the connection limit is called a problem.
+PIPE_CONNECTION_LIMIT = 6000.0
+
+
+def _run_to(result: RouteResult, index: int) -> int:
+    """Tiles from the route's start to the piece at `index`, counting the ground an underground pair spans."""
+    tiles = result.pieces
+    return 1 + sum(_manhattan((tiles[k].x, tiles[k].y), (tiles[k + 1].x, tiles[k + 1].y)) for k in range(index))
+
+
+def start_tile_of(start: Endpoint) -> tuple[int, int]:
+    """Where the first piece goes for this start, as `RouteSpec.start_tile` says."""
+    if start.port is None:
+        return start.x, start.y
+    dx, dy = STEP[start.direction]
+    return start.x + dx, start.y + dy
+
+
+def _attach(spec_id: str, start: Endpoint, targets: list[RouteResult], grid: Grid, surface: str,
+            underground: str | None, via: tuple[tuple[int, int], ...], costs: dict, max_nodes: int,
+            candidates: int) -> tuple[RouteResult, RouteResult, int] | RouteResult:
+    """The cheapest route from `start` that ends beside a surface pipe of one of `targets`, joining it.
+
+    Every free tile beside such a pipe is a place to end; the nearest few by
+    estimate are routed in full. Gives the route, the target it joined and the
+    index of the pipe it joined, or the first failure.
+    """
+    fluid = next((e for e in start.items if e), None)
+    beginning = start_tile_of(start)
+    placeholder = RouteSpec(spec_id, "pipe", start, Endpoint(*beginning, start.direction, start.items), surface,
+                            underground, via, **costs)
+    options = []
+    for target in targets:
+        for i, piece in enumerate(target.pieces):
+            if piece.name != surface:
+                continue  # only a four-way pipe takes a branch from any side
+            u = (piece.x, piece.y)
+            for d in STEP:
+                t = _step(u, OPPOSITE[d])
+                options.append(((_manhattan(beginning, t), target.id, i, d), (target, i, t, d)))
+    options.sort(key=lambda o: o[0])
+    best, first_failure, tried = None, None, 0
+    for _, (target, i, t, d) in options:
+        if tried >= candidates:
+            break
+        sub = RouteSpec(spec_id, "pipe", start, Endpoint(*t, d, (fluid,) if fluid else ()), surface, underground,
+                        via, **costs)
+        if _Rules(sub, grid).tile(t) is not None:
+            continue
+        tried += 1
+        result = route(sub, grid, max_nodes)
+        if not result.ok:
+            first_failure = first_failure or result
+            continue
+        key = (result.cost, target.id, i, d)
+        if best is None or key < best[0]:
+            best = (key, result, target, i)
+    if best is None:
+        if first_failure is not None:
+            return first_failure
+        return _failed(spec_id, placeholder, spec_id, "no pipe of the route has a free tile beside it to join",
+                       beginning)
+    _, result, target, i = best
+    return result, target, i
+
+
+def route_trunk(spec: TrunkSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
+                candidates: int = DEFAULT_CANDIDATES) -> list[RouteResult]:
+    """One source to every destination of one fluid, all or nothing; on success the grid holds every sub-route.
+
+    The route to the first destination is the trunk. Each further destination
+    is routed from its in port to the nearest pipe of what is laid so far and
+    joins it there, so branches may hang off branches. Pipes have no
+    direction, so a branch is laid from the destination end.
+    """
+    costs = dict(turn_cost=spec.turn_cost, hop_cost=spec.hop_cost)
+    known = [g.rate for g in spec.goals if g.rate is not None]
+    first = spec.goals[0]
+    if known:
+        first = Endpoint(first.x, first.y, first.direction, first.items, sum(known), first.port, first.pipe_name)
+    base_spec = RouteSpec(f"{spec.id}/0", "pipe", spec.source, first, spec.surface, spec.underground,
+                          tuple(spec.vias[0]), **costs)
+
+    def reversed_start(goal: Endpoint) -> Endpoint:
+        items = goal.items or spec.source.items
+        return Endpoint(goal.x, goal.y, OPPOSITE[goal.direction], items, goal.rate, goal.port, goal.pipe_name)
+
+    all_specs = [base_spec] + [
+        RouteSpec(f"{spec.id}/{k}", "pipe", reversed_start(spec.goals[k]), spec.goals[k], spec.surface,
+                  spec.underground, tuple(spec.vias[k]), **costs)
+        for k in range(1, len(spec.goals))
+    ]
+
+    def fail_all(reason: str, near) -> list[RouteResult]:
+        return [_failed(s.id, s, spec.id, reason, near) for s in all_specs]
+
+    fluid = pipe_fluid(base_spec)
+    trial = grid.copy()
+    base = route(base_spec, trial, max_nodes)
+    if not base.ok:
+        return fail_all(base.reason, base.near)
+    base.connection = spec.id
+    trial.add(base.pieces, fluid)
+    placed = [base]
+    # How far each piece of each placed route is from the source (a branch is laid from its consumer's end).
+    dist: dict[str, list[int]] = {base.id: [_run_to(base, j) for j in range(len(base.pieces))]}
+    runs = [dist[base.id][-1]]
+    for k in range(1, len(spec.goals)):
+        found = _attach(f"{spec.id}/{k}", reversed_start(spec.goals[k]), placed, trial, spec.surface,
+                        spec.underground, tuple(spec.vias[k]), costs, max_nodes, candidates)
+        if isinstance(found, RouteResult):
+            return fail_all(f"destination {k} ({spec.goals[k].describe()}) cannot join the pipes laid so far: "
+                            f"{found.reason}", found.near)
+        result, target, i = found
+        result.connection = spec.id
+        trial.add(result.pieces, fluid)
+        placed.append(result)
+        joined_at = dist[target.id][i]
+        last = _run_to(result, len(result.pieces) - 1)
+        dist[result.id] = [joined_at + 1 + last - _run_to(result, j) for j in range(len(result.pieces))]
+        runs.append(dist[result.id][0])
+
+    demand = sum(known) if known else None
+    n = len(spec.goals)
+    where = "; ".join(f"{g.describe()} {r} tiles" for g, r in zip(spec.goals, runs))
+    what = fluid or "the fluid"
+    if demand is not None and demand > PIPE_CONNECTION_LIMIT:
+        base.notes.append(Finding(
+            Severity.SUSPECT, "route-pipe-flow",
+            f"route {spec.id}: {what} to {n} destinations asks {demand:.4g}/s of one pipe; a fluid connection "
+            f"passes at most about {PIPE_CONNECTION_LIMIT:.0f}/s ({where})",
+            "Feed the destinations from separate pipes or sources.",
+        ))
+    else:
+        base.notes.append(Finding(
+            Severity.NOTE, "route-pipe-flow",
+            f"route {spec.id}: {what} to {n} destinations, "
+            + (f"demand {demand:.4g}/s" if demand is not None else "demand unknown")
+            + f", runs from the source: {where}; how much a run of that length carries is not judged here (the game's default pipeline extent is 320 tiles, not checked in play)",
+        ))
+    grid.__dict__.update(trial.__dict__)
+    return placed
+
+
+def route_tap(spec: TapSpec, target: RouteResult, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
+              candidates: int = DEFAULT_CANDIDATES) -> RouteResult:
+    """A source that joins a pipe route already laid (a merge of the same fluid); on success the grid holds it."""
+    costs = dict(turn_cost=spec.turn_cost, hop_cost=spec.hop_cost)
+    mine = next((e for e in spec.source.items if e), None)
+    theirs = pipe_fluid(target.spec) if target.spec else None
+    if mine and theirs and mine != theirs:
+        raise RouteError(f"it would join {mine} to {theirs} (route {target.id})")
+    start = spec.source
+    if not mine and theirs:
+        start = Endpoint(start.x, start.y, start.direction, (theirs,), start.rate, start.port, start.pipe_name)
+    found = _attach(spec.id, start, [target], grid, spec.surface, spec.underground, tuple(spec.via), costs,
+                    max_nodes, candidates)
+    if isinstance(found, RouteResult):
+        return _failed(spec.id, found.spec, spec.id, found.reason, found.near)
+    result, _, _ = found
+    result.connection = spec.id
+    grid.add(result.pieces, mine or theirs)
+    return result
 
 
 # --------------------------------------------------------------------------

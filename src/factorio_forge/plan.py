@@ -51,7 +51,9 @@ A belt connection may also split (`to` is a list: one splitter per extra
 destination, sub-routes `<id>/0`, `<id>/1`, ...), merge (`onto` instead of
 `to`: side-loaded onto a lane of an earlier route, the route into an in port,
 or a belt at a tile) or join two sources a lane each (`from` is a list of
-two). `inputs` names what enters a hand-placed belt head. `sources` does the
+two). A pipe connection branches the same way (`to` is a list: the first
+destination gets the trunk, each other in port joins the pipes laid so far) and
+merges (`onto` a route of the same fluid); a pipe never joins another fluid. `inputs` names what enters a hand-placed belt head. `sources` does the
 same and more: a source is named (`id`), sits at a belt head (`at` and the
 `direction` it flows) or at a block's in port (`block`, `port`), and says the
 `items` per lane and the `rate` the player feeds there. After routing,
@@ -322,7 +324,7 @@ _ONTO_FIELDS = {"route", "block", "port", "at", "lane"}
 _ROUTING_FIELDS = {"margin", "max_nodes", "reserve", "candidates"}
 _POWER_FIELDS = {"link", "pole"}
 
-Spec = route.RouteSpec | route.SplitSpec | route.MergeSpec | route.JoinSpec
+Spec = route.RouteSpec | route.SplitSpec | route.MergeSpec | route.JoinSpec | route.TrunkSpec | route.TapSpec
 
 
 def _is_int(value) -> bool:
@@ -481,6 +483,32 @@ def _belt_prototypes(conn: dict, protos: list[dict]) -> tuple[str, str | None]:
     return surface, underground
 
 
+def _pipe_prototypes(conn: dict, protos: list[dict], points: tuple[route.Endpoint, ...]) -> tuple[str, str | None]:
+    """The pipe and pipe-to-ground a connection routes with: named, else from the blocks at its ends."""
+    surface = conn.get("pipe") or next((p["pipe"] for p in protos if p.get("pipe")), None)
+    surface = _of_type(surface or rows._default_pipe("pipe"), "pipe", "pipe")
+    _one_tile(surface)
+    if sorted(int(c.get("direction", -1)) for c in _surface_connections(surface)) != [0, 4, 8, 12]:
+        raise PlanError(f"{surface} does not connect on all four sides; only such pipes route in v1")
+    underground = conn.get("pipe_to_ground")
+    if underground is False:
+        underground = None
+    else:
+        if underground is None:
+            underground = next((p["pipe_to_ground"] for p in protos if p.get("pipe_to_ground")), None)
+            underground = underground or rows._default_pipe("pipe-to-ground")
+        underground = _of_type(underground, "pipe-to-ground", "pipe-to-ground")
+        _one_tile(underground)
+        route.hop_reach(underground)
+        route.ptg_directions(underground, 0)
+        if not _categories(underground) & _categories(surface):
+            raise PlanError(f"{underground} and {surface} share no connection category")
+    for point in points:
+        if point.pipe_name and not _categories(point.pipe_name) & _categories(surface):
+            raise PlanError(f"{surface} shares no connection category with the port's {point.pipe_name}")
+    return surface, underground
+
+
 def _kind_of(conn: dict, kinds: set[str]) -> str:
     stated = conn.get("kind")
     if stated is not None and stated not in ("belt", "pipe"):
@@ -586,32 +614,65 @@ def _resolve_connection(conn, ident: str, index: int, built: list[BuiltBlock], s
         surface, underground = _belt_prototypes(conn, protos)
         goal = _sized(goal, [start], built)
     else:
-        surface = conn.get("pipe") or next((p["pipe"] for p in protos if p.get("pipe")), None)
-        surface = _of_type(surface or rows._default_pipe("pipe"), "pipe", "pipe")
-        _one_tile(surface)
-        if sorted(int(c.get("direction", -1)) for c in _surface_connections(surface)) != [0, 4, 8, 12]:
-            raise PlanError(f"{surface} does not connect on all four sides; only such pipes route in v1")
-        underground = conn.get("pipe_to_ground")
-        if underground is False:
-            underground = None
-        else:
-            if underground is None:
-                underground = next((p["pipe_to_ground"] for p in protos if p.get("pipe_to_ground")), None)
-                underground = underground or rows._default_pipe("pipe-to-ground")
-            underground = _of_type(underground, "pipe-to-ground", "pipe-to-ground")
-            _one_tile(underground)
-            route.hop_reach(underground)
-            route.ptg_directions(underground, 0)
-            if not _categories(underground) & _categories(surface):
-                raise PlanError(f"{underground} and {surface} share no connection category")
-        for point in (start, goal):
-            if point.pipe_name and not _categories(point.pipe_name) & _categories(surface):
-                raise PlanError(f"{surface} shares no connection category with the port's {point.pipe_name}")
+        surface, underground = _pipe_prototypes(conn, protos, (start, goal))
 
     return route.RouteSpec(ident, kind, start, goal, surface, underground, via, **costs)
 
 
-_PIPES_DO_NOT_SPLIT = "pipes join whatever they touch; route to a point beside the pipe instead"
+_LANE_JOIN_IS_FOR_BELTS = "a lane join is for belts; a second pipe source of the same fluid joins with 'onto'"
+
+
+def _resolve_trunk(conn: dict, ident: str, source, goals, kinds, protos, vias) -> route.TrunkSpec:
+    """One pipe source to several destinations of one fluid (`to` is a list)."""
+    for field_ in ("split", "splitter"):
+        if field_ in conn:
+            raise PlanError(f"'{field_}' belongs to a belt split; pipes branch on their own")
+    kind = _kind_of(conn, kinds)
+    source = _normalise(source, kind)
+    goals = [_normalise(g, kind) for g in goals]
+    fluid = next((p.items[0] for p in [source, *goals] if p.items), None)
+    for p in [source, *goals]:
+        if p.items and p.items[0] != fluid:
+            raise PlanError(f"it would join {fluid} to {p.items[0]}")
+    for k, g in enumerate(goals):
+        if k and g.port is None:
+            raise PlanError("a branch ends at a block's in port: only the first destination of a pipe may be a point")
+    surface, underground = _pipe_prototypes(conn, protos, (source, *goals))
+    return route.TrunkSpec(ident, "pipe", source, tuple(goals), tuple(vias), surface, underground, **_costs(conn))
+
+
+def _resolve_tap(conn: dict, ident: str, index: int, survey: "_Routes", source, source_protos,
+                 onto: dict) -> route.TapSpec:
+    """A pipe source that joins a pipe route laid earlier (`onto` names the route, or the in port it ends at)."""
+    for field_ in ("split", "splitter"):
+        if field_ in conn:
+            raise PlanError(f"'{field_}' belongs to a belt split; pipes branch on their own")
+    if "lane" in onto or "at" in onto:
+        raise PlanError("a pipe joins a route, not a tile or a lane: 'onto' is {\"route\": id} or an in port")
+    named = [k for k in ("route",) if k in onto] + (["port"] if "block" in onto or "port" in onto else [])
+    if len(named) != 1:
+        raise PlanError("'onto' names exactly one of a route or an in port")
+    if "route" in onto:
+        name = onto["route"]
+        if not isinstance(name, str) or name not in survey.resolved:
+            raise PlanError(f"'onto' names route {name!r}, which no connection makes")
+        onto_route = survey.resolved[name]
+    else:
+        b, j = onto.get("block"), onto.get("port")
+        if (b, j) not in survey.ending_at:
+            raise PlanError(f"no connection ends at block {b!r} port {j!r}, so there is no route to join")
+        onto_route = survey.ending_at[(b, j)]
+    at = survey.index_of[onto_route]
+    if at == index:
+        raise PlanError("a connection cannot join itself")
+    if at > index:
+        raise PlanError(f"connection {index} joins route {onto_route}, which is routed later; "
+                        f"list it after {onto_route}")
+    kind = _kind_of({**conn, "kind": "pipe"}, {"pipe"})
+    source = _normalise(source, kind)
+    surface, underground = _pipe_prototypes(conn, [source_protos] if source_protos else [], (source,))
+    return route.TapSpec(ident, "pipe", source, onto_route, surface, underground, _vias(conn.get("via")),
+                         **_costs(conn))
 
 
 def _resolve_split(conn: dict, ident: str, built: list[BuiltBlock]) -> route.SplitSpec:
@@ -633,7 +694,7 @@ def _resolve_split(conn: dict, ident: str, built: list[BuiltBlock]) -> route.Spl
         vias.append(_vias(raw.get("via")))
     vias[0] = _vias(conn.get("via")) + vias[0]
     if conn.get("kind") == "pipe" or "pipe" in kinds:
-        raise PlanError(_PIPES_DO_NOT_SPLIT)
+        return _resolve_trunk(conn, ident, source, goals, kinds, protos, vias)
     kind = _kind_of(conn, kinds)
     source = _normalise(source, kind)
     goals = [_sized(_normalise(g, kind), [source], built) for g in goals]
@@ -663,10 +724,7 @@ def _resolve_split(conn: dict, ident: str, built: list[BuiltBlock]) -> route.Spl
                            splitter, **_costs(conn))
 
 
-def _resolve_merge(conn: dict, ident: str, index: int, built: list[BuiltBlock], survey: _Routes) -> route.MergeSpec:
-    for field_ in ("split", "splitter"):
-        if field_ in conn:
-            raise PlanError(f"'{field_}' belongs to a split, whose 'to' is a list")
+def _resolve_merge(conn: dict, ident: str, index: int, built: list[BuiltBlock], survey: _Routes) -> Spec:
     source, source_kind, source_protos = _endpoint(conn["from"], "from", built)
     onto = conn["onto"]
     if not isinstance(onto, dict):
@@ -674,6 +732,11 @@ def _resolve_merge(conn: dict, ident: str, index: int, built: list[BuiltBlock], 
     unknown = set(onto) - _ONTO_FIELDS
     if unknown:
         raise PlanError(f"'onto' has unknown field(s) {', '.join(sorted(unknown))}")
+    if source_kind == "pipe" or conn.get("kind") == "pipe":
+        return _resolve_tap(conn, ident, index, survey, source, source_protos, onto)
+    for field_ in ("split", "splitter"):
+        if field_ in conn:
+            raise PlanError(f"'{field_}' belongs to a split, whose 'to' is a list")
     named = [k for k in ("route", "at") if k in onto] + (["port"] if "block" in onto or "port" in onto else [])
     if len(named) != 1:
         raise PlanError("'onto' names exactly one of a route, an in port or a tile")
@@ -711,8 +774,6 @@ def _resolve_merge(conn: dict, ident: str, index: int, built: list[BuiltBlock], 
         if at > index:
             raise PlanError(f"connection {index} merges onto route {onto_route}, which is routed later; "
                             f"list it after {onto_route}")
-    if source_kind == "pipe" or conn.get("kind") == "pipe":
-        raise PlanError(_PIPES_DO_NOT_SPLIT)
     _kind_of({**conn, "kind": "belt"}, {source_kind} - {None})
     source = _normalise(source, "belt")
     surface, underground = _belt_prototypes(conn, protos)
@@ -741,7 +802,7 @@ def _resolve_join(conn: dict, ident: str, built: list[BuiltBlock]) -> route.Join
     if goal_protos:
         protos.append(goal_protos)
     if conn.get("kind") == "pipe" or "pipe" in kinds:
-        raise PlanError(_PIPES_DO_NOT_SPLIT)
+        raise PlanError(_LANE_JOIN_IS_FOR_BELTS)
     kind = _kind_of(conn, kinds)
     sources = [_normalise(s, kind) for s in sources]
     goal = _sized(_normalise(goal, kind), sources, built)
@@ -783,7 +844,9 @@ def _uses(spec: Spec) -> list[tuple[route.Endpoint, str]]:
         return [(spec.start, "from"), (spec.goal, "to")]
     if isinstance(spec, route.SplitSpec):
         return [(spec.source, "from")] + [(g, "to") for g in spec.goals]
-    if isinstance(spec, route.MergeSpec):
+    if isinstance(spec, route.TrunkSpec):
+        return [(spec.source, "from")] + [(g, "to") for g in spec.goals]
+    if isinstance(spec, (route.MergeSpec, route.TapSpec)):
         return [(spec.source, "from")]
     return [(s, "from") for s in spec.sources] + [(spec.goal, "to")]
 
@@ -793,7 +856,13 @@ def _tiles_of(spec: Spec) -> list[tuple[int, int]]:
     if isinstance(spec, route.RouteSpec):
         return [spec.start_tile, spec.last_tile, spec.goal_tile, *spec.via]
     points = []
-    if isinstance(spec, route.SplitSpec):
+    if isinstance(spec, route.TrunkSpec):
+        points = [spec.source, *spec.goals]
+        extra = [t for vias in spec.vias for t in vias]
+    elif isinstance(spec, route.TapSpec):
+        points = [spec.source]
+        extra = list(spec.via)
+    elif isinstance(spec, route.SplitSpec):
         points = [spec.source, *spec.goals]
         extra = [t for vias in spec.vias for t in vias] + [f[0] for f in spec.fixed if f]
     elif isinstance(spec, route.MergeSpec):
@@ -866,7 +935,9 @@ def _route_all(plan: dict, built: list[BuiltBlock], blueprint, cache=None) -> tu
     by_id: dict[str, route.RouteResult] = {}
     for index, spec in enumerate(specs):
         target = None
-        if isinstance(spec, route.MergeSpec):
+        if isinstance(spec, route.TapSpec):
+            target = by_id.get(spec.onto_route)
+        elif isinstance(spec, route.MergeSpec):
             target = by_id.get(spec.onto_route) if spec.onto_route else next(
                 (r for r in results if r.ok and any((p.x, p.y) == spec.onto_tile for p in r.pieces)), None)
 
@@ -875,8 +946,19 @@ def _route_all(plan: dict, built: list[BuiltBlock], blueprint, cache=None) -> tu
                 done = [route.route(spec, grid, max_nodes)]
                 done[0].connection = spec.id
                 if done[0].ok:
-                    grid.add(done[0].pieces)
+                    grid.add(done[0].pieces, route.pipe_fluid(spec))
                 return done
+            if isinstance(spec, route.TrunkSpec):
+                return route.route_trunk(spec, grid, max_nodes, candidates)
+            if isinstance(spec, route.TapSpec):
+                if not (target and target.ok and target.kind == "pipe"):
+                    point = (spec.source.x, spec.source.y)
+                    stand_in = route.RouteSpec(spec.id, "pipe", spec.source,
+                                               route.Endpoint(*point, spec.source.direction),
+                                               spec.surface, spec.underground)
+                    return [route._failed(spec.id, stand_in, spec.id,
+                                          f"route {spec.onto_route}, which it joins, was not built as a pipe", point)]
+                return [route.route_tap(spec, target, grid, max_nodes, candidates)]
             if isinstance(spec, route.SplitSpec):
                 return route.route_split(spec, grid, max_nodes, candidates)
             if isinstance(spec, route.MergeSpec):

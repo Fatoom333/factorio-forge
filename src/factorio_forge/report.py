@@ -81,6 +81,7 @@ RULES: dict[str, str] = {
     "route-belt-slow": ALWAYS_ERROR,
     "route-short-supply": ALWAYS_ERROR,
     "route-split-cascade": ALWAYS_FACT,
+    "route-pipe-flow": ERROR_UNLESS_NOTE,
     "route-no-underground": ALWAYS_FACT,
     "route-underground-speed": ALWAYS_FACT,
     "route-tiles-unchecked": ALWAYS_FACT,

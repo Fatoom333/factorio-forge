@@ -96,8 +96,8 @@ second; `=60/m` per minute; `--boundary` and `--surface` go with the words).
 It writes the plan, builds it once and prints the usual output; `--no-build`
 writes the plan only. Read it like any build: errors first. A spot that fails
 is retried in at most two other placements; what still fails is listed, and
-the rest of the draft stands. Pipes do not split: a fluid with several
-consumers gets one pipe, the others are yours to add. Then refine with `edit`.
+the rest of the draft stands. A fluid used by several
+stages is fed from one trunk (a `to` list); its branches join the trunk. Then refine with `edit`.
 
 ## Edit: small changes without a rebuild from scratch
 
