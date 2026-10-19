@@ -645,6 +645,9 @@ def _resolve_tap(conn: dict, ident: str, index: int, survey: "_Routes", source, 
             raise PlanError(f"'{field_}' belongs to a belt split; pipes branch on their own")
     if "lane" in onto or "at" in onto:
         raise PlanError("a pipe joins a route, not a tile or a lane: 'onto' is {\"route\": id} or an in port")
+    named = [k for k in ("route",) if k in onto] + (["port"] if "block" in onto or "port" in onto else [])
+    if len(named) != 1:
+        raise PlanError("'onto' names exactly one of a route or an in port")
     if "route" in onto:
         name = onto["route"]
         if not isinstance(name, str) or name not in survey.resolved:

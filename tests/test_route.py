@@ -11,6 +11,7 @@ networks, which know nothing about how the route was found.
 
 from __future__ import annotations
 
+import re
 import pytest
 from draftsman.data import entities, recipes
 
@@ -803,6 +804,25 @@ class TestPipeBranches:
         sides = [(1, 0), (-1, 0), (0, 1), (0, -1)]
         assert any((x + dx, y + dy) in tiles_of(trunk) for x, y in tiles_of(branch) for dx, dy in sides)
 
+    def test_a_branch_of_a_branch_counts_its_run_from_the_source(self) -> None:
+        recipe, machine = prototypes.crafting_setup(0, 1, 1, 0)
+        block = block_spec(recipe, machine, [2])
+        blocks = [block, {**block, "at": [0, 14]}, {**block, "at": [0, 28]}]
+        first = plan.build({"blocks": blocks})
+        ports = [next(p for p in ports_of(first, b) if p["kind"] == "pipe" and p["io"] == "in") for b in range(3)]
+        if len({tuple(p["items"]) for p in ports}) != 1:
+            pytest.skip("the copies of one block take different fluids")
+        trunk = {**self.trunk(ports), "to": [{"block": b, "port": ports[b]["index"]} for b in range(3)]}
+        result = build([trunk], blocks=blocks)
+        routes = result.routes
+        assert len(routes) == 3 and all(r.ok for r in routes), [r.reason for r in routes]
+        (fact,) = [f for f in result.findings if f.code == "route-pipe-flow"]
+        runs = [int(n) for n in re.findall(r"(\d+) tiles", fact.summary.split("how much")[0])]
+        assert len(runs) == 3
+        # A branch is at least as far from the source as the branch itself is long.
+        assert runs[1] >= routes[1].length and runs[2] >= routes[2].length
+        assert runs[2] > routes[2].length or runs[1] > routes[1].length
+
     def test_the_fact_reports_demand_and_runs(self) -> None:
         block, second, ports = self.two_plants()
         result = build([self.trunk(ports)], blocks=[block, second])
@@ -815,11 +835,6 @@ class TestPipeBranches:
         huge = route.PIPE_CONNECTION_LIMIT * 2
         recipe_fluid = ports[0]["items"][0]
         spec = plan.build({"blocks": [block, second]})
-        for b in spec.blocks:
-            for p in b.ports:
-                if p["kind"] == "pipe" and p["io"] == "in":
-                    p["rate"] = huge
-        # Rates come from the built ports, so call the router with the big ones.
         built = spec.blocks
         goals = []
         for b, p in zip((0, 1), ports):
@@ -863,6 +878,8 @@ class TestPipeBranches:
         ])
         a, b = result.routes
         assert a.ok and b.ok, (a.reason, b.reason)
+        sides = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        assert any((x + dx, y + dy) in tiles_of(a) for x, y in tiles_of(b) for dx, dy in sides)
 
     def test_the_branches_fluid_must_match(self) -> None:
         block, second, ports = self.two_plants()
@@ -913,6 +930,7 @@ class TestPipeBranches:
             assert cache.stats.routes_built + cache.stats.routes_reused > 0
             assert [(r.id, r.ok, [(p.name, p.x, p.y, p.direction) for p in r.pieces]) for r in cached.routes] == \
                    [(r.id, r.ok, [(p.name, p.x, p.y, p.direction) for p in r.pieces]) for r in plain.routes]
+        assert cache.stats.routes_reused > 0
 
 
 def two_ingredient_block():

@@ -174,7 +174,7 @@ ends:
   Pipes have no direction, so branches are laid from the destination end.
   Every destination must want the source's fluid. All or nothing. The report
   gives `route-pipe-flow`: the summed demand and each destination's run from
-  the source in tiles. How much a run of that length carries is not judged;
+  the source in tiles. How much a run of that length carries is not judged (the game's default pipeline extent is 320 tiles; how it is measured was not checked in play);
   only a demand above 6000/s, the most one fluid connection passes
   (wiki.factorio.com/Fluid_system), is a suspect. A second source joins the
   same way with `onto` (`{"route": id}`, or the in port the route ends at):
@@ -303,8 +303,7 @@ direction of its underground connection, not from an assumption.
 - A pipe piece is refused if one of its connections meets a foreign
   connection pointing back with a category in common -- the rule
   `fluids.networks` joins pieces by -- unless that connection belongs to a
-  pipe a route laid for the same fluid: forge did not branch pipes before and
-  now does, for one fluid only. The game itself refuses to join two networks
+  pipe a route laid for the same fluid: pipes branch and merge for one fluid only. The game itself refuses to join two networks
   holding different fluids, and two empty unfiltered networks would merge and
   then fail when two fluids arrive, which is why a touch with anything else
   stays refused. Only the first piece may join what stands
@@ -355,8 +354,9 @@ lanes, junction, merges, delivered lanes and reason.
   or exits; an inserter dropping onto a curve is unknown;
 - lane rates and ratio deadlocks beyond `lanes-mixed`; compression, which
   lane an inserter prefers and side-load priority;
-- branching pipes of different fluids (the same fluid branches, see Pipe
-  branch); ripping up one route for another; running the
+- pipe branches that join pipes inside a block or hand-placed pipes, branch
+  destinations that are points, and `onto` a trunk id (it means `<id>/0`);
+  ripping up one route for another; running the
   lane tracker in `factorio-forge check` on any blueprint; bill lines with no
   block in the plan;
 - map terrain (water, cliffs, ore, an existing base -- `reserve` stands in);

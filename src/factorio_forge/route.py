@@ -1615,9 +1615,10 @@ def route_join(spec: JoinSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
 # --------------------------------------------------------------------------
 
 # What one fluid connection can pass, per second: "theoretical maximum throughput limit of 6000 fluid per
-# second" (wiki.factorio.com/Fluid_system). The wiki gives no table of what a long run carries for the
-# current version, so a run's length is reported beside the demand and only a demand above this limit
-# is called a problem.
+# second" (wiki.factorio.com/Fluid_system; the game's max_fluid_flow is 100 per tick, the same 6000/s).
+# The game data has a pipeline extent of 320 tiles by default (utility-constants default_pipeline_extent,
+# overridable per fluid box); how the game measures it was not checked in play, so a run's length is
+# reported beside the demand and only a demand above the connection limit is called a problem.
 PIPE_CONNECTION_LIMIT = 6000.0
 
 
@@ -1721,7 +1722,9 @@ def route_trunk(spec: TrunkSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
     base.connection = spec.id
     trial.add(base.pieces, fluid)
     placed = [base]
-    runs = [_run_to(base, len(base.pieces) - 1)]
+    # How far each piece of each placed route is from the source (a branch is laid from its consumer's end).
+    dist: dict[str, list[int]] = {base.id: [_run_to(base, j) for j in range(len(base.pieces))]}
+    runs = [dist[base.id][-1]]
     for k in range(1, len(spec.goals)):
         found = _attach(f"{spec.id}/{k}", reversed_start(spec.goals[k]), placed, trial, spec.surface,
                         spec.underground, tuple(spec.vias[k]), costs, max_nodes, candidates)
@@ -1732,7 +1735,10 @@ def route_trunk(spec: TrunkSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
         result.connection = spec.id
         trial.add(result.pieces, fluid)
         placed.append(result)
-        runs.append(_run_to(target, i) + result.length)
+        joined_at = dist[target.id][i]
+        last = _run_to(result, len(result.pieces) - 1)
+        dist[result.id] = [joined_at + 1 + last - _run_to(result, j) for j in range(len(result.pieces))]
+        runs.append(dist[result.id][0])
 
     demand = sum(known) if known else None
     n = len(spec.goals)
@@ -1750,7 +1756,7 @@ def route_trunk(spec: TrunkSpec, grid: Grid, max_nodes: int = DEFAULT_MAX_NODES,
             Severity.NOTE, "route-pipe-flow",
             f"route {spec.id}: {what} to {n} destinations, "
             + (f"demand {demand:.4g}/s" if demand is not None else "demand unknown")
-            + f", runs from the source: {where}; how much a run of that length carries is not judged here",
+            + f", runs from the source: {where}; how much a run of that length carries is not judged here (the game's default pipeline extent is 320 tiles, not checked in play)",
         ))
     grid.__dict__.update(trial.__dict__)
     return placed
