@@ -321,32 +321,21 @@ def _cmd_check(args: argparse.Namespace) -> int:
     if blueprint is None:
         return 1
 
-    report = inspection.inspect(blueprint)
-    print(report.summary())
+    from . import report as presenting
 
-    groups = [
-        ("problems", report.problems, "almost certainly wrong"),
-        ("worth a look", report.suspects, "may be deliberate"),
-    ]
-    if args.all:
-        groups.append(("notes", report.notes, ""))
-
-    for heading, findings, aside in groups:
-        if not findings:
-            continue
-        print(f"\n{heading}" + (f" — {aside}" if aside else ""))
-        for finding in findings:
-            where = f"  ({finding.position[0]}, {finding.position[1]})" if finding.position else ""
-            print(f"  {finding.summary}{where}")
-            if finding.detail:
-                print(f"      {finding.detail}")
-
-    if report.clean:
-        print("\nNothing here changes the blueprint; this only reports.")
-    else:
-        print("\nNothing was changed. Whether any of this is a mistake is your call.")
-    # A blueprint with problems is still a valid blueprint, so this is not an
-    # error exit; it is a report.
+    found = inspection.inspect(blueprint)
+    shown = presenting.from_inspection(found)
+    hidden = 0
+    if not args.all:
+        kept = [f for f in shown.facts if f.kind == "count"]
+        hidden = len(shown.facts) - len(kept)
+        shown.facts = kept
+    for line in presenting.format_lines(shown):
+        print(line)
+    if hidden:
+        print(f"  ({_plural(hidden, 'more fact', 'more facts')} hidden; --all shows them)")
+    # A blueprint with errors is still a valid blueprint, so this is not an
+    # error exit; it is a report. Nothing here changes the blueprint.
     return 0
 
 
@@ -632,6 +621,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     import re
 
     from . import plan, render
+    from . import report as presenting
 
     data, code = _load_input(plan.load, Path(args.plan), plan.PlanError)
     if code:
@@ -653,61 +643,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
     string_path = out / f"{slug}.txt"
     string_path.write_text(result.blueprint.to_string(), encoding="utf-8")
     report_path = out / f"{slug}.report.json"
-    report_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    report_path.write_text(json.dumps(presenting.build_dict(result), indent=2, ensure_ascii=False), encoding="utf-8")
     html_path = None
     if not args.no_render:
         html_path = render.write_html(result.blueprint, out / f"{slug}.html", title=result.label, findings=result.findings)
 
-    print(f"{result.label}: {_plural(len(result.blueprint.entities), 'entity', 'entities')}, "
-          f"{_plural(result.power_networks, 'power network', 'power networks')}")
-    for warning in warned:
-        print(f"warning: {warning}")
-    for block in result.blocks:
-        if block.planned_crafts_per_second is None:
-            rate = f"{block.crafts_per_second:.4g} crafts/s at full load"
-        else:
-            rate = f"{block.planned_crafts_per_second:.4g}/s planned of {block.crafts_per_second:.4g} crafts/s"
-        print(f"\nblock {block.index}: {block.machines} x {block.machine} on {block.recipe}, "
-              f"{block.width}x{block.height} at {tuple(block.at)}, {rate}")
-        for row in block.rows:
-            limit = f" of {row['capacity']}" if row["capacity"] else ""
-            print(f"  row {row['index'] + 1}: {row['machines']}{limit}")
-        for port in block.ports:
-            items = " | ".join(i or "-" for i in port["items"])
-            if port.get("planned_rate") is None:
-                flow = f"{port['rate']:.4g}/s at full load"
-            else:
-                flow = f"{port['planned_rate']:.4g}/s planned ({port['rate']:.4g}/s at full load)"
-            arrives = f", arrives {' | '.join(port['arrives'])}" if port.get("arrives") else ""
-            print(f"  [{port['index']}] {port['io']:3s} {port['kind']:4s} ({port['x']}, {port['y']}) "
-                  f"flowing {port['direction']}: {items} at {flow}{arrives}")
-        for note in block.notes:
-            print(f"  note: {note}")
-    if result.routes:
-        print("\nroutes:")
-        for r in result.routes:
-            if not r.ok:
-                print(f"  route {r.id}: FAILED - {r.reason}")
-                continue
-            line = f"  route {r.id}: {r.kind} {_plural(r.length, 'tile', 'tiles')}"
-            if r.hops:
-                line += f", {_plural(r.hops, 'underground pair', 'underground pairs')}"
-            line += f", {_plural(r.turns, 'turn', 'turns')}"
-            if r.lanes:
-                line += f", {'lanes' if r.kind == 'belt' else 'carries'} " + "|".join(i or "-" for i in r.lanes)
-            if r.junction:
-                line += f", {r.junction.kind} at {r.junction.tile}"
-            if r.delivered:
-                line += f", delivered {' | '.join(r.delivered)}"
-            print(line)
-    shown = [f for f in result.findings if f.severity.value != "note"]
-    if shown:
-        print(f"\n{_plural(len(shown), 'finding', 'findings')}:")
-        for finding in shown:
-            where = f" at {finding.position}" if finding.position else ""
-            print(f"  [{finding.severity.value}] {finding.summary}{where}")
-    else:
-        print("\nchecks: nothing to report")
+    for line in presenting.format_lines(presenting.from_build(result), result.label):
+        print(line)
     print(f"\nblueprint: {string_path.resolve()}")
     print(f"report:    {report_path.resolve()}")
     if html_path:
@@ -875,7 +817,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     look.add_argument("blueprint", help="a blueprint string, or a file containing one")
     look.add_argument(
-        "--all", action="store_true", help="include notes, not just problems and suspects"
+        "--all", action="store_true", help="show every fact, not just the count of entities checked"
     )
     look.set_defaults(func=_cmd_check)
 
