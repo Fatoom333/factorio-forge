@@ -77,8 +77,17 @@ def _relative(profile_dir: Path, path: Path) -> str:
     return path.relative_to(profile_dir).as_posix()
 
 
-def fingerprint(profile_dir: Path) -> str:
-    parts = [f"v{INDEX_VERSION}"]
+def _slang_digest() -> str:
+    return hashlib.sha256(repr(slang.TERMS).encode("utf-8")).hexdigest()[:16]
+
+
+def fingerprint(profile_dir: Path, salt: str = "") -> str:
+    """What the index depends on: the note files, the slang table and `salt`.
+
+    The labels also depend on the game data the lookup reads, so the caller
+    passes what identifies it (profile name and data digest) as `salt`.
+    """
+    parts = [f"v{INDEX_VERSION}", f"slang:{_slang_digest()}", f"salt:{salt}"]
     for path in note_files(profile_dir):
         stat = path.stat()
         parts.append(f"{_relative(profile_dir, path)}|{stat.st_mtime_ns}|{stat.st_size}")
@@ -145,7 +154,7 @@ def _slang_phrases() -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
     """(stemmed words of a phrase, the names it stands for), vague one-word terms left out."""
     phrases = []
     for term in slang.TERMS:
-        vague = len(term.names) > 1 and term.note.startswith("which")
+        vague = len(term.names) > 1  # one word for several things: the player is to be asked
         for phrase in term.phrases:
             words = tuple(names._stem(w) for w in names._words(phrase))
             if words and not (vague and len(words) == 1):
@@ -278,10 +287,16 @@ def build_index(profile_dir: Path) -> list[Entry]:
     return entries
 
 
-def load_index(profile_dir: Path) -> tuple[list[Entry], bool]:
-    """The index, and whether it was rebuilt (as opposed to read from the cache)."""
-    current = fingerprint(profile_dir)
+def load_index(profile_dir: Path, salt: str = "", use_cache: bool = True) -> tuple[list[Entry], bool]:
+    """The index, and whether it was rebuilt (as opposed to read from the cache).
+
+    `use_cache=False` builds fresh and writes nothing: for a profile whose game
+    data is not the data currently loaded, whose labels would be wrong.
+    """
+    current = fingerprint(profile_dir, salt)
     cache = profile_dir / INDEX_FILE
+    if not use_cache:
+        return build_index(profile_dir), True
     try:
         stored = json.loads(cache.read_text(encoding="utf-8"))
         if stored.get("fingerprint") == current and stored.get("version") == INDEX_VERSION:

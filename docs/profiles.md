@@ -21,7 +21,8 @@ resolves to, and eventually the building style measured from its blueprints.
     data/            game data extracted for this set, and no other
     blueprints/      reference blueprints, the source of the base's style
     notes/           accumulated preferences, in the player's own words, one
-                     Markdown file per topic (a lone notes.md still counts)
+                     Markdown file per topic; optional: a new profile starts
+                     with a starter notes.md, which is indexed like any note
     notes-index.json cached index of the notes, rebuilt when they change
 ```
 

@@ -153,18 +153,27 @@ def _cmd_activate_profile(args: argparse.Namespace) -> int:
 
 
 def _cmd_notes(args: argparse.Namespace) -> int:
+    import difflib
+
     from . import notes as notes_module
+    from . import profile as profile_module
     from .profile import Profile, ProfileError
 
     words = list(args.topic or [])
     name = None
-    if words and words[0] in Profile.list_all():
-        name = words.pop(0)
+    if words:
+        # the profile folder name as written, or as the profile loader would
+        # normalise it (case does not matter)
+        known = {p.casefold(): p for p in Profile.list_all()}
+        for candidate in (words[0], profile_module.slugify(words[0])):
+            if candidate.casefold() in known:
+                name = known[candidate.casefold()]
+                words.pop(0)
+                break
     topic = " ".join(words).strip()
     name = name or Profile.active_profile_name()
     if not name:
-        shown = f"no profile named {words[0]!r}, and " if words else ""
-        print(shown + "no active profile — name one, or activate it first", file=sys.stderr)
+        print("no active profile — name one, or activate it first", file=sys.stderr)
         return 1
     try:
         profile = Profile.load(name)
@@ -172,10 +181,26 @@ def _cmd_notes(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    entries, _ = notes_module.load_index(profile.directory)
+    if profile.is_active():
+        digest = (profile.data_fingerprint or {}).get("digest", "")
+        entries, _ = notes_module.load_index(profile.directory, salt=f"{profile.name}|{digest}")
+    else:
+        # the item lookup reads the active profile's data: do not cache what it gives here
+        entries, _ = notes_module.load_index(profile.directory, use_cache=False)
+        print(
+            f"note: {profile.name} is not the active profile; items are matched against "
+            f"{Profile.active_profile_name() or 'no'} data, so the index is not cached",
+            file=sys.stderr,
+        )
     if topic:
         found = notes_module.lookup(profile.directory, entries, topic)
         if not found:
+            first = args.topic[0] if args.topic else ""
+            if args.topic and len(args.topic) == len(words) and difflib.get_close_matches(
+                first.casefold(), [p.casefold() for p in Profile.list_all()], n=1, cutoff=0.7
+            ):
+                # looks like a mistyped profile name rather than a topic
+                print(Profile.missing_message(first), file=sys.stderr)
             print(f"no note matches {topic!r}; the index has:", file=sys.stderr)
             print(notes_module.format_index(entries), file=sys.stderr)
             return 1

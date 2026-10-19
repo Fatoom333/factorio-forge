@@ -7,14 +7,25 @@ from pathlib import Path
 
 import pytest
 
-from factorio_forge import cli, notes, paths
+from factorio_forge import cli, names, notes, paths, slang
 from factorio_forge.profile import Profile
 from factorio_forge.save import ModRef, SaveInfo
+
+
+FAKE_ITEMS = {
+    name: {}
+    for name in (
+        "inserter", "fast-transport-belt", "electronic-circuit", "advanced-circuit", "steam-engine", "pipe",
+    )
+}
 
 
 @pytest.fixture(autouse=True)
 def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv(paths.ENV_HOME, str(tmp_path / "forge"))
+    # the item lookup reads the game data of the active profile: use a small fixed set instead
+    monkeypatch.setattr(names, "_raw", lambda kind: FAKE_ITEMS if kind == "item" else {})
+    monkeypatch.setattr(names, "find", lambda *a, **k: [])
     return tmp_path
 
 
@@ -171,3 +182,62 @@ class TestCommand:
         many_notes(profile)
         assert cli.main(["notes", profile.name, "zzzz"]) == 1
         assert "notes/power.md" in capsys.readouterr().err
+
+
+class TestCacheKey:
+    def test_the_salt_and_the_slang_table_are_part_of_the_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        profile = make_profile()
+        many_notes(profile)
+        assert notes.load_index(profile.directory, salt="a")[1] is True
+        assert notes.load_index(profile.directory, salt="a")[1] is False
+        assert notes.load_index(profile.directory, salt="b")[1] is True  # other data, other index
+        assert notes.load_index(profile.directory, salt="b")[1] is False
+        monkeypatch.setattr(slang, "TERMS", slang.TERMS[:-1])
+        assert notes.load_index(profile.directory, salt="b")[1] is True
+
+    def test_without_the_cache_nothing_is_written(self) -> None:
+        profile = make_profile()
+        many_notes(profile)
+        assert notes.load_index(profile.directory, use_cache=False)[1] is True
+        assert not (profile.directory / notes.INDEX_FILE).exists()
+
+
+class TestProfileWord:
+    def test_the_profile_name_is_taken_in_any_case(self, capsys: pytest.CaptureFixture[str]) -> None:
+        profile = make_profile("alpha-beta")
+        many_notes(profile)
+        assert cli.main(["notes", "Alpha-Beta", "power"]) == 0
+        out = capsys.readouterr().out
+        assert "через каждые девять" in out and "Расстановка" not in out
+
+    def test_a_mistyped_profile_name_says_so(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        profile = make_profile("alpha-beta")
+        many_notes(profile)
+        monkeypatch.setattr(Profile, "active_profile_name", staticmethod(lambda: profile.name))
+        assert cli.main(["notes", "alpha-bata"]) == 1
+        err = capsys.readouterr().err
+        assert "no profile named 'alpha-bata'" in err and "alpha-beta" in err
+
+    def test_an_item_name_with_a_hyphen_is_still_a_topic(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        profile = make_profile("alpha-beta")
+        many_notes(profile)
+        monkeypatch.setattr(Profile, "active_profile_name", staticmethod(lambda: profile.name))
+        assert cli.main(["notes", "advanced-circuit"]) == 0
+        assert "лента меди" in capsys.readouterr().out
+
+    def test_the_active_profile_caches_and_another_does_not(
+        self, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        profile = make_profile("alpha-beta")
+        many_notes(profile)
+        monkeypatch.setattr(Profile, "active_profile_name", staticmethod(lambda: "other"))
+        assert cli.main(["notes", "alpha-beta"]) == 0
+        assert not (profile.directory / notes.INDEX_FILE).exists()
+        assert "not the active profile" in capsys.readouterr().err
+        monkeypatch.setattr(Profile, "active_profile_name", staticmethod(lambda: profile.name))
+        assert cli.main(["notes", "alpha-beta"]) == 0
+        assert (profile.directory / notes.INDEX_FILE).is_file()
