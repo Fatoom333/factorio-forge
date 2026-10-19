@@ -229,7 +229,7 @@ replaces the game data of the draftsman installed in this environment; see
 
 ## The Claude skill
 
-The skill is [skill/factorio-forge/SKILL.md](skill/factorio-forge/SKILL.md).
+The skill is the folder [skill/factorio-forge/](skill/factorio-forge/) (`SKILL.md` plus `reference/`).
 Claude Code reads personal skills from `~/.claude/skills/` (on Windows
 `%USERPROFILE%\.claude\skills\`). Link the skill folder there, so a `git pull`
 updates it, or copy it.
@@ -252,6 +252,9 @@ ln -s "$PWD/skill/factorio-forge" ~/.claude/skills/factorio-forge
 ```
 
 To copy instead: `cp -r skill/factorio-forge ~/.claude/skills/`.
+
+Claude opens the files in `reference/` only when a topic comes up, so link
+or copy the whole folder, not `SKILL.md` alone.
 
 The skill runs the tools with this checkout's Python
 (`.venv\Scripts\python.exe -m factorio_forge.cli` on Windows,

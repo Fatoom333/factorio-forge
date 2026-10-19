@@ -235,7 +235,7 @@ factorio-forge activate-profile my-save
 
 ## Скилл для Claude
 
-Скилл — это [skill/factorio-forge/SKILL.md](skill/factorio-forge/SKILL.md).
+Скилл — это папка [skill/factorio-forge/](skill/factorio-forge/) (`SKILL.md` и `reference/`).
 Личные скиллы Claude Code читает из `~/.claude/skills/` (в Windows —
 `%USERPROFILE%\.claude\skills\`). Поставьте туда ссылку на папку скилла, чтобы
 `git pull` её обновлял, или скопируйте её.
@@ -258,6 +258,9 @@ ln -s "$PWD/skill/factorio-forge" ~/.claude/skills/factorio-forge
 ```
 
 Скопировать вместо ссылки: `cp -r skill/factorio-forge ~/.claude/skills/`.
+
+Файлы из `reference/` Claude открывает, только когда заходит речь о теме,
+поэтому подключайте ссылкой или копируйте папку целиком, а не один `SKILL.md`.
 
 Скилл запускает инструменты питоном из этой папки
 (`.venv\Scripts\python.exe -m factorio_forge.cli` в Windows,
