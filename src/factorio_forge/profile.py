@@ -347,6 +347,11 @@ class Profile:
         return self.directory / "notes.md"
 
     @property
+    def library_dir(self) -> Path:
+        """The profile's library of working blocks, one JSON file each (see library.py)."""
+        return self.directory / "library"
+
+    @property
     def notes_dir(self) -> Path:
         return self.directory / "notes"
 
