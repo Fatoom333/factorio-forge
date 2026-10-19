@@ -153,9 +153,25 @@ def _cmd_activate_profile(args: argparse.Namespace) -> int:
 
 
 def _cmd_notes(args: argparse.Namespace) -> int:
+    import difflib
+
+    from . import notes as notes_module
+    from . import profile as profile_module
     from .profile import Profile, ProfileError
 
-    name = args.profile or Profile.active_profile_name()
+    words = list(args.topic or [])
+    name = None
+    if words:
+        # the profile folder name as written, or as the profile loader would
+        # normalise it (case does not matter)
+        known = {p.casefold(): p for p in Profile.list_all()}
+        for candidate in (words[0], profile_module.slugify(words[0])):
+            if candidate.casefold() in known:
+                name = known[candidate.casefold()]
+                words.pop(0)
+                break
+    topic = " ".join(words).strip()
+    name = name or Profile.active_profile_name()
     if not name:
         print("no active profile — name one, or activate it first", file=sys.stderr)
         return 1
@@ -165,12 +181,48 @@ def _cmd_notes(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    if profile.is_active():
+        digest = (profile.data_fingerprint or {}).get("digest", "")
+        entries, _ = notes_module.load_index(profile.directory, salt=f"{profile.name}|{digest}")
+    else:
+        # the item lookup reads the active profile's data: do not cache what it gives here
+        entries, _ = notes_module.load_index(profile.directory, use_cache=False)
+        print(
+            f"note: {profile.name} is not the active profile; items are matched against "
+            f"{Profile.active_profile_name() or 'no'} data, so the index is not cached",
+            file=sys.stderr,
+        )
+    if topic:
+        found = notes_module.lookup(profile.directory, entries, topic)
+        if not found:
+            first = args.topic[0] if args.topic else ""
+            if args.topic and len(args.topic) == len(words) and difflib.get_close_matches(
+                first.casefold(), [p.casefold() for p in Profile.list_all()], n=1, cutoff=0.7
+            ):
+                # looks like a mistyped profile name rather than a topic
+                print(Profile.missing_message(first), file=sys.stderr)
+            print(f"no note matches {topic!r}; the index has:", file=sys.stderr)
+            print(notes_module.format_index(entries), file=sys.stderr)
+            return 1
+        for entry, text in found:
+            print(f"==== {entry.file}" + (f"#{entry.heading}" if entry.heading else "") + " ====")
+            print(text.rstrip())
+            print()
+        return 0
+
     print(f"profile:   {profile.directory}")
-    print(f"notes:     {profile.notes_path}" + ("" if profile.notes_path.exists() else " (missing)"))
+    if profile.notes_dir.is_dir():
+        print(f"notes:     {profile.notes_dir} (topic files)")
+    if profile.notes_path.exists() or not profile.notes_dir.is_dir():
+        print(f"notes:     {profile.notes_path}" + ("" if profile.notes_path.exists() else " (missing)"))
     reference = profile.directory / "reference"
     if reference.is_dir():
         files = sorted(p.name for p in reference.iterdir() if p.is_file())
         print(f"reference: {reference}" + (f" ({len(files)} files)" if files else " (empty)"))
+    print()
+    print(notes_module.format_index(entries) or "(no notes yet)")
+    for missing in notes_module.unindexed(profile.directory, entries):
+        print(f"warning: {missing} has no index line", file=sys.stderr)
     return 0
 
 
@@ -788,9 +840,13 @@ def build_parser() -> argparse.ArgumentParser:
     ).set_defaults(func=_cmd_list_profiles)
 
     notes = sub.add_parser(
-        "notes", help="show where a profile's folder, notes.md and reference blueprints are"
+        "notes",
+        help="the index of a profile's notes; with a topic or item, the notes about it",
     )
-    notes.add_argument("profile", nargs="?", help="the profile (default: the active one)")
+    notes.add_argument(
+        "topic", nargs="*",
+        help="[profile] [topic or item, in any words]; without a topic, the index of the active profile's notes",
+    )
     notes.set_defaults(func=_cmd_notes)
 
     draw = sub.add_parser("render", help="draw a blueprint string as an HTML page")
