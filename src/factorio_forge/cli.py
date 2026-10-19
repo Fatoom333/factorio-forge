@@ -955,6 +955,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     edit.register(sub)
 
+    from . import library
+
+    library.register(sub)
+
     from . import ingame
 
     ingame.register(sub)

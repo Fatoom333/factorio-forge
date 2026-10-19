@@ -123,3 +123,25 @@ leaves the file as it was and prints one line. Tiles given in the plan by hand
 (`via`, points, `entities`, `reserve`) do not move with a block. With no
 operation, `edit` only rebuilds and fills its cache (a hidden folder beside
 the plan); the result always equals a full build.
+
+## Library: blocks that already work
+
+The profile keeps working blocks in `library/` (one JSON per block: blueprint
+of the block alone, size, ports, shape). Look there before designing a block
+from scratch; a block of the same shape is a start, not a result.
+
+```
+factorio-forge library list
+factorio-forge library show <name>
+factorio-forge library add <name> <region file> [--why "..."]        # a block cut from the base
+factorio-forge library add <name> --from-plan plan.json --block <index|id>
+factorio-forge library remove <name>
+```
+
+`add` reads where belts and pipes cross the block's edge as ports (in or out,
+lane contents, fluid) and refuses a block the check finds errors in (`--force`
+saves it marked unchecked). Names are lowercase letters, digits and dashes.
+`measure result` offers a plan's blocks to the library when every target is
+met (source `forge`, with the measured working share as the reason);
+`--no-library` skips it. A port's `rate` is machine capacity, not a measurement,
+and with two goods on an in port the lanes are not told apart.

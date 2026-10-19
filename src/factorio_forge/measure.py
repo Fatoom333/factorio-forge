@@ -709,7 +709,37 @@ def _cmd_result(args) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(format_comparison(comparison))
+    if not getattr(args, "no_library", False):
+        _offer_to_library(args, comparison)
     return 0 if comparison.all_met else 1
+
+
+def _offer_to_library(args, comparison: Comparison) -> None:
+    """When every target was met, keep the plan's blocks in the profile's library (see library.save_measured)."""
+    import sys
+
+    from . import library, plan
+
+    if not comparison.all_met or not comparison.targets:
+        return
+    plan_path = Path(args.plan) if getattr(args, "plan", None) else None
+    if plan_path is None and args.spec:
+        spec = Path(args.spec)
+        stem = spec.name[: -len(".measure-spec.json")] if spec.name.endswith(".measure-spec.json") else None
+        guess = spec.with_name(stem + ".json") if stem else None
+        plan_path = guess if guess is not None and guess.is_file() else None
+    if plan_path is None:
+        if not args.spec:
+            return  # a run with only --target names no plan; nothing to say
+        print("library: no plan known (pass --plan), so no block was offered; --no-library turns this off", file=sys.stderr)
+        return
+    try:
+        report = library.save_measured(plan.load(plan_path), comparison, found_from=f"measure run of {plan_path.name}")
+    except (library.LibraryError, plan.PlanError) as exc:
+        print(f"library: nothing saved ({exc})", file=sys.stderr)
+        return
+    for line in report.lines():
+        print(line)
 
 
 def register(sub) -> None:
@@ -734,4 +764,7 @@ def register(sub) -> None:
     result.add_argument("result", help="the measure.json the run wrote")
     result.add_argument("--spec", help="the spec that was run, for its targets")
     result.add_argument("--target", action="append", metavar="ITEM=RATE", help="a target in items per second (instead of the spec's)")
+    result.add_argument("--plan", help="the plan that was run, for the library (default: the spec's name without .measure-spec)")
+    result.add_argument("--no-library", action="store_true",
+                        help="do not save the plan's blocks to the profile's library when every target is met")
     result.set_defaults(func=_cmd_result)
