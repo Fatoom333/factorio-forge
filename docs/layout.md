@@ -434,6 +434,50 @@ on one belt, a stage whose row holds more machines than its belt keeps fed.
 A draft with a problem left is not wrong output: it is the starting point of
 the next edit, and the build's own findings say where.
 
+## Library blocks
+
+A profile can keep blocks of its own in a `library/` folder next to its notes,
+one `<name>.json` per block (a lowercase name of letters, digits and dashes; a
+name is never read as a path). An entry holds the blueprint of the block alone,
+its size, its ports (`kind`, `dir`, `at` relative to the block's top-left tile,
+`direction`, `items`, `rate`) and its `shape`: the machine, the recipe, how many
+solid and fluid goods go in and out, and the tiers it was built with.
+
+A plan block pastes one:
+
+```json
+{"library": "gears", "at": [0, 0], "rotate": 90, "mirror": true, "id": "gears", "recipe": "other-recipe"}
+```
+
+The block is mirrored left to right first, then turned clockwise, then put with
+its corner at `at`. Its entities are copied one by one (circuit wires between
+them are not kept) and go through the same checks as every other entity. Its
+ports are numbered as in the entry and transformed with it: a turn adds to
+every direction, a mirror reflects east and west and swaps the two lanes of a
+belt port; so `connections` and `sources` use them exactly as they use the
+ports of a rows block. `recipe` swaps the recipe of the block's machines when
+the new recipe takes and makes the same number of solid and fluid goods and the
+machine can craft it; the goods on the ports follow by position and the port
+rates are scaled by how much the new goods flow. An unknown name, a bad entry
+or a recipe that does not fit is a one-line plan error.
+
+`chain` looks in the library before it lays out a rows block for a stage: the
+same machine, the same number of goods in and out, tiers that agree with the
+stage's, and at least as many machines as the stage needs. A block that already
+makes the stage's recipe goes first, then one whose recipe can be swapped; the
+smallest big-enough block wins. A stage that has a speed bonus keeps its rows.
+The output says `stage N: library block NAME` (with `recipe swapped (A -> B)`
+when it was), and why a block of the right shape was passed over. Only the
+block is reused; its links to the neighbours are routed fresh like any other.
+
+A block is turned or mirrored so that its belt in ports enter from the west and
+its out ports leave to the east, as a rows block does; one that cannot be made
+to stand that way, one with more than twice the machines the stage needs, and a
+file that is malformed (a bad `shape`, for one) are passed over and named in the
+output. A mirror also swaps `left` and `right` in a splitter's input and output
+priority; other entity settings are copied as they are. Of a pipe port only `at`
+is used; the optional `also_at` tiles are not exposed.
+
 ## Small edits, and a rebuild that keeps what did not change
 
 A block may carry an `id` (a text without spaces, not a number, unique in the

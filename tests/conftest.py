@@ -37,3 +37,15 @@ def pytest_report_header(config) -> list[str]:
         lines.append(f"draftsman: not readable ({exc.__class__.__name__})")
 
     return lines
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _empty_block_library(tmp_path_factory, monkeypatch):
+    """No test reads the active profile's own block library; a test that needs one sets `insert.library_dir`."""
+    from factorio_forge import insert
+
+    folder = tmp_path_factory.mktemp("no-library")
+    monkeypatch.setattr(insert, "library_dir", lambda: folder)
