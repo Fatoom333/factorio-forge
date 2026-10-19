@@ -59,6 +59,81 @@ output, and then the real findings go unread too. So findings are graded:
 The test suite has as many tests for what must **not** be reported as for what
 must.
 
+## What the reader sees: errors and facts
+
+The three grades above are how the checks think. The report shows two levels:
+
+- **error** — the build will not be placed or will not work: a collision, an
+  input nothing feeds, the wrong item on a lane, a supply that falls short, a
+  power network in pieces.
+- **facts** — what the build is: rates, belt load ("the copper-cable lane is
+  80% loaded"; one lane is measured against one lane's capacity, and the slower of belt and underground counts), which items ride which lane, entity and machine counts, and
+  what was assumed. A fact carries no verdict; the reader decides what it means.
+
+There is no level in between. A doubtful finding (a *worth a look*) is an
+error, and its text says what to check; if in doubt whether something breaks
+the build, it is reported as one. The grading stays inside (`Finding`,
+`Severity` are unchanged); `report.py` only maps it to the two levels.
+
+`build` and `check` print one line first — `N errors` or `no errors` — then the
+errors, then the facts. `check` shows the facts that came from findings only
+with `--all`. `report.json` has `errors` and `facts` arrays (each entry has
+`text`, `kind`, and where they apply `code`, `detail`, `position`, and the
+check's own `severity`). The older `findings` and `warnings` fields are still
+written for compatibility and are **deprecated**: read `errors` and `facts`.
+The build's own warnings (a request file that cannot be read, a part of the plan
+it ignored) are errors too, with `kind: "warning"`: they are failures, not
+assumptions.
+
+Every finding code, and how it is shown (a code marked "error; note: fact" is an
+error when the check graded it a problem or worth a look, and a fact when it
+graded it a note):
+
+| Code | Shown as | Meaning |
+| --- | --- | --- |
+| `overlap` | error | two entities that cannot stand on the same tiles |
+| `unknown-prototypes` | error | entity types missing from the game data in use |
+| `belts-head-on` | error | two belts face each other |
+| `underground-unpaired` | error; note: fact | an underground belt or pipe with no other end |
+| `inserter-idle` | error | an inserter with nothing to take or nowhere to put |
+| `inserter-loop` | error | an inserter that moves things from a machine back into it |
+| `inserter-backwards` | error; note: fact | an inserter that looks turned the wrong way round |
+| `filters-ignored` | error | filters set where filtering is off |
+| `condition-without-wire` | error | a circuit condition with no wire to read |
+| `combinator-unwired` | error; note: fact | a combinator no wire reaches |
+| `constant-empty` | error | a constant combinator holding no signals |
+| `machine-no-recipe` | error; note: fact | a machine with no recipe (a note when the blueprint is parameterised) |
+| `unpowered` | error | an entity no pole's supply area covers |
+| `pole-isolated` | error | a pole out of wire reach of every other |
+| `power-split` | error | the poles form several separate networks |
+| `signal-without-rail` | error; note: fact | a rail signal not beside a rail |
+| `fluid-box-unconnected` | error | a fluid connection that leads nowhere |
+| `fluids-mixed` | error | two different fluids in one pipe network |
+| `lanes-not-taken` | error | an item arrives on a lane nothing takes it from |
+| `lanes-mixed` | error | two items share a lane |
+| `lanes-nothing` | error; note: fact | nothing arrives where a block wants something |
+| `lanes-missing` | error | an item a block needs does not arrive |
+| `lanes-wrong` | error | the right items on the wrong lanes |
+| `lanes-wrong-item` | error | a different item arrives than the block needs |
+| `lanes-starved` | error | a block stays short of an input |
+| `lanes-rate` | error; note: fact | declared supply is below what the order asks for (note: below full load) |
+| `lanes-unknown` | error; note: fact | what enters a point is not declared, so the lane cannot be checked |
+| `route-lanes-disagree` | error | a route's lanes and the traced lanes differ |
+| `lanes-overflow` | fact | a lane fills and a splitter sends the rest the other way |
+| `lanes-swapped` | fact | lanes arrive in the opposite order; the block takes from both |
+| `lanes-unchecked` | fact | lanes past a point are not tracked, with the reason |
+| `route-failed` | error | a connection that could not be routed |
+| `route-belt-slow` | error | a belt or lane carries less than the route needs |
+| `route-short-supply` | error | the start supplies less than the destination wants |
+| `route-split-cascade` | fact | several destinations behind a chain of splitters share unevenly |
+| `route-no-underground` | fact | no underground goes with the belt; the route stays on the surface |
+| `route-underground-speed` | fact | underground and belt run at different speeds |
+| `route-tiles-unchecked` | fact | the map's tiles are unknown to the tool (water, lava) |
+| `block-short` | error | a block makes less than the order needs |
+
+A new check cannot ship without a row here: a test reads the source for finding
+codes and fails on any that `report.RULES` does not map.
+
 ## Edges
 
 Most blueprints are fragments meant to join onto something else. A belt running
@@ -346,6 +421,69 @@ statistics for the measuring surface; deliveries are counted at the sinks.
 Power is a test source of one gigawatt, so power is never the limit; fluid
 sources are infinity pipes, so a fluid supply is never the limit either. The
 rates measured are those of a build fed exactly what the plan declares.
+
+## Handing a blueprint over: `deliver`
+
+```bash
+factorio-forge deliver plan.json [-o folder] [--save NAME_OR_PATH] [--no-game-check]
+```
+
+`deliver` is `build` with one more step: after the build has no problems, the
+blueprint is pasted into the real game, without a window, on an empty scratch
+surface (the companion mod's `tools/headless-run.ps1 -Blueprint`, which runs
+`/forge-verify`; about 20-30 seconds). The model behind `check` is quick and can
+be wrong; the game is not. It is a separate command rather than a flag of
+`build` so that `build` stays the fast loop used while a plan is being edited,
+and `<name>.txt` holds either a blueprint the game placed, or one written when the
+game could not be asked at all (`game_check.status` in the report says which; the
+run prints it too). A refused or failed run never leaves a `<name>.txt`: an older
+one from a previous build is moved to `<name>.stale.txt`.
+
+| Result | Exit code | Files |
+| --- | --- | --- |
+| the game placed everything | 0 | `<name>.txt`, report, drawing |
+| the game placed less than forge wrote, or refused a kind of entity | 1 | `<name>.unverified.txt` instead of `<name>.txt`, and `<name>.game-refused-test.py` |
+| the build has problems (the game is not asked) | 1 | report only |
+| the check was set up but cannot run (Factorio already open, save or runner not found, companion too old or unreadable, the run died or hung) | 1 | `<name>.unverified.txt`, no stub |
+| this machine cannot ask the game at all | 0 | `<name>.txt`, and the line `not checked in the game: <reason>` |
+
+Not being able to ask is only: not Windows, no PowerShell, no Factorio found, or
+no companion mod named. Once a companion is named, a mistake (a wrong path, a
+missing save, a game left open) is a failed check, not a quiet pass. The reason
+is printed and written to the report as it is. `--no-game-check` skips on
+purpose, and says so the same way.
+
+The test stub is a ready-to-paste test for `tests/`: it holds the plan (and the
+rates `deliver` used) and what the game said, and asserts that the model finds a
+problem in that plan too. It skips itself where the active data lacks an entity
+or recipe the plan uses, and is marked as an expected failure (strict), so
+pasting it keeps the suite green; once the model is taught the rule the test
+starts to pass, pytest reports it, and you remove the `xfail` mark so the case
+stays as a regression. Names and counts
+come from the game (mods choose entity names), so they are never put into a
+comment or into code by concatenation; the stub contains them only as Python
+literals written with `repr`, and the tool parses the stub back before writing it.
+
+Setting it up. Point `deliver` at the companion mod's repository folder with the
+environment variable `FACTORIO_FORGE_COMPANION` (or the key `companion` in
+`config.json` in the forge home, or `--companion`). The folder is copied into a
+temporary one and the copy's own `tools/build.ps1` makes the mod zip there, so
+the file list is the companion's and the repository is not written to. If the variable
+names a built `.zip` instead, name the runner script with
+`FACTORIO_FORGE_RUNNER` (key `runner`). The save is the one the active profile
+was made from, found in the game's saves folder; `--save` takes a name or a
+path. The runner works on a copy in a throwaway folder and checks afterwards that the
+real saves, mod list and mod settings did not change; if they did it exits 1 and
+`deliver` withholds the blueprint. The companion mod must be 0.7.1 or newer (an
+older one fails the check up front). If the run hangs, `deliver` ends the shell
+and everything it started (`taskkill /T`); the runner's throwaway folder is then
+left behind in the temp folder.
+
+What the check cannot say: the scratch surface is empty, so it answers "does
+this place on its own", not "does it fit onto the player's base" (that needs the
+blueprint pasted at real coordinates on a copy of the save). When entities
+overlap, the game may merge them and name none; the count of placed against
+expected still withholds the blueprint, but the verdict has no names to show.
 
 ## Still to come
 

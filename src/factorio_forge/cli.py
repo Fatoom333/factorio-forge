@@ -153,9 +153,25 @@ def _cmd_activate_profile(args: argparse.Namespace) -> int:
 
 
 def _cmd_notes(args: argparse.Namespace) -> int:
+    import difflib
+
+    from . import notes as notes_module
+    from . import profile as profile_module
     from .profile import Profile, ProfileError
 
-    name = args.profile or Profile.active_profile_name()
+    words = list(args.topic or [])
+    name = None
+    if words:
+        # the profile folder name as written, or as the profile loader would
+        # normalise it (case does not matter)
+        known = {p.casefold(): p for p in Profile.list_all()}
+        for candidate in (words[0], profile_module.slugify(words[0])):
+            if candidate.casefold() in known:
+                name = known[candidate.casefold()]
+                words.pop(0)
+                break
+    topic = " ".join(words).strip()
+    name = name or Profile.active_profile_name()
     if not name:
         print("no active profile — name one, or activate it first", file=sys.stderr)
         return 1
@@ -165,12 +181,48 @@ def _cmd_notes(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    if profile.is_active():
+        digest = (profile.data_fingerprint or {}).get("digest", "")
+        entries, _ = notes_module.load_index(profile.directory, salt=f"{profile.name}|{digest}")
+    else:
+        # the item lookup reads the active profile's data: do not cache what it gives here
+        entries, _ = notes_module.load_index(profile.directory, use_cache=False)
+        print(
+            f"note: {profile.name} is not the active profile; items are matched against "
+            f"{Profile.active_profile_name() or 'no'} data, so the index is not cached",
+            file=sys.stderr,
+        )
+    if topic:
+        found = notes_module.lookup(profile.directory, entries, topic)
+        if not found:
+            first = args.topic[0] if args.topic else ""
+            if args.topic and len(args.topic) == len(words) and difflib.get_close_matches(
+                first.casefold(), [p.casefold() for p in Profile.list_all()], n=1, cutoff=0.7
+            ):
+                # looks like a mistyped profile name rather than a topic
+                print(Profile.missing_message(first), file=sys.stderr)
+            print(f"no note matches {topic!r}; the index has:", file=sys.stderr)
+            print(notes_module.format_index(entries), file=sys.stderr)
+            return 1
+        for entry, text in found:
+            print(f"==== {entry.file}" + (f"#{entry.heading}" if entry.heading else "") + " ====")
+            print(text.rstrip())
+            print()
+        return 0
+
     print(f"profile:   {profile.directory}")
-    print(f"notes:     {profile.notes_path}" + ("" if profile.notes_path.exists() else " (missing)"))
+    if profile.notes_dir.is_dir():
+        print(f"notes:     {profile.notes_dir} (topic files)")
+    if profile.notes_path.exists() or not profile.notes_dir.is_dir():
+        print(f"notes:     {profile.notes_path}" + ("" if profile.notes_path.exists() else " (missing)"))
     reference = profile.directory / "reference"
     if reference.is_dir():
         files = sorted(p.name for p in reference.iterdir() if p.is_file())
         print(f"reference: {reference}" + (f" ({len(files)} files)" if files else " (empty)"))
+    print()
+    print(notes_module.format_index(entries) or "(no notes yet)")
+    for missing in notes_module.unindexed(profile.directory, entries):
+        print(f"warning: {missing} has no index line", file=sys.stderr)
     return 0
 
 
@@ -321,32 +373,21 @@ def _cmd_check(args: argparse.Namespace) -> int:
     if blueprint is None:
         return 1
 
-    report = inspection.inspect(blueprint)
-    print(report.summary())
+    from . import report as presenting
 
-    groups = [
-        ("problems", report.problems, "almost certainly wrong"),
-        ("worth a look", report.suspects, "may be deliberate"),
-    ]
-    if args.all:
-        groups.append(("notes", report.notes, ""))
-
-    for heading, findings, aside in groups:
-        if not findings:
-            continue
-        print(f"\n{heading}" + (f" — {aside}" if aside else ""))
-        for finding in findings:
-            where = f"  ({finding.position[0]}, {finding.position[1]})" if finding.position else ""
-            print(f"  {finding.summary}{where}")
-            if finding.detail:
-                print(f"      {finding.detail}")
-
-    if report.clean:
-        print("\nNothing here changes the blueprint; this only reports.")
-    else:
-        print("\nNothing was changed. Whether any of this is a mistake is your call.")
-    # A blueprint with problems is still a valid blueprint, so this is not an
-    # error exit; it is a report.
+    found = inspection.inspect(blueprint)
+    shown = presenting.from_inspection(found)
+    hidden = 0
+    if not args.all:
+        kept = [f for f in shown.facts if f.kind == "count"]
+        hidden = len(shown.facts) - len(kept)
+        shown.facts = kept
+    for line in presenting.format_lines(shown):
+        print(line)
+    if hidden:
+        print(f"  ({_plural(hidden, 'more fact', 'more facts')} hidden; --all shows them)")
+    # A blueprint with errors is still a valid blueprint, so this is not an
+    # error exit; it is a report. Nothing here changes the blueprint.
     return 0
 
 
@@ -632,6 +673,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     import re
 
     from . import plan, render
+    from . import report as presenting
 
     data, code = _load_input(plan.load, Path(args.plan), plan.PlanError)
     if code:
@@ -653,61 +695,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
     string_path = out / f"{slug}.txt"
     string_path.write_text(result.blueprint.to_string(), encoding="utf-8")
     report_path = out / f"{slug}.report.json"
-    report_path.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    report_path.write_text(json.dumps(presenting.build_dict(result), indent=2, ensure_ascii=False), encoding="utf-8")
     html_path = None
     if not args.no_render:
         html_path = render.write_html(result.blueprint, out / f"{slug}.html", title=result.label, findings=result.findings)
 
-    print(f"{result.label}: {_plural(len(result.blueprint.entities), 'entity', 'entities')}, "
-          f"{_plural(result.power_networks, 'power network', 'power networks')}")
-    for warning in warned:
-        print(f"warning: {warning}")
-    for block in result.blocks:
-        if block.planned_crafts_per_second is None:
-            rate = f"{block.crafts_per_second:.4g} crafts/s at full load"
-        else:
-            rate = f"{block.planned_crafts_per_second:.4g}/s planned of {block.crafts_per_second:.4g} crafts/s"
-        print(f"\nblock {block.index}: {block.machines} x {block.machine} on {block.recipe}, "
-              f"{block.width}x{block.height} at {tuple(block.at)}, {rate}")
-        for row in block.rows:
-            limit = f" of {row['capacity']}" if row["capacity"] else ""
-            print(f"  row {row['index'] + 1}: {row['machines']}{limit}")
-        for port in block.ports:
-            items = " | ".join(i or "-" for i in port["items"])
-            if port.get("planned_rate") is None:
-                flow = f"{port['rate']:.4g}/s at full load"
-            else:
-                flow = f"{port['planned_rate']:.4g}/s planned ({port['rate']:.4g}/s at full load)"
-            arrives = f", arrives {' | '.join(port['arrives'])}" if port.get("arrives") else ""
-            print(f"  [{port['index']}] {port['io']:3s} {port['kind']:4s} ({port['x']}, {port['y']}) "
-                  f"flowing {port['direction']}: {items} at {flow}{arrives}")
-        for note in block.notes:
-            print(f"  note: {note}")
-    if result.routes:
-        print("\nroutes:")
-        for r in result.routes:
-            if not r.ok:
-                print(f"  route {r.id}: FAILED - {r.reason}")
-                continue
-            line = f"  route {r.id}: {r.kind} {_plural(r.length, 'tile', 'tiles')}"
-            if r.hops:
-                line += f", {_plural(r.hops, 'underground pair', 'underground pairs')}"
-            line += f", {_plural(r.turns, 'turn', 'turns')}"
-            if r.lanes:
-                line += f", {'lanes' if r.kind == 'belt' else 'carries'} " + "|".join(i or "-" for i in r.lanes)
-            if r.junction:
-                line += f", {r.junction.kind} at {r.junction.tile}"
-            if r.delivered:
-                line += f", delivered {' | '.join(r.delivered)}"
-            print(line)
-    shown = [f for f in result.findings if f.severity.value != "note"]
-    if shown:
-        print(f"\n{_plural(len(shown), 'finding', 'findings')}:")
-        for finding in shown:
-            where = f" at {finding.position}" if finding.position else ""
-            print(f"  [{finding.severity.value}] {finding.summary}{where}")
-    else:
-        print("\nchecks: nothing to report")
+    for line in presenting.format_lines(presenting.from_build(result), result.label):
+        print(line)
     print(f"\nblueprint: {string_path.resolve()}")
     print(f"report:    {report_path.resolve()}")
     if html_path:
@@ -854,9 +848,13 @@ def build_parser() -> argparse.ArgumentParser:
     ).set_defaults(func=_cmd_list_profiles)
 
     notes = sub.add_parser(
-        "notes", help="show where a profile's folder, notes.md and reference blueprints are"
+        "notes",
+        help="the index of a profile's notes; with a topic or item, the notes about it",
     )
-    notes.add_argument("profile", nargs="?", help="the profile (default: the active one)")
+    notes.add_argument(
+        "topic", nargs="*",
+        help="[profile] [topic or item, in any words]; without a topic, the index of the active profile's notes",
+    )
     notes.set_defaults(func=_cmd_notes)
 
     draw = sub.add_parser("render", help="draw a blueprint string as an HTML page")
@@ -883,7 +881,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     look.add_argument("blueprint", help="a blueprint string, or a file containing one")
     look.add_argument(
-        "--all", action="store_true", help="include notes, not just problems and suspects"
+        "--all", action="store_true", help="show every fact, not just the count of entities checked"
     )
     look.set_defaults(func=_cmd_check)
 
@@ -952,6 +950,14 @@ def build_parser() -> argparse.ArgumentParser:
     from . import measure
 
     measure.register(sub)
+
+    from . import edit
+
+    edit.register(sub)
+
+    from . import ingame
+
+    ingame.register(sub)
 
     return parser
 

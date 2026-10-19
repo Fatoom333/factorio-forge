@@ -121,8 +121,12 @@ blueprints you already use — and generating inside that profile's conventions.
   exports them from inside the game, where the game itself acts as the parser.
 - **Your building style** is measured from reference blueprints rather than
   asked for in a questionnaire, and kept with the profile.
-- **Your preferences and corrections** accumulate in the profile's `notes.md`,
-  in your own words, and are read back when designing.
+- **Your preferences and corrections** accumulate in the profile's `notes/`
+  folder (one file per topic; a lone `notes.md` also works), in your own words.
+  `factorio-forge notes` prints an index built from them, one line per file or
+  section with the items it mentions; `factorio-forge notes <topic or item>`
+  prints the matching notes ("красная схема" finds the ones about
+  `advanced-circuit`). The index is rebuilt only when a note changes.
 
 ## Requirements
 
@@ -225,7 +229,7 @@ replaces the game data of the draftsman installed in this environment; see
 
 ## The Claude skill
 
-The skill is [skill/factorio-forge/SKILL.md](skill/factorio-forge/SKILL.md).
+The skill is the folder [skill/factorio-forge/](skill/factorio-forge/) (`SKILL.md` plus `reference/`).
 Claude Code reads personal skills from `~/.claude/skills/` (on Windows
 `%USERPROFILE%\.claude\skills\`). Link the skill folder there, so a `git pull`
 updates it, or copy it.
@@ -248,6 +252,9 @@ ln -s "$PWD/skill/factorio-forge" ~/.claude/skills/factorio-forge
 ```
 
 To copy instead: `cp -r skill/factorio-forge ~/.claude/skills/`.
+
+Claude opens the files in `reference/` only when a topic comes up, so link
+or copy the whole folder, not `SKILL.md` alone.
 
 The skill runs the tools with this checkout's Python
 (`.venv\Scripts\python.exe -m factorio_forge.cli` on Windows,
