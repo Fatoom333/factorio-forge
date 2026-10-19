@@ -372,6 +372,63 @@ plus `routing.margin`, at least four tiles). Poles are wired by the same
 generator as the rest, which holds a pole to five wires; if that leaves the
 networks apart the report says so.
 
+## Small edits, and a rebuild that keeps what did not change
+
+A block may carry an `id` (a text without spaces, not a number, unique in the
+plan). Connections and sources may name a block by that id as well as by index:
+`{"block": "red", "port": 1}`. Ids are turned into indices before anything else
+reads the plan, so a plan without ids is read as before.
+
+`factorio-forge edit plan.json <operation> [<operation> ...]` changes the plan
+file (or a copy, with `-o`) and builds it again. An operation is a verb and a few
+words, and a block is its index or its id:
+
+| Operation | Does |
+|---|---|
+| `move <block> <dx> <dy>` | shifts the block by whole tiles |
+| `set <block> <field>=<value>` | sets `recipe`, `machine`, `belt`, `inserter`, `long_inserter`, `pole`, `pipe`, `pipe_to_ground`, `stack`, `align`, `speed_bonus`, `stack_size`, `input_belts`, `planned` or `rotate` (degrees: 0, 90, 180, 270); `<field>=none` clears an optional one |
+| `rows <block> +1` / `-1` / `per=<n>` | one row more (it copies the last) or fewer, or `n` machines in every row |
+| `remove <block>` | drops the block and every connection and source that names it, and every merge left without its route; indices after it are renumbered |
+
+Several operations may follow one another: `edit plan.json move red 0 5 set red
+recipe=advanced-circuit`. An unknown block, field or verb is one line on the error
+output and nothing is written. `edit` does not touch what the plan holds as tiles
+(`via`, `at` points, `entities`, `reserve` rectangles): moving a block does not
+move them. The plan is built before it is written: if the edited plan no longer builds -- a
+connection that expected the old recipe's items, say, or a recipe name that does not
+exist -- the build error is printed, the file on disk stays as it was, and with `-o`
+into another folder a relative `request` is rewritten to still find its file. The
+drawing is written as `build` writes it (`--no-render` skips it). The plan is written back as indented JSON, so hand formatting is lost. `edit plan.json` with no operation only rebuilds. `speed_bonus` is the
+nearest thing to modules a block has; there is no `modules=` field yet.
+
+The rebuild keeps a cache in `.<plan name>.cache/` beside the plan, as one file
+(never in the repository; `--no-cache` skips it). Two kinds of entry:
+
+- **a block's expansion**, under a hash of the block's own definition (`id` and
+  `planned` left out) and of what the expansion reads: the package's source, the
+  active profile and the exported research. Moving or changing one block
+  expands that block only.
+- **a route**, under its connection, the routing options and, for a merge, the
+  route it merges onto. The search is watched while it runs: every tile of the
+  grid it looked at (occupied, reserved, fed, in reach of an inserter, fluid
+  connections, belt entries) is recorded with what it held. A cached route is
+  read back only if every one of those tiles holds the same now, the same
+  underground pairs exist, and the tiles the search treated as outside the search
+  area are still outside it; the cached grid changes and the merges it made are
+  applied as the search would have made them. A route that touches an edited block
+  or crosses its area saw a different tile and is searched again. A search that
+  walks a whole table rather than asking about tiles is not kept at all.
+
+The result is the same blueprint and report as a build without the cache (the
+tests build random edit sequences both ways and compare). Entries a build did not
+use are deleted, so the cache holds the last build. Cache files are read back with
+a restricted loader that accepts only this package's data classes, so a
+cache folder from another machine cannot run code.
+
+Placing the entities in the blueprint and the checks that read the whole of it
+(inspection, lane tracing, power) run on every build; the saving is in the
+expansion and the route searches.
+
 ## Checks in a build
 
 `factorio-forge build` runs the general checker (`docs/checking.md`) and

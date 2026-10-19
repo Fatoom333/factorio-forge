@@ -932,6 +932,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     measure.register(sub)
 
+    from . import edit
+
+    edit.register(sub)
+
     return parser
 
 

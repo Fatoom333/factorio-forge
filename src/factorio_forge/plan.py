@@ -12,12 +12,13 @@ makes the next revision of the plan better.
       "label": "Battery block",
       "request": "request.json",               (optional: planned rates from its bill)
       "blocks": [
-        {"type": "rows", "recipe": "battery", "machine": "chemical-plant",
+        {"type": "rows", "id": "battery", "recipe": "battery", "machine": "chemical-plant",
          "rows": 4, "per_row": 12,              (or "rows": [10, 12, 12, 10])
          "belt": "fast-transport-belt", "inserter": "fast-inserter",
          "long_inserter": "long-handed-inserter", "pole": "medium-electric-pole",
          "stack": "mirror", "align": "start", "at": [0, 0], "rotate": 0,
-         "planned": 1.5}                        (optional: crafts/s it is meant to run at)
+         "planned": 1.5}                        (optional: crafts/s it is meant to run at;
+                                                 "id": optional unique name, usable as {"block": "battery"})
       ],
       "entities": [{"name": "fast-transport-belt", "position": [-1, 3], "direction": 4}],
       "inputs": [{"at": [-1, 3], "items": ["iron-plate"]}],
@@ -59,6 +60,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import re
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -127,6 +129,69 @@ class BuildResult:
             "warnings": self.warnings,
             "blueprint": self.blueprint.to_string(),
         }
+
+
+_ID_OK = re.compile(r"^\S+$")
+
+
+def block_ids(plan: dict) -> dict[str, int]:
+    """The plan's block ids, each with the index of its block; malformed or repeated ones are an error."""
+    ids: dict[str, int] = {}
+    blocks = plan.get("blocks") or []
+    if not isinstance(blocks, list):
+        raise PlanError("blocks must be a list")
+    for index, block in enumerate(blocks):
+        if not isinstance(block, dict) or "id" not in block:
+            continue
+        name = block["id"]
+        if not isinstance(name, str) or not _ID_OK.match(name) or name.isdigit():
+            raise PlanError(f"block {index}: id must be a text without spaces that is not a number, not {name!r}")
+        if name in ids:
+            raise PlanError(f"block {index}: id {name!r} is already the id of block {ids[name]}")
+        ids[name] = index
+    return ids
+
+
+def _by_index(node, ids: dict[str, int], where: str):
+    """A copy of a connection or source with every {"block": <id>} turned into the block's index."""
+    if isinstance(node, list):
+        return [_by_index(item, ids, where) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for key, value in node.items():
+        if key == "block" and isinstance(value, str):
+            if value not in ids:
+                known = ", ".join(sorted(ids)) or "none"
+                raise PlanError(f"{where}: block {value!r} is not a block id (the ids are: {known})")
+            value = ids[value]
+        out[key] = _by_index(value, ids, where) if isinstance(value, (dict, list)) else value
+    return out
+
+
+def resolve_block_ids(plan: dict) -> dict:
+    """The plan with blocks named by id in `connections` and `sources` named by index, as the rest of the code reads them."""
+    ids = block_ids(plan)
+    if not any(isinstance(item, dict) and isinstance(item.get("block"), str)
+               for field_ in ("connections", "sources") for item in _flat(plan.get(field_))):
+        return plan
+    out = dict(plan)
+    for field_, label in (("connections", "connection"), ("sources", "source")):
+        value = plan.get(field_)
+        if isinstance(value, list):
+            out[field_] = [_by_index(item, ids, f"{label} {i}") for i, item in enumerate(value)]
+    return out
+
+
+def _flat(value):
+    """Every dict inside a nested plan value, itself included."""
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _flat(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _flat(item)
 
 
 def _rows_of(block: dict) -> list[int]:
@@ -754,7 +819,7 @@ def _place(blueprint, pieces: list[route.Piece]) -> None:
             entity.direction = piece.direction
 
 
-def _route_all(plan: dict, built: list[BuiltBlock], blueprint) -> tuple[list[route.RouteResult], list]:
+def _route_all(plan: dict, built: list[BuiltBlock], blueprint, cache=None) -> tuple[list[route.RouteResult], list]:
     """Resolve every connection first, then route them in plan order, placing what succeeds."""
     connections = plan.get("connections") or []
     if not isinstance(connections, list):
@@ -790,31 +855,38 @@ def _route_all(plan: dict, built: list[BuiltBlock], blueprint) -> tuple[list[rou
     entities = list(blueprint.entities)
     endpoints = [t for s in specs for t in _tiles_of(s)]
     grid = route.grid_of(entities, route.search_area(entities, endpoints, margin), reserved)
+    if cache is not None:
+        grid = cache.watched(grid)
     results: list[route.RouteResult] = []
     found: list = []
     by_id: dict[str, route.RouteResult] = {}
     for index, spec in enumerate(specs):
-        try:
+        target = None
+        if isinstance(spec, route.MergeSpec):
+            target = by_id.get(spec.onto_route) if spec.onto_route else next(
+                (r for r in results if r.ok and any((p.x, p.y) == spec.onto_tile for p in r.pieces)), None)
+
+        def run(spec=spec, target=target) -> list[route.RouteResult]:
             if isinstance(spec, route.RouteSpec):
                 done = [route.route(spec, grid, max_nodes)]
                 done[0].connection = spec.id
                 if done[0].ok:
                     grid.add(done[0].pieces)
-            elif isinstance(spec, route.SplitSpec):
-                done = route.route_split(spec, grid, max_nodes, candidates)
-            elif isinstance(spec, route.MergeSpec):
-                target = by_id.get(spec.onto_route) if spec.onto_route else next(
-                    (r for r in results if r.ok and any((p.x, p.y) == spec.onto_tile for p in r.pieces)), None)
+                return done
+            if isinstance(spec, route.SplitSpec):
+                return route.route_split(spec, grid, max_nodes, candidates)
+            if isinstance(spec, route.MergeSpec):
                 if spec.onto_route and not (target and target.ok):
                     point = (spec.source.x, spec.source.y)
                     stand_in = route.RouteSpec(spec.id, "belt", spec.source, route.Endpoint(*point, spec.source.direction),
                                                spec.surface, spec.underground)
-                    done = [route._failed(spec.id, stand_in, spec.id,
+                    return [route._failed(spec.id, stand_in, spec.id,
                                           f"route {spec.onto_route}, which it merges onto, was not built", point)]
-                else:
-                    done = [route.route_merge(spec, target, grid, max_nodes, candidates)]
-            else:
-                done = route.route_join(spec, grid, max_nodes, candidates)
+                return [route.route_merge(spec, target, grid, max_nodes, candidates)]
+            return route.route_join(spec, grid, max_nodes, candidates)
+
+        try:
+            done = run() if cache is None else cache.stage(spec, (max_nodes, candidates), grid, target, run)
         except route.RouteError as exc:
             raise PlanError(f"connection {index} ({spec.id}): {exc}") from exc
         if all(r.ok for r in done):
@@ -1121,9 +1193,35 @@ def _out_line_heads(placed: list[rows.Placement], ports: list[rows.Port], belt: 
     return heads
 
 
-def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
-    """Build a plan. `planned` (recipe -> crafts/s, from `planned_from_request`) sizes routes for what is wanted."""
+_BLOCK_FIELDS = set(rows.RowBlockSpec.__dataclass_fields__) | {"type", "per_row", "at", "rotate", "planned", "id"}
+
+
+def _expand(block: dict):
+    """What one block's own definition expands to: its spec, rows, placed entities, ports and size."""
+    fields = {k: v for k, v in block.items() if k in rows.RowBlockSpec.__dataclass_fields__}
+    fields["rows"] = _rows_of(block)
+    spec = rows.RowBlockSpec(**fields)
+    expanded = rows.build_block(spec)
+    at = tuple(block.get("at") or (0, 0))
+    placed, ports, width, height = rows.transform(expanded, at, int(block.get("rotate", 0)))
+    return spec, expanded, placed, ports, width, height
+
+
+def _expansion_key(block: dict) -> str:
+    """The text a block's expansion is cached under: everything of its own definition that shapes it."""
+    return json.dumps({k: v for k, v in block.items() if k not in ("id", "planned")}, sort_keys=True,
+                      ensure_ascii=False, default=repr)
+
+
+def build(plan: dict, planned: dict[str, float] | None = None, cache=None) -> BuildResult:
+    """Build a plan. `planned` (recipe -> crafts/s, from `planned_from_request`) sizes routes for what is wanted.
+
+    `cache` (an `edit.BuildCache`) lets a rebuild reuse the blocks and routes whose inputs did not change;
+    the result is the same as without it.
+    """
     from draftsman.blueprintable import Blueprint
+
+    plan = resolve_block_ids(plan)
 
     label = plan.get("label") or "factorio-forge layout"
     blueprint = Blueprint()
@@ -1149,8 +1247,7 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
         kind = block.get("type", "rows")
         if kind != "rows":
             raise PlanError(f"block {index}: unknown type {kind!r}; only 'rows' exists so far")
-        known = set(rows.RowBlockSpec.__dataclass_fields__) | {"type", "per_row", "at", "rotate", "planned"}
-        unknown = set(block) - known
+        unknown = set(block) - _BLOCK_FIELDS
         if unknown:
             raise PlanError(f"block {index}: unknown field(s) {', '.join(sorted(unknown))}")
         if "planned" in block:
@@ -1158,13 +1255,13 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
                 raise PlanError(f"block {index}: planned is crafts per second, a number of at least 0")
             wanted[index] = float(value)
-        fields = {k: v for k, v in block.items() if k in rows.RowBlockSpec.__dataclass_fields__}
-        fields["rows"] = _rows_of(block)
         try:
-            spec = rows.RowBlockSpec(**fields)
-            expanded = rows.build_block(spec)
+            if cache is None:
+                expansion = _expand(block)
+            else:
+                expansion = cache.block(_expansion_key(block), lambda: _expand(block))
+            spec, expanded, placed, ports, width, height = expansion
             at = tuple(block.get("at") or (0, 0))
-            placed, ports, width, height = rows.transform(expanded, at, int(block.get("rotate", 0)))
         except LayoutError as exc:
             raise PlanError(f"block {index} ({block.get('recipe')}): {exc}") from exc
         known_recipes.update(
@@ -1185,7 +1282,7 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
                 rows=[asdict(r) for r in expanded.rows],
                 ports=[{**asdict(p), "index": j} for j, p in enumerate(ports)],
                 crafts_per_second=crafts_per_second(spec.recipe, spec.machine, spec.speed_bonus) * sum(spec.rows),
-                notes=expanded.notes,
+                notes=list(expanded.notes),
                 prototypes={"belt": spec.belt, "pipe": spec.pipe, "pipe_to_ground": spec.pipe_to_ground},
             )
         )
@@ -1213,7 +1310,7 @@ def build(plan: dict, planned: dict[str, float] | None = None) -> BuildResult:
                 if key in extra:
                     kwargs[key] = extra[key]
             blueprint.entities.append(name, **kwargs)
-        routes, route_findings = _route_all(plan, built, blueprint)
+        routes, route_findings = _route_all(plan, built, blueprint, cache)
         linked = _link_poles(plan, built, blueprint, power_pole) if power_link else None
         blueprint.generate_power_connections()
     collected.extend(str(w.message) for w in caught)
