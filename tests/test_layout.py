@@ -204,3 +204,16 @@ class TestRowCapacity:
         monkeypatch.setattr(layout.entity_data, "raw", entities)
         with pytest.raises(layout.LayoutError, match="outruns"):
             layout.row_capacity("smelt-plate", "rocket", "slow-belt")
+
+
+def test_flows_count_the_machines_built_in_productivity() -> None:
+    """A foundry's own +50% shows in the output a block reports, as the game makes it."""
+    from draftsman.data import entities as entity_data
+    from draftsman.data import recipes as recipe_data
+
+    if "foundry" not in entity_data.raw or "metallurgic-science-pack" not in recipe_data.raw:
+        pytest.skip("needs Space Age data")
+    flows = {(f.item, f.direction): f.rate for f in layout.solid_flows("metallurgic-science-pack", "foundry", 5)}
+    crafts = 5 * layout.crafts_per_second("metallurgic-science-pack", "foundry")
+    assert flows[("metallurgic-science-pack", "out")] == pytest.approx(crafts * 1.5)
+    assert flows[("tungsten-carbide", "in")] == pytest.approx(crafts * 3)

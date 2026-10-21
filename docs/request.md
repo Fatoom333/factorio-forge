@@ -57,6 +57,7 @@ changes between versions. The game is the parser; the companion mod asks it.
 |---|---|
 | `inserter_stack_size_bonus`, `bulk_inserter_capacity_bonus` + a prototype's `stack_size_bonus` | inserter hand size, and so inserters needed per machine (`layout.inserter_hand_size`) |
 | `recipe_productivity` | the bill of materials: less of every ingredient per product, capped at the recipe's `maximum_productivity` |
+| a machine's built-in productivity (`effect_receiver.base_effect`, the foundry's and the electromagnetic plant's +50%) | the bill and a block's reported output, added to module and researched productivity where the recipe allows productivity; read from the prototype, not the export |
 | unlocked recipes | which machine the bill picks (the fastest the player can build; see [Which machine](#which-machine)), which tiers `review` fills in, what `find` marks as locked |
 
 An export is used only when its mod set matches the active profile (the

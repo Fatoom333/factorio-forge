@@ -149,16 +149,21 @@ class Request:
     def effects_for(self, category: str) -> Effects:
         return self.effects.get(category, self.effects.get("*", Effects()))
 
-    def productivity_for(self, recipe: str) -> float:
-        """Module productivity for the recipe's category, plus researched recipe productivity.
+    def productivity_for(self, recipe: str, machine: str | None = None) -> float:
+        """Module productivity for the recipe's category, plus researched recipe productivity,
+        plus what the machine has built in.
 
         The researched part comes from the companion mod's export
-        (`Bonuses.recipe_productivity`) when an environment is given. The sum
+        (`Bonuses.recipe_productivity`) when an environment is given. The
+        built-in part is the machine's `effect_receiver.base_effect` -- in
+        Space Age the foundry's and the electromagnetic plant's +50%. The sum
         is capped at the recipe's own `maximum_productivity`, as the game caps
         it (+300% unless the recipe says otherwise).
         """
         entry = recipe_data.raw[recipe]
         total = self.effects_for(primary_category(entry)).productivity
+        if machine is not None:
+            total += built_in_productivity(machine)
         if self.environment is not None and self.environment.bonuses is not None:
             total += self.environment.bonuses.recipe_productivity.get(recipe, 0.0)
         return min(total, float(entry.get("maximum_productivity", 3.0)))
@@ -263,6 +268,21 @@ def _result_temperature(recipe: dict, item: str) -> float | None:
     """
     entry = _result_entry(recipe, item)
     return entry.get("temperature") if entry else None
+
+
+def built_in_productivity(machine: str) -> float:
+    """The productivity a machine has without modules (`effect_receiver.base_effect`).
+
+    It counts only where the recipe allows productivity, which
+    `_productivity_multiplier` checks, as for any other bonus.
+    """
+    receiver = (entity_data.raw.get(machine) or {}).get("effect_receiver") or {}
+    return float((receiver.get("base_effect") or {}).get("productivity", 0.0))
+
+
+def productivity_multiplier(recipe: str, result: dict, productivity: float) -> float:
+    """`_productivity_multiplier` by recipe name, for the layout's flows."""
+    return _productivity_multiplier(recipe_data.raw[recipe], result, productivity)
 
 
 def _productivity_multiplier(recipe: dict, entry: dict, productivity: float) -> float:
@@ -1121,7 +1141,7 @@ def _solve_rates(chain: _Chain, request: Request, imports: frozenset[str] = froz
         return {}
     index = {recipe: i for i, recipe in enumerate(chain.recipes)}
 
-    productivity = {recipe: request.productivity_for(recipe) for recipe in chain.recipes}
+    productivity = {recipe: request.productivity_for(recipe, chain.machine[recipe]) for recipe in chain.recipes}
 
     imported = sorted(imports)
     constrained = sorted(set(chain.produced) | set(imported))
@@ -1190,7 +1210,7 @@ def compute(request: Request) -> BillOfMaterials:
         outputs = {
             r["name"]: rate
             * _expected_amount(r)
-            * _productivity_multiplier(entry, r, request.productivity_for(recipe))
+            * _productivity_multiplier(entry, r, request.productivity_for(recipe, machine_name))
             for r in entry.get("results", [])
         }
         output_temperatures = {

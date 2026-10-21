@@ -202,8 +202,11 @@ def _flows(recipe: str, machine: str, count: int, speed_bonus: float, fluid: boo
         for i in entry.get("ingredients", [])
         if (i.get("type") == "fluid") == fluid
     ]
+    from .bom import built_in_productivity, productivity_multiplier
+
+    productivity = built_in_productivity(machine)
     flows += [
-        Flow(r["name"], crafts * _amount(r), "out")
+        Flow(r["name"], crafts * _amount(r) * productivity_multiplier(recipe, r, productivity), "out")
         for r in entry.get("results", [])
         if (r.get("type") == "fluid") == fluid
     ]

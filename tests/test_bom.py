@@ -425,6 +425,37 @@ class TestCatalystAmount:
         assert by_recipe(result, "catalytic-recipe").rate == pytest.approx(1.0)
 
 
+class TestBuiltInProductivity:
+    """A machine's own `effect_receiver.base_effect` (the foundry's +50%) counts like a module's."""
+
+    @pytest.fixture
+    def built_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        recipes = dict(RECIPES)
+        recipes["craft-gear"] = dict(RECIPES["craft-gear"], allow_productivity=True)
+        entities = dict(ENTITIES)
+        entities["assembler"] = dict(ENTITIES["assembler"], effect_receiver={"base_effect": {"productivity": 0.5}})
+        monkeypatch.setattr(bom.recipe_data, "raw", recipes)
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+
+    def test_fewer_crafts_and_less_input_for_the_same_output(self, built_in: None) -> None:
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 3.0),)))
+        assert by_recipe(result, "craft-gear").rate == pytest.approx(2.0)
+        assert by_recipe(result, "smelt-plate").rate == pytest.approx(4.0)
+
+    def test_it_adds_to_module_productivity(self, built_in: None) -> None:
+        request = bom.Request(
+            targets=(bom.Target("gear", 3.0),), effects={"crafting": bom.Effects(productivity=0.5)}
+        )
+        assert by_recipe(bom.compute(request), "craft-gear").rate == pytest.approx(1.5)
+
+    def test_not_where_the_recipe_forbids_productivity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        entities = dict(ENTITIES)
+        entities["assembler"] = dict(ENTITIES["assembler"], effect_receiver={"base_effect": {"productivity": 0.5}})
+        monkeypatch.setattr(bom.entity_data, "raw", entities)
+        result = bom.compute(bom.Request(targets=(bom.Target("gear", 3.0),)))
+        assert by_recipe(result, "craft-gear").rate == pytest.approx(3.0)
+
+
 class TestTemperature:
     def test_output_temperature_is_reported(self) -> None:
         request = bom.Request(targets=(bom.Target("hot-steam", 5.0),))
