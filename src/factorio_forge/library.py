@@ -739,6 +739,174 @@ def save_measured(plan_data: dict, result, folder: Path | None = None, found_fro
 
 
 # --------------------------------------------------------------------------
+# blocks found in a survey of the base
+# --------------------------------------------------------------------------
+
+# Machines of one recipe belong to one block when their boxes are at most this many tiles apart. Machines
+# in a row stand flush or with a pole column (1-2 tiles) between them, and two rows face each other across
+# inserter, belt(s), inserter (up to 4 tiles); the gap is that largest spacing rows.py builds.
+CLUSTER_GAP = 4
+# The cut takes in this many tiles around the machines: an inserter, the belt beside it and a second belt.
+CUT_MARGIN = 3
+# A machine that waited this share of the window (starved or blocked) makes its block a poor one to keep.
+MAX_WAITING = 0.10
+
+
+def _machine_box(machine, origin: tuple[float, float]) -> Box:
+    """The tiles a surveyed machine fills, in blueprint tiles."""
+    try:
+        width, height = layout.machine_size(machine.name, machine.direction)
+    except Exception:  # noqa: BLE001 - a machine the data does not know is a one-tile point
+        width = height = 1
+    left = round(machine.position[0] - origin[0] - width / 2)
+    top = round(machine.position[1] - origin[1] - height / 2)
+    return Box(left, top, left + width - 1, top + height - 1)
+
+
+def _gap(a: Box, b: Box) -> int:
+    """Empty tiles between two boxes along the axis where they are farthest apart (0 when they touch or overlap)."""
+    across_x = max(a.left - b.right, b.left - a.right, 1) - 1
+    across_y = max(a.top - b.bottom, b.top - a.bottom, 1) - 1
+    return max(across_x, across_y)
+
+
+def _clusters(machines: list, boxes: list[Box]) -> list[list[int]]:
+    """Indexes of machines grouped by neighbours of one recipe (single linkage on CLUSTER_GAP)."""
+    parent = list(range(len(machines)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(machines)):
+        for j in range(i + 1, len(machines)):
+            if machines[i].recipe == machines[j].recipe and _gap(boxes[i], boxes[j]) <= CLUSTER_GAP:
+                parent[find(i)] = find(j)
+    groups: dict[int, list[int]] = {}
+    for i in range(len(machines)):
+        groups.setdefault(find(i), []).append(i)
+    return sorted(groups.values(), key=lambda g: (boxes[g[0]].top, boxes[g[0]].left))
+
+
+def _safe_part(text: str, limit: int) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")[:limit].strip("-")
+
+
+def _survey_name(recipe: str, x: float, y: float) -> str:
+    """'<recipe>-<x>-<y>' with a negative coordinate written 'm12', so the name has no double dash."""
+    def coord(v: float) -> str:
+        v = round(v)
+        return f"m{-v}" if v < 0 else str(v)
+    tail = f"-{coord(x)}-{coord(y)}"
+    base = _safe_part(recipe, 64 - len(tail)) or "block"
+    return base + tail
+
+
+def _product_rate(recipe: str, crafts_per_s: float) -> str:
+    results = (recipe_data.raw.get(recipe) or {}).get("results") or []
+    if results:
+        return f"{crafts_per_s * _amount(results[0]):.3g} {results[0]['name']}/s"
+    return f"{crafts_per_s:.3g} crafts/s"
+
+
+def _cut(blueprint, area: Box):
+    """A blueprint of the entities lying wholly inside `area`."""
+    import copy
+
+    from draftsman.blueprintable import Blueprint
+
+    cut = Blueprint()
+    for entity in blueprint.entities:
+        if all(area.has(t) for t in Layout.tiles_of(entity)):
+            cut.entities.append(copy.deepcopy(entity))
+    if not len(cut.entities):
+        raise LibraryError("the area holds no entities of the survey's blueprint")
+    return cut
+
+
+def save_from_survey(survey, profile: str | None = None, *, min_share: float = 0.9, dry_run: bool = False,
+                     folder: Path | None = None) -> list[dict]:
+    """Keep the blocks of a surveyed base that run evenly, cut out of the survey's blueprint.
+
+    Machines of one recipe standing within CLUSTER_GAP tiles of each other make a cluster. A cluster with at
+    least two machines whose mean working share is `min_share` or more, and none of which waited over
+    MAX_WAITING of the window for input or for room to put its product, is cut out (its machines' box plus
+    CUT_MARGIN tiles, whole entities only) and saved by the same path as `library add`: the same check, the
+    same ports, source "forge". Single machines are not reported.
+
+    Returns one dict per cluster: name, recipe, machines, size, why, saved, reason. A cluster is not saved when
+    the cut fails the check, when other machines stand in the cut, when the library holds the name, or when it
+    already holds a block of the same recipe and shape. `dry_run` writes nothing. `folder` replaces the
+    profile's library folder (for tests and tools).
+    """
+    if folder is None:
+        folder = library_folder(profile)[0]
+    machines = [m for m in survey.machines if m.recipe]
+    boxes = [_machine_box(m, survey.blueprint_origin) for m in machines]
+    others = [_machine_box(m, survey.blueprint_origin) for m in survey.machines if not m.recipe]
+    blueprint = None
+    held = [data for _, data in entries(folder)[0]]
+    held_names = {data.get("name") for data in held}
+    report: list[dict] = []
+    for group in _clusters(machines, boxes):
+        if len(group) < 2:
+            continue
+        members = [machines[i] for i in group]
+        recipe = members[0].recipe
+        box = Box(min(boxes[i].left for i in group), min(boxes[i].top for i in group),
+                  max(boxes[i].right for i in group), max(boxes[i].bottom for i in group))
+        centre = ((box.left + box.right + 1) / 2 + survey.blueprint_origin[0],
+                  (box.top + box.bottom + 1) / 2 + survey.blueprint_origin[1])
+        name = _survey_name(recipe, *centre)
+        share = sum(m.working_share for m in members) / len(members)
+        rate = sum(m.crafts_per_s for m in members)
+        row = {"name": name, "recipe": recipe, "machines": len(members), "size": None, "saved": False, "reason": "",
+               "why": f"{share * 100:.0f}% working over {survey.window_s:g} s, {len(members)} machines, {_product_rate(recipe, rate)}"}
+        report.append(row)
+        if share < min_share:
+            row["reason"] = f"machines worked {share * 100:.0f}% of the window, under {min_share * 100:.0f}%"
+            continue
+        waiting = [m for m in members if max(m.states.get("output_full", 0.0), m.states.get("no_ingredients", 0.0)) > MAX_WAITING]
+        if waiting:
+            row["reason"] = f"{len(waiting)} of {len(members)} machines waited over {MAX_WAITING * 100:.0f}% of the window for input or for room"
+            continue
+        if name in held_names:
+            row["reason"] = "the library already has a block of that name"
+            continue
+        area = Box(box.left - CUT_MARGIN, box.top - CUT_MARGIN, box.right + CUT_MARGIN, box.bottom + CUT_MARGIN)
+        crowd = [b for i, b in enumerate(boxes) if i not in group] + others
+        if any(not (b.right < area.left or b.left > area.right or b.bottom < area.top or b.top > area.bottom) for b in crowd):
+            row["reason"] = "other machines stand inside the cut area, so the block cannot be cut apart from them"
+            continue
+        try:
+            if blueprint is None:
+                if not survey.blueprint:
+                    raise LibraryError("the survey carries no blueprint to cut from")
+                blueprint = read_blueprint(survey.blueprint)
+            entry = make_entry(name, _cut(blueprint, area), source="forge",
+                               found_from=f"survey tick {survey.tick}, area {centre[0]:g},{centre[1]:g}", why=row["why"])
+        except LibraryError as exc:
+            row["reason"] = str(exc).splitlines()[0]
+            continue
+        row["size"] = entry["size"]
+        twin = next((h for h in held if (h.get("shape") or {}).get("recipe") == recipe
+                     and h.get("shape") == entry["shape"] and h.get("size") == entry["size"]), None)
+        if twin is not None:
+            row["reason"] = f"the library already holds a block of this shape and recipe ({twin.get('name')})"
+            continue
+        entry["measured"] = {"working_share": round(share, 4), "rate": {}}
+        if not dry_run:
+            save(folder, entry)
+        held.append(entry)
+        held_names.add(name)
+        row["saved"] = True
+        row["reason"] = "would be saved" if dry_run else "saved"
+    return report
+
+
+# --------------------------------------------------------------------------
 # the command line
 # --------------------------------------------------------------------------
 
@@ -845,6 +1013,31 @@ def _cmd_add(args) -> int:
     return 0
 
 
+def _cmd_add_from_survey(args) -> int:
+    import sys
+
+    from . import survey as surveying
+    from .profile import Profile
+
+    try:
+        found = surveying.load(args.survey)
+        folder, name = library_folder(args.profile)
+        if name != Profile.active_profile_name():
+            print(f"note: {name} is not the active profile; ports and shape are read with the active profile's game data "
+                  f"({Profile.active_profile_name() or 'none'})", file=sys.stderr)
+        report = save_from_survey(found, args.profile, min_share=args.min_share, dry_run=args.dry_run, folder=folder)
+    except (LibraryError, surveying.SurveyError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not report:
+        print("no cluster of two or more machines of one recipe in this survey")
+    for row in report:
+        verdict = ("would save" if args.dry_run else "saved") if row["saved"] else "skipped"
+        extra = "" if row["saved"] else f": {row['reason']}"
+        print(f"{verdict} {row['name']} ({row['machines']} x {row['recipe']}){extra}")
+    return 0
+
+
 def _cmd_list(args) -> int:
     import sys
 
@@ -909,6 +1102,13 @@ def register(sub) -> None:
     add.add_argument("--force", action="store_true", help="save even if the check finds errors, marked as unchecked")
     add.add_argument("--profile", help="the profile (default: the active one)")
     add.set_defaults(func=_cmd_add)
+
+    from_survey = kinds.add_parser("add-from-survey", help="save the blocks of a base survey that ran evenly")
+    from_survey.add_argument("survey", help="survey.json written by the companion mod")
+    from_survey.add_argument("--min-share", type=float, default=0.9, help="least mean working share of a block (default 0.9)")
+    from_survey.add_argument("--dry-run", action="store_true", help="say what would be saved, write nothing")
+    from_survey.add_argument("--profile", help="the profile (default: the active one)")
+    from_survey.set_defaults(func=_cmd_add_from_survey)
 
     listing = kinds.add_parser("list", help="every block: name, source, ports, shape")
     listing.add_argument("--profile")

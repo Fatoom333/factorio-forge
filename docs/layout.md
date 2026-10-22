@@ -570,7 +570,19 @@ that did well in a measured run).
 factorio-forge library add <name> <region file | blueprint string> [--profile P] [--why TEXT]
 factorio-forge library add <name> --from-plan plan.json --block <index|id>
 factorio-forge library list | show <name> | remove <name>
+factorio-forge library add-from-survey <survey.json> [--min-share 0.9] [--dry-run] [--profile P]
 ```
+
+`add-from-survey` takes the blocks of a base survey that ran evenly. Machines of
+one recipe at most 4 tiles apart (the widest spacing of rows: inserter, belt,
+inserter between two rows) form a cluster; a cluster of two or more machines
+whose mean working share is at least `--min-share`, none of which waited over
+10% of the window for input or for room, is cut out of the survey's blueprint
+(its machines plus 3 tiles around, whole entities only) and saved through the
+same check and port reading as `add`, with source `forge`. It skips a cut that
+fails the check, one with other machines inside, and a block whose shape and
+recipe the library already holds. One line per cluster says saved or skipped
+and why.
 
 **Ports from a cut region.** The block's box is the bounding box of its
 entities. A belt on the edge is an **out** port where the tile ahead lies

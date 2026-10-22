@@ -136,6 +136,7 @@ factorio-forge library show <name>
 factorio-forge library add <name> <region file> [--why "..."]        # a block cut from the base
 factorio-forge library add <name> --from-plan plan.json --block <index|id>
 factorio-forge library remove <name>
+factorio-forge library add-from-survey <survey.json> [--min-share 0.9] [--dry-run]   # cuts evenly running clusters (2+ machines, >= min-share, none waiting >10%) out of a survey; source forge
 ```
 
 `add` reads where belts and pipes cross the block's edge as ports (in or out,
