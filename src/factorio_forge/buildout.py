@@ -156,8 +156,10 @@ def _category_of(recipe: str) -> str | None:
     try:
         from draftsman.data import recipes
 
+        from .categories import primary_category
+
         entry = recipes.raw.get(recipe)
-        return None if entry is None else entry.get("category", "crafting")
+        return None if entry is None else primary_category(entry)
     except Exception:  # noqa: BLE001 - no profile: the order just does not pin the machine
         return None
 
