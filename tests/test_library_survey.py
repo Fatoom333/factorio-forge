@@ -6,6 +6,7 @@ input belt, inserters and an output belt, as plan.build lays it out. A temporary
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def row_blueprint(machines: int = 2):
 
 
 def survey_of(blueprint, recipe: str, states: dict[str, float], origin=ORIGIN, extra_machines: list[dict] | None = None,
-              strip: bool = False) -> survey.Survey:
+              strip: bool = False, labels=None) -> survey.Survey:
     """A survey whose machines stand where the blueprint's machines do, all in the given states."""
     if strip:  # the same blueprint, with an unrelated belt far from the block, to show the cut leaves it out
         blueprint.entities.append(prototypes.belt(), tile_position=(60, 60), direction=0)
@@ -51,7 +52,7 @@ def survey_of(blueprint, recipe: str, states: dict[str, float], origin=ORIGIN, e
         machines.append({
             "unit": number + 1, "name": entity.name,
             "position": [entity.position.x + origin[0], entity.position.y + origin[1]],
-            "direction": int(entity.direction), "recipe": recipe, "crafting_speed": 1.0,
+            "direction": int(entity.direction), "recipe": labels(entity) if labels else recipe, "crafting_speed": 1.0,
             "states": dict(states), "crafts_per_s": 0.5,
         })
     return survey.from_dict({
@@ -98,7 +99,16 @@ class TestSaveFromSurvey:
     def test_one_machine_that_waits_keeps_the_block_out_even_when_the_mean_is_high(self, profile: Profile) -> None:
         recipe, _, blueprint = row_blueprint(3)
         found = survey_of(blueprint, recipe, {"working": 1.0})
-        found.machines[0].states = {"working": 0.8, "output_full": 0.2}
+        found.machines[0].states = {"working": 0.8, "full_output": 0.2}
+        report = library.save_from_survey(found, profile.name)
+        assert report[0]["saved"] is False and "waited" in report[0]["reason"]
+
+    @pytest.mark.parametrize("state", ["full_output", "item_ingredient_shortage", "fluid_ingredient_shortage",
+                                       "waiting_for_space_in_destination"])
+    def test_the_games_own_waiting_statuses_count(self, profile: Profile, state: str) -> None:
+        recipe, _, blueprint = row_blueprint(3)
+        found = survey_of(blueprint, recipe, {"working": 1.0})
+        found.machines[1].states = {"working": 0.85, state: 0.15}
         report = library.save_from_survey(found, profile.name)
         assert report[0]["saved"] is False and "waited" in report[0]["reason"]
 
@@ -141,6 +151,87 @@ class TestSaveFromSurvey:
         report = library.save_from_survey(found, profile.name)
         assert report[0]["saved"] is False and "other machines" in report[0]["reason"]
 
+    def test_two_rows_of_different_recipes_across_one_belt_are_cut_apart(self, profile: Profile) -> None:
+        recipe, blueprint = merged_facing_rows()
+        found = survey_of(blueprint, recipe, {"working": 1.0},
+                          labels=lambda e: recipe if e.position.y < 6 else "second-" + recipe)
+        report = library.save_from_survey(found, profile.name)
+        assert [r["saved"] for r in report] == [True, True], report
+        upper, lower = (library.load(profile.library_dir, r["name"]) for r in report)
+        rows = {}
+        for key, entry in (("upper", upper), ("lower", lower)):
+            rows[key] = list(library.read_blueprint(entry["blueprint"]).entities)
+            assert [(p["kind"], p["dir"]) for p in entry["ports"]] == [("belt", "in"), ("belt", "out")], entry["ports"]
+        # machines stand at y 2..4 and 8..10, the shared belt is y 6: neither block holds the other row's inserters
+        assert {e.position.y for e in rows["upper"] if e.type == "inserter"} == {1.5, 5.5}
+        assert {e.position.y for e in rows["lower"] if e.type == "inserter"} == {7.5, 11.5}
+
+    def test_a_fluid_row_keeps_its_pipe_track_as_one_line(self, profile: Profile) -> None:
+        recipe, machine = prototypes.crafting_setup(1, 1, 1, 0)
+        built = plan.build({"blocks": [block_spec(recipe, machine, [3])]}).blueprint
+        found = survey_of(built, recipe, {"working": 1.0})
+        report = library.save_from_survey(found, profile.name)
+        assert report[0]["saved"] is True, report
+        entry = library.load(profile.library_dir, report[0]["name"])
+        assert len(library.read_blueprint(entry["blueprint"]).entities) == len(built.entities)
+        assert [p["dir"] for p in entry["ports"] if p["kind"] == "pipe"] == ["in"]
+
+    def test_the_measured_rate_names_the_products(self, profile: Profile) -> None:
+        recipe, _, blueprint = row_blueprint()
+        found = survey_of(blueprint, recipe, {"working": 1.0})
+        library.save_from_survey(found, profile.name)
+        entry = library.entries(profile.library_dir)[0][0][1]
+        results = [part["name"] for part in library.recipe_data.raw[recipe]["results"]]
+        assert set(entry["measured"]["rate"]) == set(results)
+        assert all(v > 0 for v in entry["measured"]["rate"].values())
+
+    def test_a_blueprint_field_that_names_a_file_is_not_read(self, profile: Profile, tmp_path: Path) -> None:
+        recipe, _, blueprint = row_blueprint()
+        found = survey_of(blueprint, recipe, {"working": 1.0})
+        elsewhere = tmp_path / "somewhere.txt"
+        elsewhere.write_text(blueprint.to_string(), encoding="utf-8")
+        found.blueprint = str(elsewhere)
+        report = library.save_from_survey(found, profile.name)
+        assert report[0]["saved"] is False and "not a blueprint string" in report[0]["reason"]
+        assert library.entries(profile.library_dir)[0] == []
+
+    def test_a_recipe_with_path_tricks_writes_only_inside_the_library(self, profile: Profile, tmp_path: Path) -> None:
+        recipe, _, blueprint = row_blueprint()
+        found = survey_of(blueprint, recipe, {"working": 1.0}, labels=lambda e: "../../evil")
+        before = set(tmp_path.rglob("*"))
+        report = library.save_from_survey(found, profile.name)
+        assert report and "/" not in report[0]["name"] and ".." not in report[0]["name"]
+        created = set(tmp_path.rglob("*")) - before
+        assert created and all(profile.library_dir in p.parents or p == profile.library_dir for p in created), created
+
+    def test_the_grid_finds_the_same_clusters_as_comparing_every_pair(self) -> None:
+        import random
+
+        rng = random.Random(7)
+
+        class M:
+            def __init__(self, recipe: str) -> None:
+                self.recipe = recipe
+
+        machines = [M(rng.choice("ab")) for _ in range(150)]
+        boxes = []
+        for _ in machines:
+            x, y = rng.randrange(0, 90), rng.randrange(-40, 40)
+            boxes.append(library.Box(x, y, x + 2, y + 2))
+        parent = list(range(len(machines)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                i = parent[i]
+            return i
+
+        for i in range(len(machines)):
+            for j in range(i + 1, len(machines)):
+                if machines[i].recipe == machines[j].recipe and library._gap(boxes[i], boxes[j]) <= library.CLUSTER_GAP:
+                    parent[find(i)] = find(j)
+        expected = {frozenset(i for i in range(len(machines)) if find(i) == root) for root in {find(i) for i in range(len(machines))}}
+        assert {frozenset(g) for g in library._clusters(machines, boxes)} == expected
+
     def test_a_survey_without_a_blueprint_says_so(self, profile: Profile) -> None:
         recipe, _, blueprint = row_blueprint()
         found = survey_of(blueprint, recipe, {"working": 1.0})
@@ -168,6 +259,21 @@ class TestSaveFromSurvey:
             library.make_entry("../x", blueprint, source="forge", found_from="t")
         report = library.save_from_survey(found, profile.name, dry_run=True)
         assert all(r["name"] == library.check_name(r["name"]) for r in report)
+
+
+def merged_facing_rows():
+    """Two rows of the same shape facing each other across one belt: inserter, belt, inserter."""
+    recipe, _, upper = row_blueprint()
+    _, _, lower = row_blueprint()
+    count = len(upper.entities)
+    for entity in list(lower.entities):
+        if entity.type == "transport-belt" and entity.position.y < 1:  # its input belt is the upper row's output belt
+            continue
+        moved = copy.deepcopy(entity)
+        moved.position = (entity.position.x, entity.position.y + 6)
+        upper.entities.append(moved)
+    assert len(upper.entities) > count
+    return recipe, upper
 
 
 def _one_problem():

@@ -47,6 +47,7 @@ their base speed: a capacity, not a measured flow.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import warnings
@@ -158,13 +159,18 @@ def is_file(source: str) -> bool:
 
 def read_blueprint(source: str, index: int | None = None):
     """A Blueprint from a string or from a file holding one (a region export, a saved string)."""
-    from draftsman.blueprintable import Blueprint, BlueprintBook, get_blueprintable_from_string
-
     text = source
     if is_file(source):
         text = Path(source).read_text(encoding="utf-8-sig")
     elif not source.lstrip().startswith("0"):
         raise LibraryError(f"{source!r} is neither a blueprint string nor a file")
+    return decode_string(text, index)
+
+
+def decode_string(text: str, index: int | None = None):
+    """A Blueprint from a blueprint string; never reads a file."""
+    from draftsman.blueprintable import Blueprint, BlueprintBook, get_blueprintable_from_string
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # overlaps and unknown names are the check's to report
@@ -743,13 +749,25 @@ def save_measured(plan_data: dict, result, folder: Path | None = None, found_fro
 # --------------------------------------------------------------------------
 
 # Machines of one recipe belong to one block when their boxes are at most this many tiles apart. Machines
-# in a row stand flush or with a pole column (1-2 tiles) between them, and two rows face each other across
-# inserter, belt(s), inserter (up to 4 tiles); the gap is that largest spacing rows.py builds.
+# in a row stand flush or with a pole column (1-2 tiles) between them, and two rows sharing one belt face each
+# other across inserter, belt, inserter (3 tiles, 4 with a pole line); rows further apart are separate blocks.
 CLUSTER_GAP = 4
-# The cut takes in this many tiles around the machines: an inserter, the belt beside it and a second belt.
+# Along the row the cut takes in this many tiles past the end machines: the belt tail and a pole.
 CUT_MARGIN = 3
+# Across the row the cut grows line by line while the line holds an inserter, belt or pipe of the block, up to this many.
+CUT_REACH = 12
 # A machine that waited this share of the window (starved or blocked) makes its block a poor one to keep.
 MAX_WAITING = 0.10
+# The game's statuses that mean waiting for input or for room to put the product ('output_full' is the older name).
+WAITING = frozenset({
+    "full_output", "output_full", "no_ingredients", "item_ingredient_shortage", "fluid_ingredient_shortage",
+    "waiting_for_space_in_destination",
+})
+# What a block's lines are made of: the cut grows to take these in, and not poles, lamps or the like.
+_LINE_TYPES = frozenset({
+    "transport-belt", "underground-belt", "splitter", "loader", "loader-1x1", "pipe", "pipe-to-ground", "inserter",
+    "container", "logistic-container", "storage-tank",
+})
 
 
 def _machine_box(machine, origin: tuple[float, float]) -> Box:
@@ -771,7 +789,10 @@ def _gap(a: Box, b: Box) -> int:
 
 
 def _clusters(machines: list, boxes: list[Box]) -> list[list[int]]:
-    """Indexes of machines grouped by neighbours of one recipe (single linkage on CLUSTER_GAP)."""
+    """Indexes of machines grouped by neighbours of one recipe (single linkage on CLUSTER_GAP).
+
+    Machines are sorted into a grid by recipe first, so only those in the same or a neighbouring cell are compared.
+    """
     parent = list(range(len(machines)))
 
     def find(i: int) -> int:
@@ -780,10 +801,21 @@ def _clusters(machines: list, boxes: list[Box]) -> list[list[int]]:
             i = parent[i]
         return i
 
-    for i in range(len(machines)):
-        for j in range(i + 1, len(machines)):
-            if machines[i].recipe == machines[j].recipe and _gap(boxes[i], boxes[j]) <= CLUSTER_GAP:
-                parent[find(i)] = find(j)
+    by_recipe: dict[str, list[int]] = {}
+    for i, m in enumerate(machines):
+        by_recipe.setdefault(m.recipe, []).append(i)
+    for members in by_recipe.values():
+        cell = CLUSTER_GAP + 1 + max(max(boxes[i].size) for i in members)
+        grid: dict[tuple[int, int], list[int]] = {}
+        for i in members:
+            grid.setdefault((boxes[i].left // cell, boxes[i].top // cell), []).append(i)
+        for (cx, cy), here in grid.items():
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for j in grid.get((cx + dx, cy + dy), ()):
+                        for i in here:
+                            if i != j and _gap(boxes[i], boxes[j]) <= CLUSTER_GAP:
+                                parent[find(i)] = find(j)
     groups: dict[int, list[int]] = {}
     for i in range(len(machines)):
         groups.setdefault(find(i), []).append(i)
@@ -811,15 +843,98 @@ def _product_rate(recipe: str, crafts_per_s: float) -> str:
     return f"{crafts_per_s:.3g} crafts/s"
 
 
-def _cut(blueprint, area: Box):
-    """A blueprint of the entities lying wholly inside `area`."""
+def _measured_rate(recipe: str, crafts_per_s: float) -> dict[str, float]:
+    """What the recipe's results come to per second at this many crafts a second (empty when the recipe is unknown)."""
+    rate: dict[str, float] = {}
+    for part in (recipe_data.raw.get(recipe) or {}).get("results") or []:
+        rate[part["name"]] = round(rate.get(part["name"], 0.0) + crafts_per_s * _amount(part), 6)
+    return rate
+
+
+def _reaches(entity, tiles) -> bool:
+    """Whether an inserter takes from or puts onto one of `tiles`."""
+    if getattr(entity, "type", "") != "inserter" or not tiles:
+        return False
+    reach = inspection.inserter_reach(entity)
+    return reach is not None and any((math.floor(point[0]), math.floor(point[1])) in tiles for point in reach)
+
+
+def _grow_area(entities: list, box: Box, foreign: set[tuple[int, int]]) -> Box:
+    """The cut area for a cluster whose machines fill `box`.
+
+    Along the row (the longer side) the area takes in CUT_MARGIN tiles past the end machines. Across it, the area
+    grows a line at a time while that line holds a belt, pipe or inserter of the block (a pipe-to-ground stub, a
+    belt, an inserter, the pipe track beyond them), so a track four tiles out is taken in; it stops at the first
+    line holding none, or after CUT_REACH. Inserters serving `foreign` tiles do not draw it on. A box as wide as
+    it is tall has no row to follow and takes CUT_MARGIN on every side.
+    """
+    left, top, right, bottom = box.left, box.top, box.right, box.bottom
+    width, height = box.size
+    if width <= height:
+        left, right = left - CUT_MARGIN, right + CUT_MARGIN
+    if width >= height:
+        top, bottom = top - CUT_MARGIN, bottom + CUT_MARGIN
+    if width == height:
+        return Box(left, top, right, bottom)
+    held: set[tuple[int, int]] = set()
+    for entity in entities:
+        if _is_line_type(entity) and not _reaches(entity, foreign):
+            held.update(Layout.tiles_of(entity))
+    held -= foreign
+    if width > height:  # a row along x: grow up and down
+        top, bottom = box.top, box.bottom
+    else:
+        left, right = box.left, box.right
+    for _ in range(CUT_REACH):
+        grew = False
+        if width > height:
+            if any((x, top - 1) in held for x in range(left, right + 1)):
+                top, grew = top - 1, True
+            if any((x, bottom + 1) in held for x in range(left, right + 1)):
+                bottom, grew = bottom + 1, True
+        else:
+            if any((left - 1, y) in held for y in range(top, bottom + 1)):
+                left, grew = left - 1, True
+            if any((right + 1, y) in held for y in range(top, bottom + 1)):
+                right, grew = right + 1, True
+        if not grew:
+            break
+    return Box(left, top, right, bottom)
+
+
+def _is_line_type(entity) -> bool:
+    return getattr(entity, "type", "") in _LINE_TYPES
+
+
+_MACHINE_TYPES = frozenset({"assembling-machine", "furnace", "lab", "mining-drill", "rocket-silo", "boiler", "generator", "reactor"})
+
+
+def _cut_area(blueprint, box: Box, own: list[Box], strangers: list[Box], bp_machines: list) -> tuple[Box, set[tuple[int, int]]]:
+    """The area to cut for a cluster, and the tiles of the machines beside it that are not its own."""
+    pad = CUT_REACH + CUT_MARGIN + 3
+    near = Box(box.left - pad, box.top - pad, box.right + pad, box.bottom + pad)
+
+    def close(b: Box) -> bool:
+        return not (b.right < near.left or b.left > near.right or b.bottom < near.top or b.top > near.bottom)
+
+    own_tiles = {(x, y) for b in own for x in range(b.left, b.right + 1) for y in range(b.top, b.bottom + 1)}
+    foreign = {(x, y) for b in strangers if close(b) for x in range(b.left, b.right + 1) for y in range(b.top, b.bottom + 1)}
+    for tiles, b in bp_machines:
+        if close(b) and not tiles & own_tiles:
+            foreign |= tiles
+    foreign -= own_tiles
+    return _grow_area(list(blueprint.entities), box, foreign), foreign
+
+
+def _cut(blueprint, area: Box, foreign=frozenset()):
+    """A blueprint of the entities lying wholly inside `area`, without the inserters that serve `foreign` tiles."""
     import copy
 
     from draftsman.blueprintable import Blueprint
 
     cut = Blueprint()
     for entity in blueprint.entities:
-        if all(area.has(t) for t in Layout.tiles_of(entity)):
+        if all(area.has(t) for t in Layout.tiles_of(entity)) and not _reaches(entity, foreign):
             cut.entities.append(copy.deepcopy(entity))
     if not len(cut.entities):
         raise LibraryError("the area holds no entities of the survey's blueprint")
@@ -832,8 +947,9 @@ def save_from_survey(survey, profile: str | None = None, *, min_share: float = 0
 
     Machines of one recipe standing within CLUSTER_GAP tiles of each other make a cluster. A cluster with at
     least two machines whose mean working share is `min_share` or more, and none of which waited over
-    MAX_WAITING of the window for input or for room to put its product, is cut out (its machines' box plus
-    CUT_MARGIN tiles, whole entities only) and saved by the same path as `library add`: the same check, the
+    MAX_WAITING of the window for input or for room to put its product, is cut out (the area of
+    _grow_area: along the row CUT_MARGIN tiles past the end machines, across it every line of belt, pipe and
+    inserter out to the last; whole entities only, without inserters that serve other machines) and saved by the same path as `library add`: the same check, the
     same ports, source "forge". Single machines are not reported.
 
     Returns one dict per cluster: name, recipe, machines, size, why, saved, reason. A cluster is not saved when
@@ -847,6 +963,7 @@ def save_from_survey(survey, profile: str | None = None, *, min_share: float = 0
     boxes = [_machine_box(m, survey.blueprint_origin) for m in machines]
     others = [_machine_box(m, survey.blueprint_origin) for m in survey.machines if not m.recipe]
     blueprint = None
+    bp_machines: list = []
     held = [data for _, data in entries(folder)[0]]
     held_names = {data.get("name") for data in held}
     report: list[dict] = []
@@ -868,24 +985,29 @@ def save_from_survey(survey, profile: str | None = None, *, min_share: float = 0
         if share < min_share:
             row["reason"] = f"machines worked {share * 100:.0f}% of the window, under {min_share * 100:.0f}%"
             continue
-        waiting = [m for m in members if max(m.states.get("output_full", 0.0), m.states.get("no_ingredients", 0.0)) > MAX_WAITING]
+        waiting = [m for m in members if sum(m.states.get(state, 0.0) for state in WAITING) > MAX_WAITING]
         if waiting:
             row["reason"] = f"{len(waiting)} of {len(members)} machines waited over {MAX_WAITING * 100:.0f}% of the window for input or for room"
             continue
         if name in held_names:
             row["reason"] = "the library already has a block of that name"
             continue
-        area = Box(box.left - CUT_MARGIN, box.top - CUT_MARGIN, box.right + CUT_MARGIN, box.bottom + CUT_MARGIN)
-        crowd = [b for i, b in enumerate(boxes) if i not in group] + others
-        if any(not (b.right < area.left or b.left > area.right or b.bottom < area.top or b.top > area.bottom) for b in crowd):
-            row["reason"] = "other machines stand inside the cut area, so the block cannot be cut apart from them"
-            continue
         try:
             if blueprint is None:
-                if not survey.blueprint:
+                text = survey.blueprint
+                if not text:
                     raise LibraryError("the survey carries no blueprint to cut from")
-                blueprint = read_blueprint(survey.blueprint)
-            entry = make_entry(name, _cut(blueprint, area), source="forge",
+                if not isinstance(text, str) or not text.lstrip().startswith("0"):
+                    raise LibraryError("the survey's blueprint is not a blueprint string")
+                blueprint = decode_string(text)
+                bp_machines = [(frozenset(Layout.tiles_of(e)), bounding_box([e])) for e in blueprint.entities
+                               if getattr(e, "recipe", None) or getattr(e, "type", "") in _MACHINE_TYPES]
+            crowd = [b for i, b in enumerate(boxes) if i not in group] + others
+            area, foreign = _cut_area(blueprint, box, [boxes[i] for i in group], crowd, bp_machines)
+            if any(not (b.right < area.left or b.left > area.right or b.bottom < area.top or b.top > area.bottom) for b in crowd):
+                row["reason"] = "other machines stand inside the cut area, so the block cannot be cut apart from them"
+                continue
+            entry = make_entry(name, _cut(blueprint, area, foreign), source="forge",
                                found_from=f"survey tick {survey.tick}, area {centre[0]:g},{centre[1]:g}", why=row["why"])
         except LibraryError as exc:
             row["reason"] = str(exc).splitlines()[0]
@@ -896,7 +1018,7 @@ def save_from_survey(survey, profile: str | None = None, *, min_share: float = 0
         if twin is not None:
             row["reason"] = f"the library already holds a block of this shape and recipe ({twin.get('name')})"
             continue
-        entry["measured"] = {"working_share": round(share, 4), "rate": {}}
+        entry["measured"] = {"working_share": round(share, 4), "rate": _measured_rate(recipe, rate)}
         if not dry_run:
             save(folder, entry)
         held.append(entry)
