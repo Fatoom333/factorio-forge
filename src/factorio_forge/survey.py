@@ -22,7 +22,8 @@ The file is one JSON object::
                  "position": [x, y], "resource": "iron-ore", "field": 3,
                  "states": {"working": 1.0}, "amount_left": 120000}],
      "fields": [{"id": 3, "resource": "iron-ore", "amount": 2400000,
-                 "tiles": 410, "drills": 12, "center": [x, y]}],
+                 "tiles": 410, "drills": 12, "center": [x, y],
+                 "truncated": true}],
      "flows": {"items": {"iron-plate": {"made": 12.5, "used": 11.0}},
                "fluids": {"water": {"made": 300.0, "used": 250.0}}},
      "power": [{"network": 1, "made_w": 4.1e7, "used_w": 4.0e7,
@@ -33,13 +34,21 @@ The file is one JSON object::
 Positions are world tiles (entity centres, as the game gives them).
 ``states`` maps a state to the share of the window the machine spent in it;
 the shares add up to about 1. The states are the game's entity statuses in
-snake case: ``working``, ``no_ingredients``, ``output_full``, ``no_power``,
-``low_power``, ``no_fuel``, ``no_recipe``, ``disabled``, ``no_minable_resources``,
-``waiting_for_space_in_destination``, ...; anything else is kept as given.
+snake case, as ``defines.entity_status`` names them: ``working``,
+``item_ingredient_shortage``, ``fluid_ingredient_shortage``, ``full_output``,
+``no_power``, ``low_power``, ``no_fuel``, ``no_recipe``, ``disabled_by_script``,
+``no_minable_resources``, ``waiting_for_space_in_destination``, ...; anything
+else is kept as given.
 ``missing`` is, for the waiting time, which ingredient was short, as a share of
 the window. ``crafts_per_s`` is what the machine finished over the window.
 ``flows`` are per second over the window, from the force's production
-statistics on that surface. ``blueprint`` holds every entity of the area;
+statistics on that surface. ``satisfaction`` of a power network is the share
+of machine samples on it that were not short of power, not a ratio of watts.
+A field with ``"truncated": true`` hit the mod's search bound, so its
+``amount`` and ``tiles`` are lower bounds; an infinite resource (a geyser) has
+no field and its miners no ``amount_left``. A survey that failed is written as
+``{"kind": "survey-failed", "error": "..."}`` and is refused here as not a
+survey. ``blueprint`` holds every entity of the area;
 ``blueprint_origin`` is the world tile of the blueprint's (0, 0), so a world
 position minus the origin is a blueprint position.
 """
@@ -98,6 +107,7 @@ class ResourceField:
     tiles: int
     drills: int
     center: tuple[float, float]
+    truncated: bool = False
 
 
 @dataclass
@@ -184,6 +194,7 @@ def from_dict(data: dict) -> Survey:
             id=int(f["id"]), resource=str(f["resource"]), amount=float(f["amount"]),
             tiles=int(f.get("tiles", 0)), drills=int(f.get("drills", 0)),
             center=_pair(f["center"], "field center"),
+            truncated=bool(f.get("truncated", False)),
         ) for f in data.get("fields", [])]
         flows = data.get("flows") or {}
         power = [PowerNetwork(

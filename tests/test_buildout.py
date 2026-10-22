@@ -198,6 +198,24 @@ class TestCommand:
         assert cli.main(["base", str(path), "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["machines"] == 1
 
+    def test_save_good_keeps_blocks_through_the_library(self, tmp_path, capsys, monkeypatch) -> None:
+        from factorio_forge import library
+
+        seen = []
+        row = {"name": "gear-1-2", "recipe": "iron-gear-wheel", "machines": 2, "saved": True, "reason": ""}
+        monkeypatch.setattr(library, "save_from_survey", lambda snapshot: seen.append(snapshot) or [row])
+        path = self.write(tmp_path, self.dict_of())
+        assert cli.main(["base", str(path), "--save-good", "-o", str(tmp_path / "out")]) == 0
+        assert len(seen) == 1 and "saved gear-1-2" in capsys.readouterr().out
+        assert json.loads((tmp_path / "out" / "base.json").read_text(encoding="utf-8"))["library"] == [row]
+
+    def test_without_save_good_the_library_is_not_touched(self, tmp_path, monkeypatch) -> None:
+        from factorio_forge import library
+
+        monkeypatch.setattr(library, "save_from_survey", lambda snapshot: pytest.fail("library touched"))
+        path = self.write(tmp_path, self.dict_of())
+        assert cli.main(["base", str(path)]) == 0
+
 
 class TestActiveData:
     def surveyed(self):

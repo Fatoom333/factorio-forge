@@ -665,11 +665,13 @@ class _Walk:
                 if rate_known and working_sum > EPS else None
             hours = found.amount / rate / 3600.0 if rate is not None and rate > EPS else None
             empty_here = sum(m.states.get(s, 0.0) for m in members for s in DEPLETED_STATES) / len(members)
-            if empty_here >= 0.1 or (hours is not None and hours < NEAR_EMPTY_HOURS):
+            # A field cut by the mod's search bound is bigger than it reads: its hours are a floor, not an alarm.
+            if empty_here >= 0.1 or (hours is not None and hours < NEAR_EMPTY_HOURS and not found.truncated):
                 unused = [{"field": f.id, "amount": f.amount, "center": list(f.center)}
                           for f in self.fields_of(item) if f.drills == 0 and f.id != fid]
                 if hours is not None:
-                    left = f"about {hours:.2g} hours left at {_n(rate)}/s"
+                    left = (f"at least {hours:.2g} hours left at {_n(rate)}/s (the field reaches past what was searched)"
+                            if found.truncated else f"about {hours:.2g} hours left at {_n(rate)}/s")
                 elif not rate_known:
                     left = "how fast it is mined is not known for the surveyed area alone"
                 else:

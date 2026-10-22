@@ -833,17 +833,37 @@ def _cmd_base(args: argparse.Namespace) -> int:
     out_dir = Path(args.output) if args.output else None
     found = diagnose.diagnose(snapshot, targets)
     result = buildout.report(found, snapshot, out_dir=out_dir, drafts=args.drafts)
+    kept = None
+    if args.save_good:
+        from . import library
+
+        try:
+            kept = library.save_from_survey(snapshot)
+        except library.LibraryError as exc:
+            print(f"error: library: {exc}", file=sys.stderr)
+            return 1
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "base.json").write_text(
-            json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+            json.dumps(_with_library(result.to_dict(), kept), indent=2, ensure_ascii=False), encoding="utf-8")
     if args.json:
-        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        print(json.dumps(_with_library(result.to_dict(), kept), indent=2, ensure_ascii=False))
     else:
         print(result.text())
+        if kept is not None:
+            print("\nlibrary:" if kept else "\nlibrary: no block of two or more machines ran evenly enough to keep")
+            for row in kept:
+                extra = "" if row["saved"] else f": {row['reason']}"
+                print(f"  {'saved' if row['saved'] else 'skipped'} {row['name']} ({row['machines']} x {row['recipe']}){extra}")
         if out_dir is not None:
             print(f"\nwritten: {(out_dir / 'base.json').resolve()}")
     return 0
+
+
+def _with_library(data: dict, kept: list[dict] | None) -> dict:
+    if kept is not None:
+        data["library"] = kept
+    return data
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -990,6 +1010,8 @@ def build_parser() -> argparse.ArgumentParser:
     base.add_argument("-o", "--output", help="a folder to write base.json and, with --drafts, the drafts into")
     base.add_argument("--drafts", action="store_true", help="also draft each thing to build with chain (needs -o)")
     base.add_argument("--json", action="store_true", help="print the report as JSON")
+    base.add_argument("--save-good", action="store_true",
+                      help="also keep the evenly running blocks in the active profile's library (as library add-from-survey)")
     base.set_defaults(func=_cmd_base)
 
     from . import measure

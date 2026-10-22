@@ -174,6 +174,11 @@ class TestSources:
         assert node.units == [1, 2, 3, 4]
         assert "no_field" not in kinds(found.causes[0])
 
+    def test_a_field_cut_by_the_search_bound_is_no_alarm(self) -> None:
+        cut = {**field(amount=1000), "truncated": True}
+        found = self.starved_smelters([drill(i) for i in range(1, 5)], [cut], {"ore": {"made": 2.0, "used": 2.0}})
+        assert "field_depleting" not in kinds(found.causes[0])
+
     def test_drills_that_always_work_on_a_big_field_are_too_few(self) -> None:
         found = self.starved_smelters([drill(i) for i in range(1, 5)], [field(amount=9e9)],
                                       {"ore": {"made": 2.0, "used": 2.0}})
