@@ -812,6 +812,40 @@ def _cmd_chain(args: argparse.Namespace) -> int:
     return code
 
 
+def _cmd_base(args: argparse.Namespace) -> int:
+    """A survey of a running base in; why it makes too little, what to build, what to mend."""
+    import json
+
+    from . import buildout, chain, diagnose, survey
+
+    if args.drafts and not args.output:
+        print("error: --drafts writes files: say where with -o <folder>", file=sys.stderr)
+        return 2
+    snapshot, code = _load_input(survey.load, Path(args.survey), survey.SurveyError)
+    if code:
+        return code
+    try:
+        asked = chain.parse_targets(args.target or [])
+    except chain.ChainError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    targets = {t["item"]: t["per_second"] if "per_second" in t else t["per_minute"] / 60 for t in asked}
+    out_dir = Path(args.output) if args.output else None
+    found = diagnose.diagnose(snapshot, targets)
+    result = buildout.report(found, snapshot, out_dir=out_dir, drafts=args.drafts)
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "base.json").write_text(
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(result.text())
+        if out_dir is not None:
+            print(f"\nwritten: {(out_dir / 'base.json').resolve()}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="factorio-forge",
@@ -946,6 +980,17 @@ def build_parser() -> argparse.ArgumentParser:
     chain_cmd.add_argument("--no-build", action="store_true", help="write the plan only")
     chain_cmd.add_argument("--no-render", action="store_true")
     chain_cmd.set_defaults(func=_cmd_chain)
+
+    base = sub.add_parser(
+        "base", help="read a survey of a running base: why it makes too little, what to build, what to fix"
+    )
+    base.add_argument("survey", help="survey.json written by the companion mod (/forge-survey)")
+    base.add_argument("--target", action="append", metavar="ITEM=RATE",
+                      help="a rate wanted (per second; =60/m per minute); the gap to it becomes a cause. Repeatable")
+    base.add_argument("-o", "--output", help="a folder to write base.json and, with --drafts, the drafts into")
+    base.add_argument("--drafts", action="store_true", help="also draft each thing to build with chain (needs -o)")
+    base.add_argument("--json", action="store_true", help="print the report as JSON")
+    base.set_defaults(func=_cmd_base)
 
     from . import measure
 

@@ -97,6 +97,7 @@ Commands for these steps, one line each:
 - `edit` -- small plan edits without a full rebuild; see `reference/plans.md`.
 - `notes` / `notes <topic>` -- the notes index and one section; see `reference/profile.md`.
 - `deliver` -- build, then place it in the game without a window before handing it over; see `reference/measure.md`.
+- `base` -- read a survey of the running base: why it makes too little, what to build and mend; see `reference/base.md`.
 
 ## Reading the build output
 
