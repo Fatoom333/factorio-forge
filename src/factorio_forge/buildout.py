@@ -14,7 +14,15 @@ than it used) is taken as arriving from the base: it goes into the order's
 ``boundary``, so the order is not expanded back to ore for it. It is only the
 surplus, and the report says how much, next to what the order draws on it. The
 other shortfalls are in each order's boundary too: they are built by their own
-orders, and a bill that made them again would count the same machines twice.
+orders, and a bill that made them again would count the same machines twice. So
+that those orders really cover what the others draw, they are sized together:
+whatever one order's bill takes from another order's item is added to that
+order's rate and its bill is made again, until the sizes settle.
+
+The order pins the recipe and the machine the base itself uses for the item
+(``recipe_choices`` / ``machine_choices``), so the bill speaks of the machines
+the base has, not of whatever ``bom`` would pick by default. Whether the base's
+machine can be built from what the player has unlocked is the review's to say.
 
 Whatever needs no building -- no recipe set, no fuel, a disabled machine,
 power short by some megawatts, an output with nowhere to go, drills whose
@@ -36,6 +44,7 @@ from .survey import Survey
 # Leaves that mean "mend it", not "build more", and what to say about each.
 FIX_KINDS = frozenset({"no_power", "no_fuel", "disabled", "output_full_end", "drills_blocked", "no_recipe", "power"})
 DRILL_KINDS = frozenset({"too_few_drills", "no_drills", "no_field"})
+MAX_ROUNDS = 6  # how often the orders are sized again for what they draw on each other
 SURPLUS_SHARE = 0.02  # made must exceed used by this share of made to count as surplus
 
 
@@ -47,6 +56,7 @@ class BuildItem:
     text: str
     more_machines: int | None = None
     machine: str | None = None
+    extra_per_s: float = 0.0  # what the other orders' bills draw from this item, added to the rate asked
     arrives: dict[str, float] = field(default_factory=dict)
     alongside: list[str] = field(default_factory=list)
     request: dict | None = None
@@ -141,14 +151,31 @@ def surplus(survey: Survey, exclude: frozenset[str] | set[str] = frozenset()) ->
     return dict(sorted(out.items()))
 
 
-def make_request(item: str, rate: float, survey: Survey, boundary: list[str]) -> dict:
-    """The order as `review` and `chain` take it."""
-    return {
+def _category_of(recipe: str) -> str | None:
+    """The crafting category of a recipe in the active data, None when it is not there."""
+    try:
+        from draftsman.data import recipes
+
+        entry = recipes.raw.get(recipe)
+        return None if entry is None else entry.get("category", "crafting")
+    except Exception:  # noqa: BLE001 - no profile: the order just does not pin the machine
+        return None
+
+
+def make_request(item: str, rate: float, survey: Survey, boundary: list[str], *,
+                 recipe: str | None = None, machine: str | None = None, category: str | None = None) -> dict:
+    """The order as `review` and `chain` take it; with `recipe` and `machine`, the ones the base uses."""
+    out: dict = {
         "said": f"build out {item} for the surveyed base",
         "targets": [{"item": item, "per_second": rate}],
         "boundary": sorted(b for b in boundary if b != item),
         "surface": survey.surface,
     }
+    if recipe:
+        out["recipe_choices"] = {item: recipe}
+        if machine and category:
+            out["machine_choices"] = {category: machine}
+    return out
 
 
 def _known_name(name: str) -> bool:
@@ -180,6 +207,9 @@ def _bill(request_dict: dict):
 
 def _line(b: BuildItem) -> str:
     base = f"{b.item}: {b.short_per_s:.3g}/s short"
+    if b.extra_per_s > 0:
+        base += (f", {b.extra_per_s:.3g}/s more for the other orders that draw on it "
+                 f"({b.short_per_s + b.extra_per_s:.3g}/s in all)")
     if b.more_machines is not None and b.machine:
         base += f" -- about {b.more_machines} more {b.machine}"
     if b.bill:
@@ -192,7 +222,7 @@ def _line(b: BuildItem) -> str:
             if name in b.arrives:
                 note = f" (the base's surplus: {b.arrives[name]:.3g}/s)"
             elif name in b.alongside:
-                note = " (made by the other order)"
+                note = " (made by the other order, whose size counts this draw)"
             drawn.append(f"{name} {need:.3g}/s{note}")
         if drawn:
             base += "; draws " + ", ".join(drawn)
@@ -203,14 +233,21 @@ def _line(b: BuildItem) -> str:
 
 def build_orders(diagnosis: Diagnosis, survey: Survey, *, bill: bool = True,
                  known: Callable[[str], bool] | None = None,
-                 compute: Callable[[dict], tuple[dict | None, object, list[str]]] | None = None) -> list[tuple[BuildItem, object]]:
-    """One order per shortfall; with `bill`, its bill of materials too. Returns (order, review) pairs."""
+                 compute: Callable[[dict], tuple[dict | None, object, list[str]]] | None = None,
+                 category_of: Callable[[str], str | None] | None = None,
+                 ) -> list[tuple[BuildItem, object]]:
+    """One order per shortfall; with `bill`, its bill of materials too. Returns (order, review) pairs.
+
+    The orders are sized together: what an order's bill draws from another order's item is added to that
+    order's rate, and the bills are made again until the sizes stop moving.
+    """
     known = known or _known_name
     compute = compute or _bill
-    orders: list[tuple[BuildItem, object]] = []
+    category_of = category_of or _category_of
+    entries: list[tuple[BuildItem, Shortfall, dict[str, float]]] = []
     for s in diagnosis.shortfalls:
         item = BuildItem(s.item, s.short_per_s, s.kind, "", more_machines=s.machines_needed, machine=s.maker_machine)
-        reviewed = None
+        extra: dict[str, float] = {}
         if s.kind in DRILL_KINDS:
             item.text = _drill_text(s)
         else:
@@ -218,22 +255,51 @@ def build_orders(diagnosis: Diagnosis, survey: Survey, *, bill: bool = True,
             # What the other orders make is theirs: this order takes it as arriving, not as work to repeat.
             item.alongside = [o.item for o in diagnosis.shortfalls
                               if o.item != s.item and o.kind not in DRILL_KINDS and known(o.item)]
-            item.request = make_request(s.item, s.short_per_s, survey, list(extra) + item.alongside)
             item.arrives = extra
+        entries.append((item, s, extra))
+    chain_orders = [(i, s, extra) for i, s, extra in entries if s.kind not in DRILL_KINDS]
+    reviews: dict[str, object] = {}
+
+    def run(more: dict[str, float]) -> None:
+        for item, s, extra in chain_orders:
+            item.extra_per_s = more.get(item.item, 0.0)
+            category = category_of(s.maker_recipe) if s.maker_recipe else None
+            item.request = make_request(
+                s.item, s.short_per_s + item.extra_per_s, survey, list(extra) + item.alongside,
+                recipe=s.maker_recipe, machine=s.maker_machine, category=category)
             if bill:
-                item.bill, reviewed, item.problems = compute(item.request)
+                item.bill, reviews[item.item], item.problems = compute(item.request)
                 if item.bill:
                     for name, need in item.bill["from_outside"].items():
                         if name in extra and need > extra[name] * 1.001:
                             item.problems.append(
                                 f"it needs {need:.3g}/s of {name} from the base, whose surplus is {extra[name]:.3g}/s: "
                                 "raise that supply too")
+
+    more: dict[str, float] = {}
+    run(more)
+    if bill:
+        settled = False
+        for _ in range(MAX_ROUNDS):
+            draw = {item.item: sum(other.bill["from_outside"].get(item.item, 0.0)
+                                   for other, _s, _e in chain_orders if other is not item and other.bill)
+                    for item, _s, _e in chain_orders}
+            if all(abs(draw[k] - more.get(k, 0.0)) <= 1e-6 + 1e-3 * draw[k] for k in draw):
+                settled = True
+                break
+            more = draw
+            run(more)
+        if not settled:
+            for item, _s, _e in chain_orders:
+                item.problems.append("the orders draw on each other and their sizes had not settled: "
+                                     "read the rates as a floor")
+    for item, s, _extra in entries:
+        if s.kind not in DRILL_KINDS:
             item.text = _line(item)
             if s.made_elsewhere > 0:
                 item.text += (f"; {s.made_elsewhere:.3g}/s of it is already made outside the surveyed machines, "
                               "so bringing more of that is the other way")
-        orders.append((item, reviewed))
-    return orders
+    return [(item, reviews.get(item.item)) for item, _s, _e in entries]
 
 
 def _drill_text(s: Shortfall) -> str:

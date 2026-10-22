@@ -13,9 +13,17 @@ power networks (the exact format is in `src/factorio_forge/survey.py`). The
 command reads it and answers four questions: what works well, what holds the
 base back and why, what to build, and what to mend without building.
 
-Nothing is guessed. A number is read from the snapshot or computed from the
-game's own recipes and the machine speeds in the snapshot. Where the snapshot
-cannot know, the report says so.
+A number is read from the snapshot or computed from the game's own recipes and
+the machine speeds in the snapshot. Where the snapshot cannot know, the report
+says so instead of filling it in. Machine counts are first estimates, not a
+design: they assume the makers could be copied as they stand.
+
+Every recipe group and every short item is shown once. Where the same group or
+item comes up again under another line, the report says "already shown above"
+instead of repeating the subtree, so the report is as long as the base has
+groups, not as long as it has paths. What is short of an item is added up over
+everyone who waits for it, and what its makers could still add is taken off
+once, at the item.
 
 ## Reading the report
 
@@ -58,12 +66,20 @@ cause of the line above it.
 - *field F has N left, about H hours left at R/s* -- the field is running out;
   other fields of the same ore with no drills are named.
 - *no drills / no field* -- a field with nothing on it, or no field at all.
-- *power is short by N MW* -- from the networks' made and wanted watts.
-  The snapshot does not say which network a machine is on; with several short
-  networks the line lists them all.
+- *power is short by N MW* -- only where a network's machines want more watts
+  than it makes. Otherwise the line says the machines lose a share of their
+  time to low or no power, gives the network's satisfaction, and says that the
+  shortfall in watts is not in the snapshot (satisfaction is a share, not a
+  watt ratio). The snapshot does not say which network a machine is on; with
+  several short networks the line lists them all.
 - *no fuel*, *switched off*, *nowhere for it to go*, *no recipe* -- as said.
-- *loops back to a step shown above* -- the recipes feed each other; the walk
-  stops there instead of going round.
+- *the recipes feed each other here* -- a real loop in the recipes (A needs
+  what B makes and B needs what A makes); the walk stops there instead of
+  going round.
+- *already shown above* -- the group or item was expanded on an earlier line;
+  it is not a loop, only not repeated.
+- A machine that waits is followed by what the snapshot says was missing,
+  whatever its state is called (items, fluids, science packs).
 
 Problems already explained by a chain are not listed again as separate
 entries. With `--target item=rate`, a rate wanted (`=60/m` for per minute),
@@ -75,8 +91,15 @@ rate short, and a request exactly as `review` and `chain` take it. What the
 base already makes beyond what it uses (an item whose flow made more than it
 used) goes into the request's `boundary`, so the bill does not go back to ore
 for it; the line says how much of it there is and how much the order draws.
-Items that other orders in the list build are also in the boundary. The order
-carries the bill of materials with machine counts. With `--drafts -o folder`,
+Items that other orders in the list build are also in the boundary, and the
+orders are sized together: what one order's bill draws from another order's
+item is added to that order's rate, and the bills are made again until the
+sizes settle (if they do not, the order says so). The order pins the recipe and
+the machine the base itself uses for the item, so the bill speaks of the
+machines the base has; whether the player can build that machine is the
+review's to say. The order carries the bill of materials with machine counts
+for the whole of what it builds, which can be more machines than the "about N
+more" on the line (that counts only the makers that already stand). With `--drafts -o folder`,
 `chain` is run on each and the plan and blueprint are written to
 `folder/<item>/`. Where to put the blocks is not decided here: drafts are built
 on an empty site.
@@ -95,6 +118,9 @@ drills whose ore is not carried off.
   speed in the snapshot and the machine's built-in productivity only.
 - Anything outside the surveyed area: its makers and users count as nobody.
 - A cycle longer than the window (oil, rockets) may be seen in part.
-- Which power network a machine is on.
+- Which power network a machine is on, and how many watts are missing when
+  the networks' wanted watts do not exceed what they make.
+- With an area surveyed, production flows still cover the whole surface, so no
+  mining rate, drill count per field or hours left is given for fields.
 
 `-o folder` writes `base.json` (the same structure as `--json`) and the drafts.

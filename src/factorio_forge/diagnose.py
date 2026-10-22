@@ -17,10 +17,17 @@ flows and the power networks. The answer is a ``Diagnosis``:
 
 Lost output of a machine is (1 - share of the window it worked) times its full
 rate: the recipe's products times crafting speed over the recipe's time, with
-the built-in productivity of the machine counted as ``bom`` counts it. Nothing
-here is a guess: a number is either read from the snapshot or computed from the
-recipes and the speeds in it. What the snapshot cannot see (belts, trains,
-robots, hand-delivered items, modules, beacons) is listed in ``limits``.
+the built-in productivity of the machine counted as ``bom`` counts it. A number
+is either read from the snapshot or computed from the recipes and the speeds in
+it; what is not known is said so, not filled in. What the snapshot cannot see
+(belts, trains, robots, hand-delivered items, modules, beacons) is listed in
+``limits``.
+
+Every recipe group and every short item is expanded once: a second visit to
+the same group or item is a one-line reference to where it was shown, so the
+report stays as long as the base has groups, not as long as it has paths. What
+is short of an item is summed over everyone who waits for it and the makers'
+headroom is taken off once, at the item.
 
 Recipe data comes in through ``RecipeBook`` so the logic can be tested without
 a game profile; ``RecipeBook.from_active_data`` reads the active profile.
@@ -40,18 +47,22 @@ EPS = 1e-9
 GOOD_SHARE = 0.9  # a group working this share of the window or more is "good"
 MIN_STATE_SHARE = 0.05  # a state below this part of the group's loss is not followed
 NEAR_EMPTY_HOURS = 24.0  # a field with less than this much left at the current rate is running out
-MAX_DEPTH = 12
+MAX_DEPTH = 90  # a guard only: the path and the once-only expansion already end every walk
 
 INGREDIENT_STATES = frozenset({
     "no_ingredients", "item_ingredient_shortage", "fluid_ingredient_shortage",
-    "waiting_for_source_items", "missing_required_fluid",
+    "waiting_for_source_items", "missing_required_fluid", "no_input_fluid", "low_input_fluid",
+    "missing_science_packs",
 })
 OUTPUT_FULL_STATES = frozenset({
     "output_full", "full_output", "waiting_for_space_in_destination", "waiting_for_space",
 })
-POWER_STATES = frozenset({"no_power", "low_power"})
+POWER_STATES = frozenset({"no_power", "low_power", "recharging_after_power_outage"})
 DISABLED_STATES = frozenset({"disabled", "disabled_by_control_behavior", "disabled_by_script"})
 DEPLETED_STATES = frozenset({"no_minable_resources"})
+
+KNOWN_STATES = (INGREDIENT_STATES | OUTPUT_FULL_STATES | POWER_STATES | DISABLED_STATES | DEPLETED_STATES
+                | {"no_fuel", "no_recipe"})
 
 # Leaves that only building (more machines, drills, a new source) can fix.
 SHORT_KINDS = frozenset({"too_few", "nobody_makes", "too_few_drills", "no_drills", "no_field"})
@@ -332,11 +343,25 @@ class _Walk:
                 by_recipe[m.recipe].append(m)
         for recipe, machines in by_recipe.items():
             self.groups[recipe] = _group(recipe, book.recipes[recipe], machines, book)
+        self._made_by: dict[str, list[_Group]] = defaultdict(list)
+        for g in self.groups.values():
+            for item in g.full:
+                self._made_by[item].append(g)
+        # who waits for whom, kept across passes: it says which groups are explained by which
+        self.edges: dict[str, set[str]] = defaultdict(set)
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget what was expanded, so the next pass builds the trees afresh (the edges stay)."""
+        self.expanded: set[str] = set()
+        self.traced: set[str] = set()
+        self.demand: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        self.slots: dict[str, tuple[list[Cause], list[Cause]]] = {}
 
     # -- helpers ---------------------------------------------------------
 
     def makers(self, item: str) -> list[_Group]:
-        return [g for g in self.groups.values() if item in g.full]
+        return list(self._made_by.get(item, []))
 
     def users(self, products: Iterable[str], besides: str) -> list[_Group]:
         wanted = set(products)
@@ -349,9 +374,35 @@ class _Walk:
     def fields_of(self, item: str):
         return [f for f in self.survey.fields if item in self.book.resource_items(f.resource)]
 
+    def depends(self, recipe: str, other: str) -> bool:
+        """Whether `recipe`'s ingredients lead, through the groups of the snapshot, back to `other`."""
+        seen = {recipe}
+        stack = [recipe]
+        while stack:
+            group = self.groups.get(stack.pop())
+            if group is None:
+                continue
+            for item in group.ingredient_full:
+                for maker in self._made_by.get(item, []):
+                    if maker.recipe == other:
+                        return True
+                    if maker.recipe not in seen:
+                        seen.add(maker.recipe)
+                        stack.append(maker.recipe)
+        return False
+
+    def ref_node(self, maker: str, consumer: str) -> Cause:
+        """A group met again on the way down: a loop only if the maker itself needs what the consumer makes."""
+        if self.depends(maker, consumer):
+            return Cause("cycle", f"{maker}: the recipes feed each other here; not followed again", recipe=maker)
+        return Cause("seen_above", f"{maker}: already shown above", recipe=maker)
+
     # -- nodes -----------------------------------------------------------
 
     def group_node(self, g: _Group, path: frozenset[str], depth: int) -> Cause:
+        if g.recipe in self.expanded:
+            return Cause("seen_above", f"{g.recipe}: already shown above", recipe=g.recipe)
+        self.expanded.add(g.recipe)
         lost = g.lost.get(g.main, 0.0)
         could = g.full.get(g.main, 0.0)
         made = g.made.get(g.main, 0.0)
@@ -368,11 +419,15 @@ class _Walk:
             return node
         inner = path | {g.recipe}
         handled: set[str] = set()
+        waited = False
         for state, state_lost in sorted(g.state_lost.items(), key=lambda kv: -kv[1]):
             if lost <= EPS or state_lost < MIN_STATE_SHARE * lost or state in handled:
                 continue
-            if state in INGREDIENT_STATES:
-                node.children += self.waiting_nodes(g, inner, depth + 1)
+            if state in INGREDIENT_STATES or (g.missing_short and state not in KNOWN_STATES):
+                # a state the list does not know, but the snapshot says what was short: follow that
+                if not waited:
+                    waited = True
+                    node.children += self.waiting_nodes(g, inner, depth + 1)
             elif state in OUTPUT_FULL_STATES:
                 node.children.append(self.output_node(g, state, inner, depth + 1))
             elif state in POWER_STATES:
@@ -399,6 +454,9 @@ class _Walk:
                     "the snapshot does not say more", item=g.main, recipe=g.recipe,
                     share=g.state_share[state], units=g.state_units.get(state, []),
                     numbers={"state": state, "lost_per_s": state_lost}))
+        if (not waited and lost > EPS and g.missing_lost
+                and sum(g.missing_lost.values()) >= MIN_STATE_SHARE * lost):
+            node.children += self.waiting_nodes(g, inner, depth + 1)
         return node
 
     def waiting_nodes(self, g: _Group, path: frozenset[str], depth: int) -> list[Cause]:
@@ -449,8 +507,9 @@ class _Walk:
             f"its users {', '.join(sorted(u.recipe for u in users))} do not take it all",
             item=g.main, recipe=g.recipe, lost_per_s=lost, share=share, units=units, numbers=numbers)
         for user in low:
+            self.edges[g.recipe].add(user.recipe)
             if user.recipe in path:
-                node.children.append(self.cycle_node(user.recipe))
+                node.children.append(self.ref_node(g.recipe, user.recipe))
             elif depth < MAX_DEPTH:
                 node.children.append(self.group_node(user, path, depth + 1))
         if not low:
@@ -462,76 +521,101 @@ class _Walk:
         return node
 
     def power_node(self, units: list[int], share: float, lost: float) -> Cause:
-        short = [p for p in self.survey.power if p.satisfaction < 0.999 or p.used_w > p.made_w * 1.001]
+        short = [p for p in self.survey.power if p.satisfaction < 0.999 or _power_gap(p) > 0]
         if not short:
             return Cause(
                 "no_power",
                 f"machines report no power {share:.0%} of the time, yet no network in the snapshot is short: "
                 f"they are probably not connected to a pole ({_units_text(units)})",
                 share=share, units=units, numbers={"lost_per_s": lost})
-        parts = []
-        total = 0.0
-        networks = []
-        for p in short:
-            gap = _power_gap(p)
-            total += gap
-            parts.append(f"network {p.network} makes {p.made_w / 1e6:.3g} MW, machines want "
-                         f"{(p.used_w if p.used_w > p.made_w else p.used_w / max(p.satisfaction, 1e-6)) / 1e6:.3g} MW "
-                         f"(satisfaction {p.satisfaction:.0%})")
-            networks.append({"network": p.network, "made_w": p.made_w, "used_w": p.used_w,
-                             "satisfaction": p.satisfaction, "short_w": gap})
-        return Cause(
-            "power",
-            f"power is short by {total / 1e6:.3g} MW: " + "; ".join(parts)
-            + (f" ({_units_text(units)})" if units else "")
-            + ("; which network these machines are on is not in the snapshot" if len(short) > 1 else ""),
-            share=share, units=units, numbers={"short_w": total, "networks": networks, "lost_per_s": lost})
-
-    def cycle_node(self, recipe: str) -> Cause:
-        return Cause("cycle", f"{recipe}: loops back to a step shown above; not followed again", recipe=recipe)
+        text, numbers = _power_text(short)
+        numbers["lost_per_s"] = lost
+        if len(short) > 1:
+            text += "; which network these machines are on is not in the snapshot"
+        where = f"; {_units_text(units)}" if units else ""
+        return Cause("power", f"{text} ({share:.0%} of the machine time{where})",
+                     share=share, units=units, numbers=numbers)
 
     # -- item: who makes it, and why not enough ----------------------------
 
     def trace_item(self, item: str, short: float, consumer: str, path: frozenset[str], depth: int) -> list[Cause]:
-        children: list[Cause] = []
+        """What lies under an item some consumer waits for.
+
+        An item is expanded once; later waiters only add to its demand, which `finalize` settles.
+        """
+        self.demand[item][consumer] += short
         makers = self.makers(item)
-        drills = self.drills_of(item)
-        if depth >= MAX_DEPTH:
-            return children
-        headroom = 0.0
         for g in makers:
-            headroom += g.lost.get(item, 0.0)
+            if not g.is_good:
+                self.edges[consumer].add(g.recipe)
+        if item in self.traced:
+            return [Cause("seen_above", f"{item}: what is short of it is shown above", item=item)]
+        if depth >= MAX_DEPTH:
+            return []
+        self.traced.add(item)
+        children: list[Cause] = []
+        for g in makers:
             if g.is_good:
                 continue
             if g.recipe in path:
-                children.append(self.cycle_node(g.recipe))
+                children.append(self.ref_node(g.recipe, consumer))
             else:
                 children.append(self.group_node(g, path, depth + 1))
-        if drills:
-            children += self.drill_nodes(item, short, consumer, drills)
-        elif not makers:
-            return self.source_nodes(item, short, consumer)
-        # What the makers could add if they ran all the time is not enough: more are needed.
-        remaining = short - headroom
-        if makers and not drills and remaining > max(1e-6, 0.02 * short):
-            best = max(makers, key=lambda g: (g.made.get(item, 0.0), g.recipe))
-            per = best.per_machine(item)
-            more = math.ceil(remaining / per - 1e-9) if per > EPS else None
-            working = sum(g.working * len(g.machines) for g in makers) / sum(len(g.machines) for g in makers)
-            count = sum(len(g.machines) for g in makers)
-            why = ("they work all the time yet the users starve" if headroom <= EPS
-                   else f"even running all the time they would add only {_n(headroom)}/s")
-            children.append(Cause(
-                "too_few",
-                f"{item}: {count} maker(s) ({best.recipe}) work {working:.0%} of the time; {why}: "
-                f"short {_n(remaining)}/s, about {more if more is not None else '?'} more {best.machine_name} "
-                f"({_n(per)}/s each)",
-                item=item, recipe=best.recipe, short_per_s=remaining, share=working,
-                units=[u for g in makers for u in g.units],
-                numbers={"consumer": consumer, "maker_recipe": best.recipe, "maker_machine": best.machine_name,
-                         "per_machine_per_s": per, "machines_needed": more, "makers": count,
-                         "headroom_per_s": headroom}))
+        leaves = self.leaf_nodes(item, {consumer: short})
+        children += leaves
+        self.slots[item] = (children, leaves)
         return children
+
+    def finalize(self) -> None:
+        """Redo each item's leaf with the demand of everyone who waits for it.
+
+        The makers' headroom is then taken off once, at the item, not once per consumer.
+        """
+        for item, (children, old) in list(self.slots.items()):
+            new = self.leaf_nodes(item, dict(self.demand[item]))
+            gone = {id(n) for n in old}
+            children[:] = [c for c in children if id(c) not in gone] + new
+            self.slots[item] = (children, new)
+
+    def leaf_nodes(self, item: str, consumers: dict[str, float]) -> list[Cause]:
+        short = sum(consumers.values())
+        first = next(iter(consumers))
+        makers = self.makers(item)
+        drills = self.drills_of(item)
+        leaves: list[Cause] = []
+        if drills:
+            leaves = self.drill_nodes(item, short, first, drills)
+        elif not makers:
+            leaves = self.source_nodes(item, short, first)
+        else:
+            headroom = sum(g.lost.get(item, 0.0) for g in makers)
+            # What the makers could add if they ran all the time is not enough: more are needed.
+            remaining = short - headroom
+            if remaining > max(1e-6, 0.02 * short):
+                best = max(makers, key=lambda g: (g.made.get(item, 0.0), g.recipe))
+                per = best.per_machine(item)
+                more = math.ceil(remaining / per - 1e-9) if per > EPS else None
+                count = sum(len(g.machines) for g in makers)
+                working = sum(g.working * len(g.machines) for g in makers) / count
+                why = ("they work all the time yet the users starve" if headroom <= EPS
+                       else f"even running all the time they would add only {_n(headroom)}/s")
+                wanted = ""
+                if len(consumers) > 1:
+                    who = ", ".join(f"{c} {_n(v)}/s" for c, v in sorted(consumers.items()))
+                    wanted = f", {_n(short)}/s wanted by {len(consumers)} users ({who})"
+                leaves.append(Cause(
+                    "too_few",
+                    f"{item}: {count} maker(s) ({best.recipe}) work {working:.0%} of the time; {why}: "
+                    f"short {_n(remaining)}/s{wanted}, about {more if more is not None else '?'} more "
+                    f"{best.machine_name} ({_n(per)}/s each)",
+                    item=item, recipe=best.recipe, short_per_s=remaining, share=working,
+                    units=[u for g in makers for u in g.units],
+                    numbers={"consumer": first, "maker_recipe": best.recipe, "maker_machine": best.machine_name,
+                             "per_machine_per_s": per, "machines_needed": more, "makers": count,
+                             "headroom_per_s": headroom, "wanted_per_s": short}))
+        for leaf in leaves:
+            leaf.numbers["consumers"] = dict(consumers)
+        return leaves
 
     def nobody_nodes(self, item: str, short: float, consumer: str) -> list[Cause]:
         elsewhere = self.survey.flow(item).made
@@ -548,9 +632,12 @@ class _Walk:
 
     def drill_nodes(self, item: str, short: float, consumer: str, drills: list[Miner]) -> list[Cause]:
         n = len(drills)
+        # Production flows are for the whole surface; with a surveyed area the drills outside it are in them
+        # too, so a rate per drill or per field cannot be read from them.
+        rate_known = self.survey.area is None
         mined = self.survey.flow(item).made
         working_sum = sum(m.working_share for m in drills)
-        per_drill = mined / working_sum if working_sum > EPS and mined > EPS else None
+        per_drill = mined / working_sum if rate_known and working_sum > EPS and mined > EPS else None
         out: list[Cause] = []
 
         def idle(states: frozenset[str]) -> tuple[float, list[int]]:
@@ -574,18 +661,24 @@ class _Walk:
             found = next((f for f in self.survey.fields if f.id == fid), None)
             if found is None:
                 continue
-            rate = (mined * sum(m.working_share for m in members) / working_sum) if working_sum > EPS else 0.0
-            hours = found.amount / rate / 3600.0 if rate > EPS else None
+            rate = (mined * sum(m.working_share for m in members) / working_sum) \
+                if rate_known and working_sum > EPS else None
+            hours = found.amount / rate / 3600.0 if rate is not None and rate > EPS else None
             empty_here = sum(m.states.get(s, 0.0) for m in members for s in DEPLETED_STATES) / len(members)
             if empty_here >= 0.1 or (hours is not None and hours < NEAR_EMPTY_HOURS):
                 unused = [{"field": f.id, "amount": f.amount, "center": list(f.center)}
                           for f in self.fields_of(item) if f.drills == 0 and f.id != fid]
-                left = (f"about {hours:.2g} hours left at {_n(rate)}/s" if hours is not None
-                        else "nothing mined from it now")
+                if hours is not None:
+                    left = f"about {hours:.2g} hours left at {_n(rate)}/s"
+                elif not rate_known:
+                    left = "how fast it is mined is not known for the surveyed area alone"
+                else:
+                    left = "nothing mined from it now"
                 out.append(Cause(
                     "field_depleting",
                     f"{item}: field {fid} has {_n(found.amount)} left, {left}; "
-                    f"{len(members)} drill(s) there" + (f", {empty_here:.0%} of the time without ore" if empty_here >= 0.1 else "")
+                    f"{len(members)} drill(s) there"
+                    + (f", {empty_here:.0%} of the time without ore" if empty_here >= 0.1 else "")
                     + (f"; {len(unused)} other field(s) of it have no drills" if unused else ""),
                     item=item, short_per_s=short, share=empty_here, units=[m.unit for m in members],
                     numbers={"consumer": consumer, "field": fid, "amount": found.amount, "rate_per_s": rate,
@@ -595,12 +688,13 @@ class _Walk:
             out.append(self.power_node(power[1], power[0], 0.0))
         if not blocked >= 0.1 and sum(m.working_share for m in drills) / n >= GOOD_SHARE - EPS:
             more = math.ceil(short / per_drill - 1e-9) if per_drill else None
+            unknown = ("; how fast a drill mines is not known for the surveyed area alone" if not rate_known else
+                       "; the rate per drill is not known (nothing mined in the window)")
             out.append(Cause(
                 "too_few_drills",
                 f"{item}: {n} drill(s) work {working_sum / n:.0%} of the time yet {consumer} starves: "
                 f"short {_n(short)}/s"
-                + (f", about {more} more drills ({_n(per_drill)}/s each)" if more is not None else
-                   "; the rate per drill is not known (nothing mined in the window)"),
+                + (f", about {more} more drills ({_n(per_drill)}/s each)" if more is not None else unknown),
                 item=item, short_per_s=short, share=working_sum / n, units=[m.unit for m in drills],
                 numbers={"consumer": consumer, "drills": n, "per_drill_per_s": per_drill, "machines_needed": more,
                          "machine": drills[0].name}))
@@ -643,12 +737,33 @@ def _mean_states(drills: list[Miner]) -> dict[str, float]:
 
 
 def _power_gap(p) -> float:
-    """Watts a network lacks: what its machines want beyond what it makes."""
-    if p.used_w > p.made_w * 1.001:
-        return p.used_w - p.made_w
-    if p.satisfaction < 0.999:
-        return p.used_w * (1.0 / max(p.satisfaction, 1e-6) - 1.0)
-    return 0.0
+    """Watts a network lacks, known only when its machines want more than it makes.
+
+    ``satisfaction`` is not a watt ratio (the survey does not define it as one), so it never
+    turns into a figure here.
+    """
+    return p.used_w - p.made_w if p.used_w > p.made_w * 1.001 else 0.0
+
+
+def _power_text(networks) -> tuple[str, dict]:
+    """The sentence and numbers for networks that are short; watts only where the snapshot gives them."""
+    gaps = [p for p in networks if _power_gap(p) > 0]
+    total = sum(_power_gap(p) for p in gaps)
+    entries = [{"network": p.network, "made_w": p.made_w, "used_w": p.used_w, "satisfaction": p.satisfaction,
+                "short_w": _power_gap(p) or None} for p in networks]
+    parts = [f"network {p.network} makes {p.made_w / 1e6:.3g} MW, machines want {p.used_w / 1e6:.3g} MW"
+             for p in gaps]
+    rest = [p for p in networks if _power_gap(p) <= 0]
+    if gaps:
+        text = f"power is short by {total / 1e6:.3g} MW: " + "; ".join(parts)
+        if rest:
+            text += ("; network(s) " + ", ".join(str(p.network) for p in rest)
+                     + " show low satisfaction without a watt figure")
+    else:
+        text = ("machine time is lost to low or no power; network(s) "
+                + ", ".join(f"{p.network} (satisfaction {p.satisfaction:.0%})" for p in networks)
+                + ": the shortfall in watts is not in the snapshot")
+    return text, {"short_w": total if gaps else None, "networks": entries}
 
 
 # --------------------------------------------------------------------------
@@ -669,8 +784,15 @@ def _made_of(walk: _Walk, item: str) -> float:
     return sum(g.made.get(item, 0.0) for g in walk.groups.values())
 
 
-def _recipes_below(node: Cause) -> set[str]:
-    return {c.recipe for c in node.walk() if c.kind == "low_output" and c.recipe}
+def _reach(edges: Mapping[str, set[str]], start: Iterable[str]) -> set[str]:
+    seen: set[str] = set()
+    stack = list(start)
+    while stack:
+        for nxt in edges.get(stack.pop(), ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return seen
 
 
 def diagnose(survey: Survey, targets: Mapping[str, float] | Iterable[tuple[str, float]] | None = None,
@@ -688,25 +810,31 @@ def diagnose(survey: Survey, targets: Mapping[str, float] | Iterable[tuple[str, 
                 "working": g.working, "made_per_s": {k: v for k, v in g.made.items() if v > EPS},
                 "units": g.units})
 
-    # every group below par, with its chain
     weak = {r: g for r, g in walk.groups.items() if not g.is_good and g.lost.get(g.main, 0.0) > EPS}
-    trees = {r: walk.group_node(g, frozenset(), 0) for r, g in weak.items()}
-    below = {r: _recipes_below(t) - {r} for r, t in trees.items()}
-
-    roots: list[Cause] = []
+    gaps: list[tuple[str, float, float, float]] = []
     for item, rate in wanted.items():
         made = _made_of(walk, item)
-        gap = rate - made
-        if gap > max(EPS, 0.01 * rate):
+        if rate - made > max(EPS, 0.01 * rate):
+            gaps.append((item, rate, made, rate - made))
+    gaps.sort(key=lambda t: (-t[3], t[0]))
+
+    def target_nodes() -> list[Cause]:
+        nodes = []
+        for item, rate, made, gap in gaps:
             node = Cause(
                 "target_gap", f"target {item}: {_n(rate)}/s wanted, {_n(made)}/s made, short {_n(gap)}/s",
                 item=item, lost_per_s=gap, short_per_s=gap,
                 numbers={"target_per_s": rate, "made_per_s": made, "consumer": f"target:{item}"})
             node.children = walk.trace_item(item, gap, f"target:{item}", frozenset(), 1)
-            roots.append(node)
-    covered: set[str] = set()
-    for node in roots:
-        covered |= _recipes_below(node)
+            nodes.append(node)
+        return nodes
+
+    # First pass: only to learn which group waits on which, so each is explained by the one above it.
+    target_nodes()
+    for recipe in sorted(weak):
+        walk.group_node(weak[recipe], frozenset(), 0)
+    below = {r: _reach(walk.edges, [r]) - {r} for r in weak}
+    covered = _reach(walk.edges, [f"target:{item}" for item, *_ in gaps])
 
     candidates = []
     for recipe in weak:
@@ -719,43 +847,46 @@ def diagnose(survey: Survey, targets: Mapping[str, float] | Iterable[tuple[str, 
         if any(recipe in below[o] and o in below[recipe] for o in chosen):
             continue  # one half of a loop is enough
         chosen.append(recipe)
-    roots.sort(key=lambda c: -c.lost_per_s)
-    result.causes = roots + [trees[r] for r in chosen]
 
-    result.shortfalls = _shortfalls(walk, result.causes)
+    # Second pass: the trees as they are shown, each group and item expanded once.
+    walk.reset()
+    roots = target_nodes()
+    trees = [walk.group_node(weak[r], frozenset(), 0) for r in chosen]
+    walk.finalize()
+    roots.sort(key=lambda c: -c.lost_per_s)
+    result.causes = roots + trees
+
+    result.shortfalls = _shortfalls(walk)
     result.standalone = _standalone(walk)
     result.limits = _limits(walk, result)
     return result
 
 
-def _shortfalls(walk: _Walk, causes: list[Cause]) -> list[Shortfall]:
-    found: dict[str, Shortfall] = {}
-    for root in causes:
-        for node in root.walk():
-            if node.kind not in SHORT_KINDS or not node.item:
+def _shortfalls(walk: _Walk) -> list[Shortfall]:
+    """One shortfall per item, from the item's own leaf: demand summed over its consumers, headroom taken off once."""
+    found: list[Shortfall] = []
+    for item, (_children, leaves) in walk.slots.items():
+        for node in leaves:
+            if node.kind not in SHORT_KINDS:
                 continue
-            consumer = str(node.numbers.get("consumer", "?"))
-            entry = found.get(node.item)
-            if entry is None:
-                entry = found[node.item] = Shortfall(node.item, 0.0, node.kind)
-            entry.consumers[consumer] = max(entry.consumers.get(consumer, 0.0), node.short_per_s)
-            if node.kind == "too_few" or node.kind == "too_few_drills":
-                entry.kind = node.kind
-                entry.maker_recipe = node.numbers.get("maker_recipe") or entry.maker_recipe
-                entry.maker_machine = node.numbers.get("maker_machine") or node.numbers.get("machine") or entry.maker_machine
+            entry = Shortfall(item, node.short_per_s, node.kind,
+                              consumers=dict(walk.demand[item]))
+            if node.kind in ("too_few", "too_few_drills"):
+                entry.maker_recipe = node.numbers.get("maker_recipe")
+                entry.maker_machine = node.numbers.get("maker_machine") or node.numbers.get("machine")
                 per = node.numbers.get("per_machine_per_s") or node.numbers.get("per_drill_per_s")
-                entry.per_machine = float(per) if per else entry.per_machine
-            if node.kind == "nobody_makes":
+                entry.per_machine = float(per) if per else None
+                if entry.per_machine:
+                    entry.machines_needed = math.ceil(entry.short_per_s / entry.per_machine - 1e-9)
+            elif node.kind == "nobody_makes":
                 entry.made_elsewhere = float(node.numbers.get("made_elsewhere_per_s", 0.0))
-    for entry in found.values():
-        entry.short_per_s = sum(entry.consumers.values())
-        if entry.per_machine:
-            entry.machines_needed = math.ceil(entry.short_per_s / entry.per_machine - 1e-9)
-        if entry.kind == "no_drills":
-            entry.note = "a field is known but nothing mines it"
-        elif entry.kind == "no_field":
-            entry.note = "no field of it in the snapshot"
-    return list(found.values())
+            elif node.kind == "no_drills":
+                entry.note = "a field is known but nothing mines it"
+            elif node.kind == "no_field":
+                entry.note = "no field of it in the snapshot"
+            found.append(entry)
+            break
+    return found
 
 
 def _standalone(walk: _Walk) -> list[Cause]:
@@ -764,15 +895,10 @@ def _standalone(walk: _Walk) -> list[Cause]:
         units = [m.unit for m in walk.recipeless]
         out.append(Cause("no_recipe", f"{len(units)} machine(s) have no recipe set ({_units_text(units)})",
                          units=units, numbers={"machines": len(units)}))
-    short = [p for p in walk.survey.power if _power_gap(p) > 0]
+    short = [p for p in walk.survey.power if p.satisfaction < 0.999 or _power_gap(p) > 0]
     if short:
-        total = sum(_power_gap(p) for p in short)
-        out.append(Cause(
-            "power", f"power is short by {total / 1e6:.3g} MW in network(s) "
-            + ", ".join(str(p.network) for p in short),
-            numbers={"short_w": total, "networks": [
-                {"network": p.network, "made_w": p.made_w, "used_w": p.used_w,
-                 "satisfaction": p.satisfaction, "short_w": _power_gap(p)} for p in short]}))
+        text, numbers = _power_text(short)
+        out.append(Cause("power", text, numbers=numbers))
     return out
 
 
@@ -783,11 +909,16 @@ def _limits(walk: _Walk, result: Diagnosis) -> list[str]:
         "Modules, beacons and researched productivity are not in the snapshot: full rates count only "
         "a machine's crafting speed and its built-in productivity.",
         f"States are shares of one window of {_n(walk.survey.window_s)} s; a long cycle (oil, rocket) may be half seen.",
+        "Power is known in watts only where a network's machines want more than it makes; otherwise the "
+        "snapshot gives a share of machine time, not a shortfall.",
+        "What is short of an item is summed over the machines that waited for it in the window, and what its "
+        "makers could still add is taken off once; a machine count is therefore a first estimate, not a design.",
     ]
     if walk.survey.area is not None:
         (x1, y1), (x2, y2) = walk.survey.area
         limits.append(f"Only the area ({x1:g}, {y1:g}) to ({x2:g}, {y2:g}) was surveyed: makers and users "
-                      "outside it count as nobody.")
+                      "outside it count as nobody, and the production flows are for the whole surface, so "
+                      "no mining rate or hours left is given for fields.")
     if any(c.kind == "nobody_makes" and c.numbers.get("made_elsewhere_per_s", 0) > EPS
            for root in result.causes for c in root.walk()):
         limits.append("An item made on the surface but by no machine in the snapshot is taken to arrive from "

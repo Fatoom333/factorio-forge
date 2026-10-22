@@ -238,3 +238,90 @@ class TestActiveData:
         plan_file = tmp_path / buildout._folder_name(item, set()) / "plan.json"
         assert plan_file.is_file()
         assert json.loads(plan_file.read_text(encoding="utf-8"))["blocks"]
+
+
+# --------------------------------------------------------------------------
+# orders sized together, the base's own recipe and machine
+# --------------------------------------------------------------------------
+
+
+class TestSizedTogether:
+    def draw(self, plate_for_gear: float):
+        def compute(order):
+            target = order["targets"][0]
+            if target["item"] == "gear":
+                outside = {"plate": plate_for_gear}
+            else:
+                outside = {}
+            line = {"recipe": "r", "machine": "m", "machines": 1, "outputs": {}}
+            return {"lines": [line], "from_outside": outside, "power_w": 0}, object(), []
+
+        return compute
+
+    def orders(self, compute):
+        snapshot = starved()
+        found = diagnose(snapshot, {"gear": 20.0}, book=BOOK)
+        return {b.item: b for b, _ in buildout.build_orders(found, snapshot, known=anything, compute=compute)}, found
+
+    def test_what_one_order_draws_from_another_is_added_to_the_other(self) -> None:
+        orders, found = self.orders(self.draw(3.0))
+        plate_short = next(s.short_per_s for s in found.shortfalls if s.item == "plate")
+        assert orders["plate"].extra_per_s == pytest.approx(3.0)
+        assert orders["plate"].request["targets"][0]["per_second"] == pytest.approx(plate_short + 3.0)
+        assert orders["gear"].extra_per_s == 0
+        assert "3/s more for the other orders" in orders["plate"].text
+        assert "made by the other order" in orders["gear"].text
+
+    def test_orders_that_draw_on_each_other_without_end_are_flagged(self) -> None:
+        def compute(order):
+            target = order["targets"][0]
+            other = "plate" if target["item"] == "gear" else "gear"
+            line = {"recipe": "r", "machine": "m", "machines": 1, "outputs": {}}
+            return {"lines": [line], "from_outside": {other: 2.0 * target["per_second"]}, "power_w": 0}, object(), []
+
+        orders, _ = self.orders(compute)
+        assert all(any("had not settled" in p for p in o.problems) for o in orders.values())
+
+    def test_nothing_drawn_means_one_round(self) -> None:
+        calls = []
+
+        def compute(order):
+            calls.append(order)
+            return {"lines": [], "from_outside": {}, "power_w": 0}, object(), []
+
+        self.orders(compute)
+        assert len(calls) == 2
+
+
+class TestOwnRecipeAndMachine:
+    def test_the_order_pins_the_recipe_and_the_machine_of_the_base(self) -> None:
+        snapshot = starved()
+        found = diagnose(snapshot, book=BOOK)
+        (item,) = [b for b, _ in buildout.build_orders(found, snapshot, bill=False, known=anything,
+                                                       category_of=lambda recipe: "smelting-here")]
+        assert item.request["recipe_choices"] == {"plate": "smelt"}
+        assert item.request["machine_choices"] == {"smelting-here": "assembler"}
+        spec = request.parse(item.request)
+        assert spec.recipe_choices == {"plate": "smelt"} and spec.machine_choices == {"smelting-here": "assembler"}
+
+    def test_without_a_category_only_the_recipe_is_pinned(self) -> None:
+        snapshot = starved()
+        found = diagnose(snapshot, book=BOOK)
+        (item,) = [b for b, _ in buildout.build_orders(found, snapshot, bill=False, known=anything,
+                                                       category_of=lambda recipe: None)]
+        assert item.request["recipe_choices"] == {"plate": "smelt"}
+        assert "machine_choices" not in item.request
+
+
+    def test_the_bills_machine_is_the_one_the_base_uses(self) -> None:
+        from test_route import chained_recipes
+
+        snapshot, _item = TestActiveData().surveyed()
+        (first, first_machine), _second = chained_recipes()
+        found = diagnose(snapshot)
+        (order,) = [b for b, _ in buildout.build_orders(found, snapshot)]
+        if order.bill is None:
+            pytest.skip(f"the order is not ready on this data: {order.problems}")
+        lines = [ln for ln in order.bill["lines"] if ln["recipe"] == first]
+        assert lines, "the bill does not use the recipe the base uses"
+        assert {ln["machine"] for ln in lines} == {first_machine}

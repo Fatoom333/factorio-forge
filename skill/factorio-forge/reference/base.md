@@ -28,10 +28,17 @@ and `limits`.
   with a full output" means the ore is not carried off: a belt problem, not a
   mining one. "Field ... hours left" means a new field is due. "nobody makes it"
   with "made elsewhere" means the item comes from outside: ask the player.
+- A chain line "already shown above" is not a loop and not a new cause: look
+  where it was first shown. Only "the recipes feed each other" is a real loop.
+- Power: a watt figure appears only when the network's machines want more than
+  it makes. Otherwise there is a share of lost machine time and a satisfaction
+  value, and the watts are unknown: say so, do not compute them.
 - `build` entries carry a ready request and a bill of materials. The boundary
-  of each is the base's surplus and the other orders' goods. If a line says the
-  order draws more of an item than the surplus gives, say so: that supply
-  needs raising too.
+  of each is the base's surplus and the other orders' goods; the orders are
+  sized together, so an order's rate may be higher than its shortfall by what
+  the other orders draw. The request pins the recipe and machine the base uses.
+  The machine counts are a first estimate. If a line says the order draws more
+  of an item than the surplus gives, say so: that supply needs raising too.
 - `fix` entries need no building; they carry unit numbers and positions.
 
 What to build first, and where, is for the player and you to decide; the tool
@@ -41,7 +48,8 @@ Say the surplus and the gaps in plain words, and name the numbers.
 ## What it cannot see
 
 Belts, trains, robots, hand-delivered items, modules, beacons, researched
-productivity, anything outside the surveyed area, which network a machine is
-on. A "waits for X" whose makers are fine may be a belt problem. Never present
+productivity, anything outside the surveyed area (with an area, no mining
+rate or hours left for fields), which network a machine is on, power in watts
+unless the wanted watts exceed what is made. A "waits for X" whose makers are fine may be a belt problem. Never present
 a cause as certain where the report's `limits` say the snapshot cannot tell.
 Details: `docs/base.md`.

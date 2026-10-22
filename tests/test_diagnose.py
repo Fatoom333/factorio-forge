@@ -319,3 +319,143 @@ class TestActiveData:
         per_craft = next(i["amount"] for i in entry["ingredients"] if i["name"] == item)
         energy = float(entry.get("energy_required", 0.5) or 0.5)
         assert root.children[0].short_per_s == pytest.approx(3 * 0.8 * per_craft / energy)
+
+
+# --------------------------------------------------------------------------
+# the corners: shared shortages, unknown states, fluids, power, size
+# --------------------------------------------------------------------------
+
+SHARED = {
+    **RECIPES,
+    "rod": {"ingredients": [{"name": "plate", "amount": 1}], "results": [{"name": "rod", "amount": 1}],
+            "energy_required": 0.5},
+    "brew": {"ingredients": [{"name": "water", "amount": 10, "type": "fluid"}],
+             "results": [{"name": "beer", "amount": 1}], "energy_required": 1},
+    "pump": {"ingredients": [], "results": [{"name": "water", "amount": 100, "type": "fluid"}],
+             "energy_required": 1},
+}
+SHARED_BOOK = RecipeBook(SHARED, is_mined=lambda item: item == "ore")
+
+
+class TestSharedShortage:
+    def snapshot(self):
+        # gear needs 4 plates/s at full work and misses 25% of it: 1/s; rod needs 2/s and misses 50%: 1/s
+        gear = machine(1, "gear", states={"working": 0.75, "no_ingredients": 0.25}, missing={"plate": 0.25})
+        rod = machine(2, "rod", states={"working": 0.5, "no_ingredients": 0.5}, missing={"plate": 0.5})
+        smelter = machine(3, "smelt", 0.5, speed=3.2)  # 1 plate/s at full work, so 0.5/s still to give
+        return survey([gear, rod, smelter])
+
+    def test_the_headroom_of_the_makers_is_taken_off_once_for_all_who_wait(self) -> None:
+        found = diagnose(self.snapshot(), book=SHARED_BOOK)
+        (short,) = found.shortfalls
+        assert short.item == "plate" and short.kind == "too_few"
+        assert short.consumers == {"gear": pytest.approx(1.0), "rod": pytest.approx(1.0)}
+        assert short.short_per_s == pytest.approx(2.0 - 0.5)
+        assert short.machines_needed == 2  # 1.5/s at 1/s a machine
+
+    def test_the_tree_shows_the_item_once_and_its_figures_are_the_items(self) -> None:
+        found = diagnose(self.snapshot(), book=SHARED_BOOK)
+        leaves = [c for root in found.causes for c in root.walk() if c.kind == "too_few"]
+        assert len(leaves) == 1
+        assert leaves[0].short_per_s == pytest.approx(1.5)
+        assert "2 users" in leaves[0].text
+        assert any(c.kind == "seen_above" for root in found.causes for c in root.walk())
+
+
+class TestWaitingWhateverItIsCalled:
+    def test_a_fluid_starved_machine_reaches_the_water_makers(self) -> None:
+        brew = machine(1, "brew", states={"working": 0.3, "no_input_fluid": 0.7}, missing={"water": 0.7})
+        pumps = [machine(10 + i, "pump", 1.0) for i in range(2)]
+        found = diagnose(survey([brew] + pumps), book=SHARED_BOOK)
+        root = found.causes[0]
+        assert kinds(root) == ["low_output", "waiting", "too_few"]
+        assert find(root, "too_few").item == "water"
+
+    def test_an_unlisted_state_with_missing_data_is_still_followed(self) -> None:
+        gear = machine(1, "gear", states={"working": 0.3, "waiting_on_the_moon": 0.7}, missing={"plate": 0.7})
+        found = diagnose(survey([gear]), book=BOOK)
+        assert "waiting" in kinds(found.causes[0]) and "other" not in kinds(found.causes[0])
+
+    def test_missing_with_no_state_loss_is_followed_too(self) -> None:
+        gear = machine(1, "gear", states={"working": 0.5}, missing={"plate": 0.5})
+        found = diagnose(survey([gear]), book=BOOK)
+        assert "waiting" in kinds(found.causes[0])
+
+    def test_a_machine_recharging_after_an_outage_is_a_power_leaf(self) -> None:
+        gear = machine(1, "gear", states={"working": 0.2, "recharging_after_power_outage": 0.8})
+        found = diagnose(survey([gear]), book=BOOK)
+        assert {"no_power", "power"} & set(kinds(found.causes[0]))
+
+
+class TestPowerWithoutWatts:
+    def test_a_satisfaction_below_one_is_not_turned_into_watts(self) -> None:
+        machines = [machine(i, "gear", states={"working": 0.4, "low_power": 0.6}) for i in range(1, 4)]
+        power = [{"network": 1, "made_w": 50e6, "used_w": 40e6, "satisfaction": 0.8, "machines": 3}]
+        found = diagnose(survey(machines, power=power), book=BOOK)
+        leaf = find(found.causes[0], "power")
+        assert leaf.numbers["short_w"] is None
+        assert "short by" not in leaf.text and "not in the snapshot" in leaf.text
+        assert leaf.units == [1, 2, 3] and leaf.share == pytest.approx(0.6)
+        assert found.standalone[0].kind == "power" and found.standalone[0].numbers["short_w"] is None
+
+    def test_watts_are_given_only_where_used_exceeds_made(self) -> None:
+        machines = [machine(1, "gear", states={"working": 0.4, "low_power": 0.6})]
+        power = [{"network": 1, "made_w": 30e6, "used_w": 40e6, "satisfaction": 0.9, "machines": 1},
+                 {"network": 2, "made_w": 9e6, "used_w": 1e6, "satisfaction": 0.7, "machines": 1}]
+        found = diagnose(survey(machines, power=power), book=BOOK)
+        leaf = find(found.causes[0], "power")
+        assert leaf.numbers["short_w"] == pytest.approx(10e6)
+        assert leaf.numbers["networks"][1]["short_w"] is None
+
+
+class TestRevisits:
+    def test_a_maker_met_again_through_its_users_is_not_called_a_loop(self) -> None:
+        machines = [machine(1, "smelt", states={"working": 0.2, "output_full": 0.8}),
+                    machine(2, "gear", 0.3, {"plate": 0.7})]
+        found = diagnose(survey(machines), book=BOOK)
+        all_kinds = {k for c in found.causes for k in kinds(c)}
+        assert "seen_above" in all_kinds and "cycle" not in all_kinds
+
+    def test_a_real_loop_is_still_one(self) -> None:
+        found = diagnose(survey([machine(1, "ping", 0.3, {"pong": 0.7}), machine(2, "pong", 0.3, {"ping": 0.7})]),
+                         book=BOOK)
+        assert "cycle" in kinds(found.causes[0])
+
+
+class TestSize:
+    def test_a_layered_chain_costs_nodes_in_step_with_its_groups_not_its_paths(self) -> None:
+        width, layers = 8, 10
+        recipes = {}
+        machines = []
+        for k in range(layers):
+            previous = ["ore"] if k == 0 else [f"i{k - 1}_{t}" for t in range(width)]
+            for j in range(width):
+                recipes[f"r{k}_{j}"] = {
+                    "ingredients": [{"name": name, "amount": 1} for name in previous],
+                    "results": [{"name": f"i{k}_{j}", "amount": 1}], "energy_required": 1}
+                machines.append(machine(k * width + j + 1, f"r{k}_{j}", 0.2, {name: 0.8 for name in previous}))
+        found = diagnose(survey(machines), book=RecipeBook(recipes, is_mined=lambda item: item == "ore"))
+        nodes = sum(1 for root in found.causes for _ in root.walk())
+        assert nodes <= 25 * len(machines)
+        # every group is expanded in full exactly once
+        expanded = [c.recipe for root in found.causes for c in root.walk() if c.kind == "low_output"]
+        assert len(expanded) == len(set(expanded)) == len(machines)
+
+
+class TestAreaLimits:
+    def test_with_an_area_no_rate_or_hours_are_read_from_the_surface_flow(self) -> None:
+        smelters = [machine(100 + i, "smelt", 0.5, {"ore": 0.5}) for i in range(4)]
+        drills = [drill(i, states={"working": 0.5, "no_minable_resources": 0.5}) for i in range(1, 3)]
+        found = diagnose(survey(smelters, miners=drills, fields=[field(amount=1000)], area=[[0, 0], [100, 100]],
+                                items={"ore": {"made": 50.0, "used": 50.0}}), book=BOOK)
+        node = find(found.causes[0], "field_depleting")
+        assert node.numbers["hours_left"] is None and node.numbers["rate_per_s"] is None
+        assert "not known" in node.text
+        assert any("no mining rate" in limit for limit in found.limits)
+
+    def test_with_an_area_the_drill_count_is_not_guessed_either(self) -> None:
+        smelters = [machine(100 + i, "smelt", 0.5, {"ore": 0.5}) for i in range(4)]
+        found = diagnose(survey(smelters, miners=[drill(i) for i in range(1, 5)], fields=[field(amount=9e9)],
+                                area=[[0, 0], [100, 100]], items={"ore": {"made": 50.0, "used": 50.0}}), book=BOOK)
+        node = find(found.causes[0], "too_few_drills")
+        assert node.numbers["machines_needed"] is None and node.numbers["per_drill_per_s"] is None
