@@ -47,7 +47,8 @@ position minus the origin is a blueprint position.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as _field
 from pathlib import Path
 
 WORKING = "working"
@@ -65,8 +66,8 @@ class Machine:
     direction: int = 0
     recipe: str | None = None
     crafting_speed: float = 1.0
-    states: dict[str, float] = field(default_factory=dict)
-    missing: dict[str, float] = field(default_factory=dict)
+    states: dict[str, float] = _field(default_factory=dict)
+    missing: dict[str, float] = _field(default_factory=dict)
     crafts_per_s: float = 0.0
 
     @property
@@ -81,7 +82,7 @@ class Miner:
     position: tuple[float, float]
     resource: str | None = None
     field: int | None = None
-    states: dict[str, float] = field(default_factory=dict)
+    states: dict[str, float] = _field(default_factory=dict)
     amount_left: float | None = None
 
     @property
