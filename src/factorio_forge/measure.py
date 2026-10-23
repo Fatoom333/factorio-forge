@@ -662,6 +662,7 @@ def _cmd_spec(args) -> int:
         notes: list[str] = []
         sources = sources_from(plan._sources(data, result.blocks), notes)
         sources += route_sources_from(result.routes, notes)
+        sources += [{k: v for k, v in f.items() if k != "id"} for f in plan._fluid_sources(data, result.blocks)]
         sources += [parse_fluid(text) for text in args.fluid or []]
         outputs = outputs_from(result.blocks, result.routes) + [parse_output(t) for t in args.output_ends or []]
         targets = [parse_target(t) for t in args.target or []] or targets_from(data.get("targets"))

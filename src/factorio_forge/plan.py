@@ -23,7 +23,8 @@ makes the next revision of the plan better.
       "entities": [{"name": "fast-transport-belt", "position": [-1, 3], "direction": 4}],
       "inputs": [{"at": [-1, 3], "items": ["iron-plate"]}],
       "sources": [{"id": "iron", "at": [-1, 3], "direction": 4, "items": ["iron-plate"], "rate": 7.5},
-                  {"block": 1, "port": 0, "items": ["copper-plate", "iron-plate"], "rate": 3}],
+                  {"block": 1, "port": 0, "items": ["copper-plate", "iron-plate"], "rate": 3},
+                  {"block": 2, "port": 0, "fluid": "water", "rate": 50}],  (a pipe in port: units/s; measuring only)
       "targets": [{"item": "battery", "per_second": 2}],   (optional: what is ordered; sizes the ports)
       "recipe_choices": {"battery": "battery"},            (optional, with targets: as in a request;
                                                             also machine_choices, tiers, effects, surface, boundary)
@@ -1007,7 +1008,7 @@ def _inputs(plan: dict) -> list[lanes.Feed]:
     return feeds
 
 
-_SOURCE_FIELDS = {"id", "at", "direction", "block", "port", "items", "rate"}
+_SOURCE_FIELDS = {"id", "at", "direction", "block", "port", "items", "rate", "fluid"}
 
 
 def _sources(plan: dict, built: list[BuiltBlock]) -> list[tuple[str, lanes.Feed, int | None]]:
@@ -1032,6 +1033,8 @@ def _sources(plan: dict, built: list[BuiltBlock]) -> list[tuple[str, lanes.Feed,
             raise PlanError(f"source {index}: id {name!r} is used twice")
         names.add(name)
         label = f"source {name!r}" if "id" in entry else name
+        if "fluid" in entry:
+            continue  # a pipe supply: _fluid_sources reads it
         direction = entry.get("direction")
         if direction is not None and (not _is_int(direction) or direction not in inspection.STEP):
             raise PlanError(f"{label}: direction must be 0, 4, 8 or 12, not {direction!r}")
@@ -1067,6 +1070,48 @@ def _sources(plan: dict, built: list[BuiltBlock]) -> list[tuple[str, lanes.Feed,
         tiles[tile] = label
         out.append((label, lanes.Feed(tile, (items[0], items[-1]), None if rate is None else float(rate)),
                     direction))
+    return out
+
+
+def _fluid_sources(plan: dict, built: list[BuiltBlock]) -> list[dict]:
+    """The plan's fluid supply: ``{"id", "at": [x, y], "fluid", "rate"}`` at the tile of a block's in pipe port.
+
+    A source with a ``fluid`` names the block and port it feeds, like a belt source does; there is no belt
+    to lay, the supply is the pipe the port ends in. ``rate`` is units per second.
+    """
+    raw = plan.get("sources") or []
+    out: list[dict] = []
+    if not isinstance(raw, list):
+        return out
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict) or "fluid" not in entry:
+            continue
+        name = entry.get("id", f"source {index}")
+        label = f"source {name!r}"
+        fluid = entry.get("fluid")
+        if not isinstance(fluid, str) or not fluid:
+            raise PlanError(f"{label}: fluid is the name of a fluid")
+        extra = set(entry) - {"id", "block", "port", "fluid", "rate"}
+        if extra:
+            raise PlanError(f"{label}: a fluid source has only block, port, fluid and rate, not {', '.join(sorted(extra))}")
+        b, j = entry.get("block"), entry.get("port")
+        if not (_is_int(b) and 0 <= b < len(built)):
+            raise PlanError(f"{label}: block {b!r} does not exist; the plan has {len(built)} block(s)")
+        ports = built[b].ports
+        if not (_is_int(j) and 0 <= j < len(ports)):
+            raise PlanError(f"{label}: block {b} has {len(ports)} port(s), not a port {j!r}")
+        port = ports[j]
+        if port["kind"] != "pipe" or port["io"] != "in":
+            raise PlanError(f"{label}: block {b} port {j} is a {port['io']!r} {port['kind']} port; "
+                            "a fluid source feeds an 'in' pipe port")
+        rate = entry.get("rate")
+        if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))
+                                 or not math.isfinite(rate) or rate < 0):
+            raise PlanError(f"{label}: rate is units per second, a number of at least 0")
+        item: dict = {"id": name, "at": [port["x"], port["y"]], "fluid": fluid}
+        if rate is not None:
+            item["rate"] = float(rate)
+        out.append(item)
     return out
 
 
