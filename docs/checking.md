@@ -371,8 +371,13 @@ each route that really ends at a free point. A route that merges `onto` a belt i
 not an output: the belt carries on, and emptying it there would starve what it
 feeds. Empty lanes are never written as an item, and a connection whose lanes are
 not one item each is left out with a note.
+A source may also be `{"block", "port", "fluid", "rate"}` (units per second) on
+an `in` pipe port: in a measuring run an infinity pipe on the port tile feeds it.
+It is refused where a connection ends at the port or another source feeds it, and
+`build` checks it like the belt sources. `chain` and `base --drafts` declare these
+for the fluids no stage of the chain makes.
 `--output-end X,Y[,ITEM[,DIR]]` adds an output end for a plan that places belts
-by hand, `--fluid X,Y,FLUID[,RATE]` a fluid source, `--target ITEM=RATE` replaces
+by hand, `--fluid X,Y,FLUID[,RATE]` a fluid source at a tile you placed a pipe on, `--target ITEM=RATE` replaces
 the plan's targets; `--warmup`, `--seconds` and `--speed` set the run (60 s, 120 s,
 game speed 10). A source's `rate` is items per second over both lanes, as in the
 plan; a source with no rate is fed as fast as the belt takes.

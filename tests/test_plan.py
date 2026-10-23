@@ -346,3 +346,43 @@ def two_ingredient_chain() -> tuple[tuple[str, str], tuple[str, str]]:
             if first and first != name:
                 return (first, machine_for(recipes.raw[first])), (name, machine_for(data))
     pytest.skip("the active data has no two-item recipe eating a one-item recipe's product")
+
+
+class TestFluidSources:
+    """A source that names a fluid feeds an in pipe port; a measuring run puts an infinity pipe there."""
+
+    @staticmethod
+    def built(*kinds):
+        from types import SimpleNamespace
+
+        ports = [{"index": i, "kind": k, "io": io, "x": i, "y": 2 * i} for i, (k, io) in enumerate(kinds)]
+        return [SimpleNamespace(index=0, ports=ports)]
+
+    def test_a_source_becomes_a_supply_at_the_port_tile(self) -> None:
+        data = {"sources": [{"id": "w", "block": 0, "port": 1, "fluid": "water", "rate": 50}]}
+        assert plan._fluid_sources(data, self.built(("belt", "in"), ("pipe", "in"))) == [
+            {"id": "w", "at": [1, 2], "fluid": "water", "rate": 50.0}]
+
+    @pytest.mark.parametrize("entry, words", [
+        ({"block": 0, "port": 0, "fluid": "water"}, "'in' pipe port"),
+        ({"block": 0, "port": 2, "fluid": "water"}, "'in' pipe port"),
+        ({"block": 0, "port": 1, "fluid": "water", "items": ["x"]}, "only block, port, fluid and rate"),
+        ({"block": 0, "port": 1, "fluid": "water", "at": [0, 0]}, "only block, port, fluid and rate"),
+        ({"block": 0, "port": 1, "fluid": "water", "rate": -1}, "rate"),
+        ({"block": 3, "port": 1, "fluid": "water"}, "does not exist"),
+    ])
+    def test_a_source_that_cannot_feed_its_port_is_refused(self, entry, words) -> None:
+        with pytest.raises(plan.PlanError, match=words):
+            plan._fluid_sources({"sources": [entry]}, self.built(("belt", "in"), ("pipe", "in"), ("pipe", "out")))
+
+    def test_a_port_a_connection_ends_at_is_not_also_a_source(self) -> None:
+        data = {"connections": [{"from": {"block": 1, "port": 0}, "to": {"block": 0, "port": 1}}],
+                "sources": [{"block": 0, "port": 1, "fluid": "water"}]}
+        with pytest.raises(plan.PlanError, match="connection already ends"):
+            plan._fluid_sources(data, self.built(("belt", "in"), ("pipe", "in")))
+
+    def test_two_sources_on_one_port_are_refused(self) -> None:
+        entry = {"block": 0, "port": 1, "fluid": "water"}
+        with pytest.raises(plan.PlanError, match="already fed"):
+            plan._fluid_sources({"sources": [dict(entry, id="a"), dict(entry, id="b")]},
+                                self.built(("belt", "in"), ("pipe", "in")))

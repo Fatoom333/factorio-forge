@@ -195,6 +195,15 @@ class TestTargetsAndSpec:
         with pytest.raises(measure.MeasureError):
             measure.build_spec("0eNq", sources=[], outputs=[{"at": [0, 0]}], targets=[], measure_s=0)
 
+    def test_a_plans_pipe_source_is_a_fluid_feed_without_an_id(self) -> None:
+        from factorio_forge import plan
+
+        data = {"sources": [{"id": "w", "block": 0, "port": 0, "fluid": "water", "rate": 4}]}
+        feeds = [{k: v for k, v in f.items() if k != "id"}
+                 for f in plan._fluid_sources(data, [block(0, [out_port(0, 3, 5, ["water"], kind="pipe", io="in")])])]
+        assert feeds == [{"at": [3, 5], "fluid": "water", "rate": 4.0}]
+        assert measure.build_spec("0eNq", sources=feeds, outputs=[{"at": [0, 0]}], targets=[])["sources"] == feeds
+
     def test_command_line_pieces(self) -> None:
         assert measure.parse_fluid("1,2,water,50") == {"at": [1, 2], "fluid": "water", "rate": 50.0}
         assert measure.parse_fluid("1,2,water") == {"at": [1, 2], "fluid": "water"}

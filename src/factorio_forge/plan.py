@@ -1083,6 +1083,9 @@ def _fluid_sources(plan: dict, built: list[BuiltBlock]) -> list[dict]:
     out: list[dict] = []
     if not isinstance(raw, list):
         return out
+    reached = {(e.get("block"), e.get("port")) for conn in _flat(plan.get("connections"))
+               for e in _flat(conn.get("to")) if "port" in e}
+    fed: dict[tuple, str] = {}
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict) or "fluid" not in entry:
             continue
@@ -1104,6 +1107,12 @@ def _fluid_sources(plan: dict, built: list[BuiltBlock]) -> list[dict]:
         if port["kind"] != "pipe" or port["io"] != "in":
             raise PlanError(f"{label}: block {b} port {j} is a {port['io']!r} {port['kind']} port; "
                             "a fluid source feeds an 'in' pipe port")
+        if (b, j) in reached:
+            raise PlanError(f"{label}: a connection already ends at block {b} port {j}; "
+                            "a source and a pipe cannot both feed it")
+        if (b, j) in fed:
+            raise PlanError(f"{label}: block {b} port {j} is already fed by {fed[(b, j)]}")
+        fed[(b, j)] = label
         rate = entry.get("rate")
         if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))
                                  or not math.isfinite(rate) or rate < 0):
@@ -1120,6 +1129,7 @@ def _check_lanes(plan: dict, built: list[BuiltBlock], heads: list[tuple[int, int
     """Trace every belt lane of the build, fill in what the report says arrives, and check it."""
     inputs = _inputs(plan)
     sources = _sources(plan, built)
+    _fluid_sources(plan, built)  # checked here so a bad pipe supply fails the build, not only a measuring spec
     declared_tiles = {f.tile for f in inputs} | {f.tile for _, f, _ in sources}
     if len(declared_tiles) < len(inputs) + len(sources):
         clash = next(t for t in declared_tiles if sum(f.tile == t for f in inputs)
