@@ -328,13 +328,17 @@ def _folder_name(item: str, taken: set[str]) -> str:
     return name
 
 
-def declare_fluid_sources(plan: dict, stages: list) -> int:
+def declare_fluid_sources(plan: dict, stages: list, boundary=()) -> int:
     """Declare as plan sources the fluids that come into the chain from outside; returns how many.
 
-    The chain declares its belt feeds itself; a pipe in port nothing in the chain makes the fluid for is left
-    to the player there. Here each such port becomes a source with the rate the stage draws, so a measuring
-    run feeds it. Several ports of one stage that take the same fluid share its rate evenly.
+    The chain declares its belt feeds itself; a pipe in port that takes a fluid no other stage makes (the
+    boundary's fluids count as made outside) is left to the player there. Here each such port becomes a source
+    with the rate the stage draws through it, so a measuring run feeds it. A fluid the chain makes itself is never
+    declared, even when its pipe was left out: that port stays unfed and the measurement shows the shortage.
     """
+    from . import chain
+
+    made = chain._producers(stages, set(boundary))
     reached = set()
     for conn in plan.get("connections") or []:
         for end in ([conn.get("to")] if isinstance(conn.get("to"), dict) else conn.get("to") or []):
@@ -347,8 +351,9 @@ def declare_fluid_sources(plan: dict, stages: list) -> int:
             if port.io != "in" or port.kind != "pipe" or (stage.index, port.index) in reached:
                 continue
             for fluid in sorted(port.items):
-                same = [p for p in stage.ports if p.io == "in" and p.kind == "pipe" and fluid in p.items]
-                rate = stage.line.inputs.get(fluid, 0.0) / max(1, len(same))
+                if made.get(fluid) not in (None, stage):
+                    continue
+                rate = stage.line.inputs.get(fluid, 0.0) * chain._share(stage, port, fluid, "pipe")
                 sources.append({"id": f"{fluid}-in-{stage.index}-{port.index}", "block": stage.index,
                                 "port": port.index, "fluid": fluid, "rate": math.ceil(rate * 1000) / 1000})
                 added += 1
@@ -361,7 +366,7 @@ def write_draft(reviewed, folder: Path) -> dict:
 
     try:
         drafted, attempts = chain.build_with_retries(reviewed.spec, reviewed=reviewed)
-        declare_fluid_sources(drafted.plan, drafted.stages)
+        declare_fluid_sources(drafted.plan, drafted.stages, reviewed.spec.boundary)
         folder.mkdir(parents=True, exist_ok=True)
         plan_path = folder / "plan.json"
         plan_path.write_text(json.dumps(drafted.plan, indent=1, ensure_ascii=False), encoding="utf-8")

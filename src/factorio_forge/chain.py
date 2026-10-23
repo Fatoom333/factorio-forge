@@ -308,9 +308,9 @@ def _producers(stages: list[Stage], boundary: set[str]) -> dict[str, Stage]:
     return made
 
 
-def _share(stage: Stage, port: Port, item: str) -> float:
+def _share(stage: Stage, port: Port, item: str, kind: str = "belt") -> float:
     """What part of the stage's demand for `item` this port carries (mirrored rows split it)."""
-    same = stage.ports_where("in", item, "belt")
+    same = stage.ports_where("in", item, kind)
     total = sum(p.rate for p in same)
     return port.rate / total if total else 1.0 / max(1, len(same))
 

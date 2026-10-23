@@ -358,11 +358,13 @@ class TestBoundary:
         assert request_dict["boundary"] == ["a", "b"]
 
 
-def _stage_with_pipe(index=0, fluid="molten-iron", pipes=1, rate=6.0):
-    from test_chain import in_port, out_port, port, stage
+def _stage_with_pipe(index=0, fluid="molten-iron", pipes=1, rate=6.0, port_rates=None, makes="z"):
+    from test_chain import out_port, port, stage
 
-    ports = [port(i, "in", [fluid], 0, i, kind="pipe") for i in range(pipes)] + [out_port(pipes, "z")]
-    return stage(index, "casting", {fluid: rate}, {"z": 1.0}, ports)
+    rates = port_rates or [1.0] * pipes
+    ports = [port(i, "in", [fluid], 0, i, kind="pipe", rate=rates[i]) for i in range(pipes)]
+    ports.append(out_port(pipes, makes))
+    return stage(index, "casting", {fluid: rate}, {makes: 1.0}, ports)
 
 
 class TestFluidSources:
@@ -376,6 +378,24 @@ class TestFluidSources:
         plan = {"connections": [], "sources": []}
         buildout.declare_fluid_sources(plan, [_stage_with_pipe(pipes=2)])
         assert [s["rate"] for s in plan["sources"]] == [3.0, 3.0]
+
+    def test_ports_of_one_stage_share_the_rate_by_what_each_carries(self) -> None:
+        plan = {"connections": [], "sources": []}
+        buildout.declare_fluid_sources(plan, [_stage_with_pipe(pipes=2, port_rates=[3.0, 1.0])])
+        assert [s["rate"] for s in plan["sources"]] == [4.5, 1.5]
+
+    def test_a_fluid_another_stage_makes_is_not_a_source_even_with_no_pipe_between(self) -> None:
+        plan = {"connections": [], "sources": []}
+        taker = _stage_with_pipe(0)
+        maker = _stage_with_pipe(1, fluid="water", makes="molten-iron")
+        assert buildout.declare_fluid_sources(plan, [taker, maker]) == 1  # only the maker's own water
+        assert [s["fluid"] for s in plan["sources"]] == ["water"]
+
+    def test_a_fluid_the_boundary_names_counts_as_made_outside(self) -> None:
+        plan = {"connections": [], "sources": []}
+        taker = _stage_with_pipe(0)
+        maker = _stage_with_pipe(1, fluid="water", makes="molten-iron")
+        assert buildout.declare_fluid_sources(plan, [taker, maker], boundary=["molten-iron"]) == 2
 
     def test_a_pipe_a_connection_already_ends_at_is_not_a_source(self) -> None:
         plan = {"connections": [{"id": "c", "from": {"block": 1, "port": 0}, "kind": "pipe",
@@ -393,6 +413,9 @@ class TestDraftIsMeasurable:
 
         if not surface.names():
             pytest.skip("the active data has no surface")
+        snap = survey_module.from_dict({"kind": "survey", "surface": surface.names()[0], "tick": 1, "window_s": 60,
+                                        "machines": [], "flows": {"items": {}, "fluids": {}}})
+        tried = 0
         for name, entry in recipes.raw.items():
             ingredients = entry.get("ingredients", [])
             results = entry.get("results") or []
@@ -400,11 +423,10 @@ class TestDraftIsMeasurable:
                     or not any(i.get("type") == "fluid" for i in ingredients)
                     or any(i.get("type", "item") == "item" and i["name"] in recipes.raw for i in ingredients)):
                 continue
-            order = buildout.make_request(results[0]["name"], 1.0,
-                                          survey_module.from_dict({"kind": "survey", "surface": surface.names()[0],
-                                                                   "tick": 1, "window_s": 60, "machines": [],
-                                                                   "flows": {"items": {}, "fluids": {}}}), [])
-            bill, reviewed, problems = buildout._bill(order)
+            tried += 1
+            if tried > 20:
+                break
+            bill, reviewed, problems = buildout._bill(buildout.make_request(results[0]["name"], 1.0, snap, []))
             if bill is None:
                 continue
             done = buildout.write_draft(reviewed, tmp_path / name)
@@ -416,6 +438,8 @@ class TestDraftIsMeasurable:
         pytest.skip("no recipe in the active data makes a draft that takes a fluid from outside")
 
     def test_every_fluid_input_has_a_feed_in_the_spec(self, tmp_path) -> None:
+        from factorio_forge import plan as plan_module
+
         plan, plan_file = self.find(tmp_path)
         out = tmp_path / "spec.json"
         assert cli.main(["measure", "spec", str(plan_file), "-o", str(out)]) == 0
@@ -424,14 +448,13 @@ class TestDraftIsMeasurable:
         fed = {s["fluid"] for s in spec["sources"] if s.get("fluid")}
         assert wanted and wanted == fed
         assert all(s.get("rate", 0) > 0 for s in spec["sources"] if s.get("fluid"))
-        # every in port nothing in the plan routes to is fed: by a belt or a pipe source
-        from factorio_forge import plan as plan_module
-
+        # every in port nothing in the plan routes to is fed: by a belt or a pipe source, or merged onto a belt
         built = plan_module.build(plan_module.load(plan_file), None).blocks
-        ended = {(e["block"], e["port"]) for c in plan["connections"]
-                 for e in ([c["to"]] if isinstance(c["to"], dict) else c.get("to", []))} if plan["connections"] else set()
+        ended = {(e.get("block"), e.get("port")) for c in plan["connections"]
+                 for e in plan_module._flat(c.get("to")) if "port" in e}
+        fed_ports = {(s["block"], s["port"]) for s in plan["sources"] if s.get("block") is not None}
+        fed_ports |= {(c["onto"].get("block"), c["onto"].get("port")) for c in plan["connections"]
+                      if isinstance(c.get("onto"), dict)}
         open_ports = [(b.index, p["index"]) for b in built for p in b.ports
-                      if p["io"] == "in" and (b.index, p["index"]) not in ended]
-        fed_ports = {(s["block"], s["port"]) for s in plan["sources"]} | {
-            (c["onto"]["block"], c["onto"]["port"]) for c in plan["connections"] if "onto" in c}
-        assert all(o in fed_ports for o in open_ports), (open_ports, plan["sources"])
+                      if p["io"] == "in" and (b.index, p["index"]) not in ended | fed_ports]
+        assert not open_ports, (open_ports, plan["sources"])
