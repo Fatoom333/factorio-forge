@@ -50,8 +50,10 @@ researched at the end of the window. ``unmined`` is, for each resource the
 survey's drills do not mine, the nearest patch to the base the companion found
 within its search radius: one of its tiles, its distance from the edge of
 ``bounds``, and its amount (a lower bound when ``truncated``). ``enemies``
-counts enemy spawners and worms (turrets of an enemy force) near a patch;
-absent means none were looked for, ``{}`` means none were found.
+counts enemy spawners, worms (turrets of an enemy force) and demolishers
+(units guarding a territory that reaches the patch) near a patch; absent means
+none were looked for. The companion writes zero counts (the game cannot write
+an empty JSON object); they are dropped on reading, so ``{}`` means none found.
 ``states`` maps a state to the share of the window the machine spent in it;
 the shares add up to about 1. The states are the game's entity statuses in
 snake case, as ``defines.entity_status`` names them: ``working``,
@@ -219,7 +221,7 @@ def _enemies(value) -> dict[str, int] | None:
         return None
     if not isinstance(value, dict):
         raise SurveyError(f"enemies maps kinds to counts, not {value!r}")
-    return {str(k): int(v) for k, v in value.items()}
+    return {str(k): int(v) for k, v in value.items() if int(v)}
 
 
 def _box(value, what: str):

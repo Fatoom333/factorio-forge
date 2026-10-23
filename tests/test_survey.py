@@ -78,3 +78,9 @@ def test_reads_labs_bounds_and_unmined_patches():
 def test_area_without_bounds_is_read_as_asked_for():
     read = survey.from_dict(_minimal(area=[[0, 0], [5, 5]]))
     assert not read.whole_base and read.bounds == read.area
+
+
+def test_zero_enemy_counts_mean_none_found():
+    data = _minimal(unmined=[{"resource": "stone", "position": [1, 1], "distance": 0,
+                              "enemies": {"spawners": 0, "worms": 0, "demolishers": 0}}])
+    assert survey.from_dict(data).unmined[0].enemies == {}
