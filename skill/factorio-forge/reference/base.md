@@ -18,7 +18,7 @@ build and writes `folder/<item>/plan.json` and the blueprint.
 The report has: the verdict line, the causes, `build`, `fix`, `works well`
 and `limits`.
 
-- A cause is a chain, biggest loss first. Each indented line is the cause of
+- A cause is a chain; causes are ranked by the idle machine time they explain (below). Each indented line is the cause of
   the line above: a group makes less than its machines could -> it waits for an
   item -> who makes that -> ... down to the first cause. Read the last line of
   each chain: that is what to act on. The numbers on it are rates per second,
@@ -30,6 +30,25 @@ and `limits`.
   with "made elsewhere" means the item comes from outside: ask the player.
 - A chain line "already shown above" is not a loop and not a new cause: look
   where it was first shown. Only "the recipes feed each other" is a real loop.
+- Order: ranked by idle machine time, in machines: the idle share of the
+  machines of every group the cause shows or reaches, a full output not
+  counted (`impact_idle_machines` in the JSON, "explains N machine(s) of idle
+  time" on the line). Never by units per second: steam in thousands a second
+  is not bigger than a missing ore. A group two causes reach counts in both.
+- "possible ... is a lower bound": the group made more than the possible rate
+  because modules and researched productivity are not counted. Say that, not
+  "it does more than it can".
+- Science packs at a full output: with labs in the survey, labs working means
+  research takes what it needs (not a problem); labs missing packs lists the
+  packs whose makers are not held back (the survey does not say which pack is
+  missing); no research in progress is said as such. Without labs in the
+  survey (an older file) it is not a cause: say the labs were not surveyed.
+- Machines that make buildings (a mall) are not demand: their waiting adds no
+  shortfall and no order. They are listed once in the limits; idle is normal.
+- A mined resource with no drill and no field: the line names the nearest
+  patch, its distance, amount and the enemies near it. Spawners or worms
+  counted: tell the player to clear them first, not to just connect a field.
+  "Not looked at" is not "none".
 - Power: a watt figure appears only when the network's machines want more than
   it makes. Otherwise there is a share of lost machine time and a satisfaction
   value, and the watts are unknown: say so, do not compute them.

@@ -132,12 +132,45 @@ class TestChains:
         assert len(found.causes) == 1  # one half of the loop is enough
         assert "cycle" in kinds(found.causes[0])
 
-    def test_causes_come_biggest_loss_first(self) -> None:
-        machines = [machine(1, "panel", 0.5, {"gear": 0.5}), machine(2, "widget", 0.5, {"gizmo": 0.5}, speed=4.0)]
+    def test_causes_come_in_order_of_idle_machine_time_not_of_units(self) -> None:
+        # steam is counted in hundreds per second, a gear in single ones; one boiler half idle is a small
+        # cause next to four gear makers that idle four fifths of the time.
+        recipes = {**RECIPES, "boil": {"ingredients": [{"name": "water", "amount": 1}],
+                                       "results": [{"name": "steam", "amount": 600}], "energy_required": 1}}
+        machines = [machine(1, "boil", 0.5, {"water": 0.5})]
+        machines += [machine(10 + i, "gear", 0.2, {"plate": 0.8}) for i in range(4)]
+        found = diagnose(survey(machines), book=RecipeBook(recipes))
+        assert [c.recipe for c in found.causes] == ["gear", "boil"]
+        gear, boil = found.causes
+        assert boil.lost_per_s > 10 * gear.lost_per_s  # by units the fluid would come first
+        assert gear.numbers["impact_idle_machines"] == pytest.approx(3.2)
+        assert boil.numbers["impact_idle_machines"] == pytest.approx(0.5)
+        assert "machine(s) of idle time" in gear.text
+
+    def test_the_idle_time_is_summed_down_the_tree(self) -> None:
+        machines = [machine(1, "panel", 0.5, {"gear": 0.5})]
+        machines += [machine(10 + i, "gear", 0.5, {"plate": 0.5}) for i in range(2)]
         found = diagnose(survey(machines), book=BOOK)
-        lost = [c.lost_per_s for c in found.causes]
-        assert lost == sorted(lost, reverse=True) and len(lost) == 2
-        assert found.causes[0].recipe == "widget"  # 2 widgets/s lost against 0.05 panels/s
+        assert [c.recipe for c in found.causes] == ["panel"]
+        root = found.causes[0]
+        assert root.numbers["impact_idle_machines"] == pytest.approx(0.5 + 2 * 0.5)
+        assert find(root, "low_output").numbers["explains_idle_machines"] == pytest.approx(1.5)
+
+    def test_a_full_output_is_not_idle_time_for_a_shortage(self) -> None:
+        full = {"working": 0.2, "output_full": 0.8}
+        found = diagnose(survey([machine(1, "gear", states=full), machine(2, "panel", 0.2, {"gear": 0.8})]),
+                         book=BOOK)
+        gear = next(c for root in found.causes for c in root.walk() if c.recipe == "gear" and c.kind == "low_output")
+        assert gear.numbers["idle_machines"] == pytest.approx(0.0)
+        assert gear.numbers["blocked_machines"] == pytest.approx(0.8)
+
+    def test_more_made_than_possible_is_said_to_be_a_lower_bound(self) -> None:
+        m = machine(1, "gear", 0.8, {"plate": 0.2})
+        m["crafts_per_s"] = 2.6  # a gear takes 0.5 s: 2 a second is all a speed-1 machine can do
+        found = diagnose(survey([m]), book=BOOK)
+        node = found.causes[0]
+        assert node.numbers["possible_is_lower_bound"] is True
+        assert "lower bound" in node.text and "made of" not in node.text
 
     def test_a_recipe_the_data_lacks_is_skipped_and_said(self) -> None:
         found = diagnose(survey([machine(1, "unheard-of", 0.1)]), book=BOOK)
@@ -464,3 +497,174 @@ class TestAreaLimits:
                                 area=[[0, 0], [100, 100]], items={"ore": {"made": 50.0, "used": 50.0}}), book=BOOK)
         node = find(found.causes[0], "too_few_drills")
         assert node.numbers["machines_needed"] is None and node.numbers["per_drill_per_s"] is None
+
+
+# --------------------------------------------------------------------------
+# machines that make buildings, labs, whole-base surveys, patches nobody mines
+# --------------------------------------------------------------------------
+
+MALL_RECIPES = {
+    **RECIPES,
+    "carbide": {"ingredients": [{"name": "ore", "amount": 1}], "results": [{"name": "carbide", "amount": 1}],
+                "energy_required": 1},
+    "make-foundry": {"ingredients": [{"name": "carbide", "amount": 20}],
+                     "results": [{"name": "foundry-item", "amount": 1}], "energy_required": 1},
+    "red": {"ingredients": [{"name": "plate", "amount": 1}], "results": [{"name": "red-pack", "amount": 1}],
+            "energy_required": 5},
+    "green": {"ingredients": [{"name": "plate", "amount": 1}], "results": [{"name": "green-pack", "amount": 1}],
+              "energy_required": 5},
+    "make-belt": {"ingredients": [{"name": "plate", "amount": 1}], "results": [{"name": "belt", "amount": 1}],
+                  "energy_required": 1},
+    "needs-belt": {"ingredients": [{"name": "belt", "amount": 1}], "results": [{"name": "gadget", "amount": 1}],
+                   "energy_required": 1},
+}
+
+
+def mall_book(**extra) -> RecipeBook:
+    return RecipeBook(MALL_RECIPES, is_mined=lambda item: item in ("ore", "tungsten"),
+                      is_building=lambda item: item in ("foundry-item", "belt"), **extra)
+
+
+class TestBuildings:
+    def survey(self):
+        makers = [machine(100 + i, "carbide", 1.0) for i in range(3)]
+        mall = [machine(1, "make-foundry", 0.1, {"carbide": 0.9})]
+        return survey(makers + mall, items={"carbide": {"made": 3.0, "used": 3.0}})
+
+    def test_machines_that_make_buildings_raise_no_shortfall(self) -> None:
+        found = diagnose(self.survey(), book=mall_book())
+        assert found.causes == [] and found.shortfalls == []
+        assert not any(g["recipe"] == "make-foundry" for g in found.good)
+
+    def test_without_the_building_flag_the_same_waiting_would_order_more_of_the_ingredient(self) -> None:
+        found = diagnose(self.survey(), book=RecipeBook(MALL_RECIPES, is_mined=lambda item: item == "ore"))
+        assert [s.item for s in found.shortfalls] == ["carbide"]
+
+    def test_the_buildings_are_listed_once_as_a_fact(self) -> None:
+        found = diagnose(self.survey(), book=mall_book())
+        facts = [limit for limit in found.limits if "make buildings" in limit]
+        assert len(facts) == 1 and "make-foundry" in facts[0] and "1 machine(s)" in facts[0]
+
+    def test_a_full_output_whose_only_user_makes_buildings_is_normal(self) -> None:
+        makers = [machine(100 + i, "carbide", states={"working": 0.2, "output_full": 0.8}) for i in range(3)]
+        found = diagnose(survey(makers + [machine(1, "make-foundry", 0.1, {"carbide": 0.9})]), book=mall_book())
+        assert found.causes == []
+
+    def test_a_building_that_is_also_an_ingredient_still_has_its_makers(self) -> None:
+        machines = [machine(1, "needs-belt", 0.3, {"belt": 0.7}), machine(2, "make-belt", 0.5, {"plate": 0.5})]
+        found = diagnose(survey(machines), book=mall_book())
+        assert not any(c.kind == "nobody_makes" for r in found.causes for c in r.walk())
+
+
+def lab(unit, **states):
+    return {"unit": unit, "name": "lab", "position": [200 + unit, 0], "states": states}
+
+
+class TestLabs:
+    PACKS = frozenset({"red-pack", "green-pack"})
+
+    def book(self):
+        return RecipeBook(MALL_RECIPES, lab_inputs=self.PACKS, is_mined=lambda item: item == "ore")
+
+    def red(self):
+        return [machine(i, "red", states={"working": 0.3, "output_full": 0.7}) for i in range(1, 4)]
+
+    def test_labs_that_work_make_a_full_pack_output_no_cause(self) -> None:
+        found = diagnose(survey(self.red(), research="logistics",
+                                labs=[lab(1, working=0.8, no_research_in_progress=0.2),
+                                      lab(2, working=0.9, missing_science_packs=0.1)]), book=self.book())
+        assert found.causes == []
+        entry = next(g for g in found.good if g["recipe"] == "research")
+        assert entry["machines"] == 2 and entry["working"] == pytest.approx(0.85)
+
+    def test_without_labs_in_the_survey_it_is_not_a_cause_and_the_limit_says_so(self) -> None:
+        found = diagnose(survey(self.red()), book=self.book())
+        assert found.causes == []
+        assert any("Labs were not surveyed" in limit for limit in found.limits)
+
+    def test_labs_with_no_research_are_told_so(self) -> None:
+        found = diagnose(survey(self.red(), labs=[lab(1, no_research_in_progress=1.0)]), book=self.book())
+        node = find(found.causes[0], "no_research")
+        assert "no research is in progress" in node.text
+
+    def test_labs_short_of_a_pack_make_that_pack_a_real_shortfall(self) -> None:
+        greens = [machine(20 + i, "green", 0.4, {"plate": 0.6}) for i in range(2)]
+        plates = [machine(30 + i, "smelt", 1.0) for i in range(3)]
+        short = dict(working=0.4, missing_science_packs=0.5, no_research_in_progress=0.1)
+        found = diagnose(survey(
+            self.red() + greens + plates, labs=[lab(1, **short), lab(2, **short)], research="logistics",
+            items={"red-pack": {"made": 0.6, "used": 0.6}, "green-pack": {"made": 0.3, "used": 0.3},
+                   "plate": {"made": 3.0, "used": 3.0}}), book=self.book())
+        root = next(c for c in found.causes if c.numbers.get("consumer") == "labs")
+        assert root.numbers["backed_up_packs"] == ["red-pack"]
+        assert root.numbers["candidates"] == ["green-pack"]
+        assert not any(c.recipe == "red" for c in found.causes)  # the held-back pack is not the fault
+        assert any(c.kind == "too_few" or c.kind == "nobody_makes" for c in root.walk())
+        assert "plate" in [s.item for s in found.shortfalls]
+
+    def test_labs_that_miss_packs_while_every_pack_is_held_back_point_at_the_way_to_the_labs(self) -> None:
+        found = diagnose(survey(self.red(), research="logistics",
+                                labs=[lab(1, working=0.4, missing_science_packs=0.6)]), book=self.book())
+        root = next(c for c in found.causes if c.numbers.get("consumer") == "labs")
+        assert root.numbers["candidates"] == [] and "is the limit" in root.text
+
+
+class TestWholeBase:
+    def run(self, **extra):
+        smelters = [machine(100 + i, "smelt", 0.5, {"ore": 0.5}) for i in range(4)]
+        drills = [drill(i, states={"working": 0.5, "no_minable_resources": 0.5}) for i in range(1, 3)]
+        return diagnose(survey(smelters, miners=drills, fields=[field(amount=1000)],
+                               items={"ore": {"made": 50.0, "used": 50.0}}, **extra), book=BOOK)
+
+    def test_a_whole_base_survey_with_bounds_gives_rates_and_hours(self) -> None:
+        found = self.run(bounds=[[0, 0], [100, 100]])
+        node = find(found.causes[0], "field_depleting")
+        assert node.numbers["hours_left"] is not None and node.numbers["rate_per_s"] == pytest.approx(50.0)
+        assert not any("Only the area" in limit for limit in found.limits)
+
+    def test_a_real_area_keeps_the_limit_text(self) -> None:
+        found = self.run(area=[[0, 0], [100, 100]], bounds=[[0, 0], [100, 100]])
+        assert any("Only the area" in limit for limit in found.limits)
+
+
+class TestUnmined:
+    RECIPES = {"widget": {"ingredients": [{"name": "tungsten", "amount": 1}],
+                          "results": [{"name": "widget", "amount": 1}], "energy_required": 1}}
+
+    def run(self, unmined, fields=()):
+        data = survey([machine(1, "widget", 0.2, {"tungsten": 0.8})], fields=list(fields), unmined=unmined)
+        return diagnose(data, book=RecipeBook(self.RECIPES, is_mined=lambda item: item == "tungsten"))
+
+    def patch(self, enemies, distance=310.0):
+        return {"resource": "tungsten", "position": [500, -20], "distance": distance, "amount": 900000,
+                "truncated": False, "enemies": enemies}
+
+    def test_a_patch_with_worms_says_to_clear_the_enemies_first(self) -> None:
+        found = self.run([self.patch({"spawners": 0, "worms": 14}), self.patch({"worms": 0}, distance=900.0)])
+        leaf = find(found.causes[0], "no_field")
+        assert "310 tiles" in leaf.text and "14 worms" in leaf.text and "clear the enemies first" in leaf.text
+        assert leaf.numbers["clear_enemies_first"] is True and leaf.numbers["patch"]["position"] == [500, -20]
+        assert "clear the enemies first" in found.shortfalls[0].note
+
+    def test_a_patch_without_enemies_says_none_were_found(self) -> None:
+        leaf = find(self.run([self.patch({})]).causes[0], "no_field")
+        assert "no enemies found" in leaf.text and leaf.numbers["clear_enemies_first"] is False
+
+    def test_enemies_not_looked_for_are_not_called_none(self) -> None:
+        leaf = find(self.run([self.patch(None)]).causes[0], "no_field")
+        assert "not looked at" in leaf.text
+
+    def test_a_resource_missing_from_a_survey_that_lists_patches_was_not_found(self) -> None:
+        other = {**self.patch({}), "resource": "coal"}
+        leaf = find(self.run([other]).causes[0], "no_field")
+        assert "search radius" in leaf.text and leaf.numbers["patch"] is None
+
+    def test_an_old_survey_without_patches_degrades_gracefully(self) -> None:
+        leaf = find(self.run([]).causes[0], "no_field")
+        assert "older survey file" in leaf.text
+
+    def test_fields_with_enemies_are_a_fact(self) -> None:
+        f = {**field(fid=7, drills=0, resource="tungsten"), "enemies": {"spawners": 2, "worms": 0}}
+        found = self.run([], fields=[f])
+        assert any("Enemies near fields" in limit and "2 spawners" in limit for limit in found.limits)
+        assert "clear the enemies first" in find(found.causes[0], "no_drills").text

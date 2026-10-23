@@ -30,7 +30,7 @@ once, at the item.
 ```
 2 recipe group(s) work well; 3 problem(s), the biggest: ...
 
-what holds the base back (biggest loss first):
+what holds the base back (most idle machine time first):
  1. target solar-panel: 0.5/s wanted, 0.112/s made, short 0.388/s
     -> solar-panel: 0.112/s solar-panel made of 0.45/s possible (6 x assembling-machine-2, working 25% of the time)
         -> solar-panel waits for steel-plate: short 1.57/s, 70% of the time (0.315/s of solar-panel lost)
@@ -44,8 +44,8 @@ limits of this reading:
 **Verdict line.** How many recipe groups work well, how many problems, the
 biggest one.
 
-**What holds the base back.** One numbered entry per problem, biggest loss
-first. Under it, indented, the chain down to the first cause: each line is the
+**What holds the base back.** One numbered entry per problem, the one that
+explains the most idle machine time first (see Order below). Under it, indented, the chain down to the first cause: each line is the
 cause of the line above it.
 
 - *made X of Y possible* -- a group of machines on one recipe. Y is what they
@@ -80,6 +80,39 @@ cause of the line above it.
   it is not a loop, only not repeated.
 - A machine that waits is followed by what the snapshot says was missing,
   whatever its state is called (items, fluids, science packs).
+
+- *possible is a lower bound* -- the group made more than the rate counted as
+  possible. Modules and researched productivity are not in the snapshot, so
+  the possible rate is a floor; the made rate is what was seen.
+- *labs ... fed*, *no research is in progress*, *survey has no labs* -- a
+  science pack held at a full output is judged by the labs, when the survey
+  has them. Labs mostly working: research takes what it needs, a full output
+  is normal and the group is not a problem (it is listed under works well as
+  "research"). Labs waiting for packs: the pack held back is not the one they
+  lack; the packs whose makers are not held back by a full output are listed
+  under "labs wait for science packs" and traced like any other shortage (the
+  survey does not say which pack a lab misses). No research in progress: said
+  so. No labs in the survey (an older file): said so in the limits, no cause.
+- *nearest patch ... enemies* -- a resource that is mined but has no drill and
+  no field: the nearest patch the survey found, its distance and amount, and
+  the enemies counted near it (spawners and worms: clear them first; none
+  found; or not looked at). A resource in no patch the survey searched is said
+  to be outside its search radius. Fields with enemies near them are listed in
+  the limits.
+
+**Order.** Entries are ranked by the machine time they leave idle, in machines
+(not by units per second, so a fluid made in thousands per second does not
+outrank a missing ore): for each entry, the idle share of the machines of every
+group it shows or reaches below it, summed (idle for a full output is not
+counted: that idleness is caused further down). It is in each entry's
+`numbers` (`impact_idle_machines`, and `explains_idle_machines` on every line).
+A group that two entries reach counts in both.
+
+**Machines that make buildings** are not demand. A machine whose product is
+a building (a foundry making foundries, a drill, a belt) waits and fills its
+output whenever the base has enough of it; that raises no shortfall and adds
+nothing to what its ingredients are wanted at. They are listed once in the
+limits. A building that is also an ingredient is still known as made by them.
 
 Problems already explained by a chain are not listed again as separate
 entries. With `--target item=rate`, a rate wanted (`=60/m` for per minute),
@@ -120,7 +153,8 @@ drills whose ore is not carried off.
 - A cycle longer than the window (oil, rockets) may be seen in part.
 - Which power network a machine is on, and how many watts are missing when
   the networks' wanted watts do not exceed what they make.
-- With an area surveyed, production flows still cover the whole surface, so no
+- With an area surveyed (`area` set in the file; a whole-base survey has it
+  null and gets rates and hours), production flows still cover the whole surface, so no
   mining rate, drill count per field or hours left is given for fields.
 
 `-o folder` writes `base.json` (the same structure as `--json`) and the drafts.
