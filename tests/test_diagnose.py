@@ -736,3 +736,14 @@ class TestUnmined:
         found = self.run([], fields=[f])
         assert any("Enemies near fields" in limit and "2 spawners" in limit for limit in found.limits)
         assert "clear the enemies first" in find(found.causes[0], "no_drills").text
+
+    def test_the_build_list_names_the_patch_and_its_enemies(self) -> None:
+        from factorio_forge.buildout import _drill_text
+
+        guarded = self.run([self.patch({"worms": 14})]).shortfalls[0]
+        assert "(500, -20)" in _drill_text(guarded) and "14 worms" in _drill_text(guarded)
+        assert "clear them" in _drill_text(guarded) and "find one" not in _drill_text(guarded)
+        free = self.run([self.patch({})]).shortfalls[0]
+        assert "put drills on it" in _drill_text(free)
+        lost = self.run([]).shortfalls[0]
+        assert lost.patch is None and "find one and connect it" in _drill_text(lost)

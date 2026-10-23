@@ -192,6 +192,7 @@ class Shortfall:
     machines_needed: int | None = None
     made_elsewhere: float = 0.0
     note: str = ""
+    patch: dict | None = None
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -908,7 +909,7 @@ class _Walk:
                          f"{u.distance:.0f} tiles from the base, {amount} in it; {_enemy_text(u.enemies)}")
                 return [Cause(
                     "no_field",
-                    f"{item}: it is mined, but the base has no drill and no field of it; {where}; "
+                    f"{item}: nothing at the base mines it; {where}; "
                     f"{_n(short)}/s is wanted",
                     item=item, short_per_s=short,
                     numbers={"consumer": consumer, "note": f"no drill and no field; {where}",
@@ -920,7 +921,7 @@ class _Walk:
                            "survey file that did not look)")
             return [Cause(
                 "no_field",
-                f"{item}: it is mined, but the snapshot has no field of it and no drill on one; {looked}; "
+                f"{item}: nothing at the base mines it and the snapshot has no field of it; {looked}; "
                 f"{_n(short)}/s is wanted",
                 item=item, short_per_s=short,
                 numbers={"consumer": consumer, "note": f"no field of it in the snapshot; {looked}",
@@ -1245,6 +1246,8 @@ def _shortfalls(walk: _Walk) -> list[Shortfall]:
                 entry.note = node.numbers.get("note") or "a field is known but nothing mines it"
             elif node.kind == "no_field":
                 entry.note = node.numbers.get("note") or "no field of it in the snapshot"
+                if node.numbers.get("patch"):
+                    entry.patch = {**node.numbers["patch"], "enemies": node.numbers.get("enemies")}
             found.append(entry)
             break
     return found

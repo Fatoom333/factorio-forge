@@ -311,6 +311,16 @@ def _drill_text(s: Shortfall) -> str:
         return f"{s.item}: {s.short_per_s:.3g}/s short -- {more} on the same field (or a new field)"
     if s.kind == "no_drills":
         return f"{s.item}: {s.short_per_s:.3g}/s short -- put drills on the field the snapshot found, which has none"
+    if s.patch:
+        p = s.patch
+        amount = ("at least " if p.get("truncated") else "") + f"{p.get('amount', 0):.3g}"
+        where = (f"nearest patch at ({p['position'][0]:.0f}, {p['position'][1]:.0f}), "
+                 f"{p.get('distance', 0):.0f} tiles from the base, {amount} in it")
+        enemies = {k: v for k, v in (p.get("enemies") or {}).items() if v > 0}
+        if enemies:
+            counted = ", ".join(f"{v} {k}" for k, v in sorted(enemies.items()))
+            return f"{s.item}: {s.short_per_s:.3g}/s short -- {where}; {counted} near it: clear them, then mine it"
+        return f"{s.item}: {s.short_per_s:.3g}/s short -- {where}: put drills on it and bring it to the base"
     return f"{s.item}: {s.short_per_s:.3g}/s short -- no field of it in the snapshot: find one and connect it"
 
 

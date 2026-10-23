@@ -93,8 +93,8 @@ cause of the line above it.
   under "labs wait for science packs" and traced like any other shortage only when exactly one pack is a candidate, as an estimate no larger than double what the labs take now; with several, none is ordered (the
   survey does not say which pack a lab misses). No research in progress: said
   so. No labs in the survey (an older file): said so in the limits, no cause.
-- *nearest patch ... enemies* -- a resource that is mined but has no drill and
-  no field: the nearest patch the survey found, its distance and amount, and
+- *nearest patch ... enemies* -- a resource that nothing at the base mines, with no field of it at
+  the base: the nearest patch the survey found, its distance and amount, and
   the enemies counted near it (spawners and worms: clear them first; none
   found; or not looked at). A resource in no patch the survey searched is said
   to be outside its search radius. Fields with enemies near them are listed in
