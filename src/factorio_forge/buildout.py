@@ -33,6 +33,7 @@ and positions from the snapshot.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -170,7 +171,7 @@ def make_request(item: str, rate: float, survey: Survey, boundary: list[str], *,
     out: dict = {
         "said": f"build out {item} for the surveyed base",
         "targets": [{"item": item, "per_second": rate}],
-        "boundary": sorted(b for b in boundary if b != item),
+        "boundary": sorted({b for b in boundary if b != item}),
         "surface": survey.surface,
     }
     if recipe:
@@ -327,12 +328,45 @@ def _folder_name(item: str, taken: set[str]) -> str:
     return name
 
 
+def declare_fluid_sources(plan: dict, stages: list, boundary=()) -> int:
+    """Declare as plan sources the fluids that come into the chain from outside; returns how many.
+
+    The chain declares its belt feeds itself; a pipe in port that takes a fluid no other stage makes (the
+    boundary's fluids count as made outside) is left to the player there. Here each such port becomes a source
+    with the rate the stage draws through it, so a measuring run feeds it. A fluid the chain makes itself is never
+    declared, even when its pipe was left out: that port stays unfed and the measurement shows the shortage.
+    """
+    from . import chain
+
+    made = chain._producers(stages, set(boundary))
+    reached = set()
+    for conn in plan.get("connections") or []:
+        for end in ([conn.get("to")] if isinstance(conn.get("to"), dict) else conn.get("to") or []):
+            if isinstance(end, dict):
+                reached.add((end.get("block"), end.get("port")))
+    sources = plan.setdefault("sources", [])
+    added = 0
+    for stage in stages:
+        for port in stage.ports:
+            if port.io != "in" or port.kind != "pipe" or (stage.index, port.index) in reached:
+                continue
+            for fluid in sorted(port.items):
+                if made.get(fluid) not in (None, stage):
+                    continue
+                rate = stage.line.inputs.get(fluid, 0.0) * chain._share(stage, port, fluid, "pipe")
+                sources.append({"id": f"{fluid}-in-{stage.index}-{port.index}", "block": stage.index,
+                                "port": port.index, "fluid": fluid, "rate": math.ceil(rate * 1000) / 1000})
+                added += 1
+    return added
+
+
 def write_draft(reviewed, folder: Path) -> dict:
     """Run `chain` on a reviewed order and write plan.json and the blueprint into `folder`."""
     from . import chain
 
     try:
         drafted, attempts = chain.build_with_retries(reviewed.spec, reviewed=reviewed)
+        declare_fluid_sources(drafted.plan, drafted.stages, reviewed.spec.boundary)
         folder.mkdir(parents=True, exist_ok=True)
         plan_path = folder / "plan.json"
         plan_path.write_text(json.dumps(drafted.plan, indent=1, ensure_ascii=False), encoding="utf-8")
