@@ -59,3 +59,22 @@ def test_load_accepts_a_byte_order_mark(tmp_path):
 def test_load_missing_file(tmp_path):
     with pytest.raises(survey.SurveyError, match="no survey"):
         survey.load(tmp_path / "nope.json")
+
+
+def test_reads_labs_bounds_and_unmined_patches():
+    read = survey.from_dict(_minimal(
+        bounds=[[-10, -10], [20, 20]], research="automation",
+        labs=[{"unit": 9, "name": "lab", "position": [3.5, 3.5],
+               "states": {"working": 0.25, "missing_science_packs": 0.75}}],
+        unmined=[{"resource": "tungsten-ore", "position": [300, 5], "distance": 280,
+                  "amount": 1000, "enemies": {"worms": 4}}]))
+    assert read.whole_base and read.bounds == ((-10.0, -10.0), (20.0, 20.0))
+    assert read.labs[0].working_share == pytest.approx(0.25)
+    assert read.research == "automation"
+    assert read.unmined[0].enemies == {"worms": 4}
+    assert read.fields[0].enemies is None
+
+
+def test_area_without_bounds_is_read_as_asked_for():
+    read = survey.from_dict(_minimal(area=[[0, 0], [5, 5]]))
+    assert not read.whole_base and read.bounds == read.area

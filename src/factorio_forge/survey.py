@@ -11,7 +11,8 @@ The file is one JSON object::
     {"exported_by": "factorio-forge-companion", "kind": "survey",
      "game_version": "2.0.77", "tick": 8116700, "force": "player",
      "surface": "vulcanus", "area": [[x1, y1], [x2, y2]] or null,
-     "window_s": 60,
+     "bounds": [[x1, y1], [x2, y2]],
+     "window_s": 60, "research": "<technology being researched>" or null,
      "machines": [{"unit": 101, "name": "assembling-machine-2",
                    "position": [x, y], "direction": 0, "recipe": "...",
                    "crafting_speed": 0.75,
@@ -23,7 +24,12 @@ The file is one JSON object::
                  "states": {"working": 1.0}, "amount_left": 120000}],
      "fields": [{"id": 3, "resource": "iron-ore", "amount": 2400000,
                  "tiles": 410, "drills": 12, "center": [x, y],
-                 "truncated": true}],
+                 "truncated": true, "enemies": {"spawners": 0, "worms": 2}}],
+     "labs": [{"unit": 300, "name": "lab", "position": [x, y],
+               "states": {"working": 0.8, "missing_science_packs": 0.2}}],
+     "unmined": [{"resource": "tungsten-ore", "position": [x, y],
+                  "distance": 310.0, "amount": 900000, "truncated": false,
+                  "enemies": {"spawners": 0, "worms": 14}}],
      "flows": {"items": {"iron-plate": {"made": 12.5, "used": 11.0}},
                "fluids": {"water": {"made": 300.0, "used": 250.0}}},
      "power": [{"network": 1, "made_w": 4.1e7, "used_w": 4.0e7,
@@ -32,6 +38,20 @@ The file is one JSON object::
      "blueprint_origin": [x, y]}
 
 Positions are world tiles (entity centres, as the game gives them).
+``area`` is the box the player asked for (``area=`` of the command) and null
+when the whole base was surveyed; ``bounds`` is always the box the survey
+actually covered. A file without ``bounds`` comes from an older companion that
+wrote ``area`` even for the whole base; it is read as asked for, the cautious
+side. ``labs`` are the force's labs in the area with the share of the window
+in each status (``working``, ``missing_science_packs``,
+``no_research_in_progress``, ``full_output``... as for machines); science packs
+they use are in ``flows`` like any item. ``research`` is the technology being
+researched at the end of the window. ``unmined`` is, for each resource the
+survey's drills do not mine, the nearest patch to the base the companion found
+within its search radius: one of its tiles, its distance from the edge of
+``bounds``, and its amount (a lower bound when ``truncated``). ``enemies``
+counts enemy spawners and worms (turrets of an enemy force) near a patch;
+absent means none were looked for, ``{}`` means none were found.
 ``states`` maps a state to the share of the window the machine spent in it;
 the shares add up to about 1. The states are the game's entity statuses in
 snake case, as ``defines.entity_status`` names them: ``working``,
@@ -108,6 +128,29 @@ class ResourceField:
     drills: int
     center: tuple[float, float]
     truncated: bool = False
+    enemies: dict[str, int] | None = None
+
+
+@dataclass
+class Lab:
+    unit: int
+    name: str
+    position: tuple[float, float]
+    states: dict[str, float] = _field(default_factory=dict)
+
+    @property
+    def working_share(self) -> float:
+        return self.states.get(WORKING, 0.0)
+
+
+@dataclass
+class UnminedPatch:
+    resource: str
+    position: tuple[float, float]
+    distance: float
+    amount: float = 0.0
+    truncated: bool = False
+    enemies: dict[str, int] | None = None
 
 
 @dataclass
@@ -141,6 +184,15 @@ class Survey:
     blueprint_origin: tuple[float, float] = (0.0, 0.0)
     game_version: str | None = None
     force: str = "player"
+    bounds: tuple[tuple[float, float], tuple[float, float]] | None = None
+    labs: list[Lab] = _field(default_factory=list)
+    research: str | None = None
+    unmined: list[UnminedPatch] = _field(default_factory=list)
+
+    @property
+    def whole_base(self) -> bool:
+        """True when the survey covered the whole base, not an area the player picked."""
+        return self.area is None
 
     def flow(self, name: str) -> Flow:
         """Made and used per second of an item or fluid; zero when it does not flow."""
@@ -160,6 +212,18 @@ def _shares(value, what: str) -> dict[str, float]:
     if not isinstance(value, dict):
         raise SurveyError(f"{what} maps names to shares, not {value!r}")
     return {str(k): float(v) for k, v in value.items()}
+
+
+def _enemies(value) -> dict[str, int] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SurveyError(f"enemies maps kinds to counts, not {value!r}")
+    return {str(k): int(v) for k, v in value.items()}
+
+
+def _box(value, what: str):
+    return (_pair(value[0], what), _pair(value[1], what)) if value else None
 
 
 def _flows(value, what: str) -> dict[str, Flow]:
@@ -195,7 +259,18 @@ def from_dict(data: dict) -> Survey:
             tiles=int(f.get("tiles", 0)), drills=int(f.get("drills", 0)),
             center=_pair(f["center"], "field center"),
             truncated=bool(f.get("truncated", False)),
+            enemies=_enemies(f.get("enemies")),
         ) for f in data.get("fields", [])]
+        labs = [Lab(
+            unit=int(lab["unit"]), name=str(lab["name"]),
+            position=_pair(lab["position"], "lab position"),
+            states=_shares(lab.get("states"), "lab states"),
+        ) for lab in data.get("labs", [])]
+        unmined = [UnminedPatch(
+            resource=str(u["resource"]), position=_pair(u["position"], "unmined position"),
+            distance=float(u.get("distance", 0.0)), amount=float(u.get("amount", 0.0)),
+            truncated=bool(u.get("truncated", False)), enemies=_enemies(u.get("enemies")),
+        ) for u in data.get("unmined", [])]
         flows = data.get("flows") or {}
         power = [PowerNetwork(
             network=int(p["network"]), made_w=float(p.get("made_w", 0.0)),
@@ -203,7 +278,8 @@ def from_dict(data: dict) -> Survey:
             satisfaction=float(p.get("satisfaction", 1.0)),
             machines=int(p.get("machines", 0)),
         ) for p in data.get("power", [])]
-        area = data.get("area")
+        area = _box(data.get("area"), "area corner")
+        bounds = _box(data.get("bounds"), "bounds corner")
         return Survey(
             surface=str(data["surface"]), tick=int(data.get("tick", 0)),
             window_s=float(data.get("window_s", 0.0)),
@@ -211,12 +287,12 @@ def from_dict(data: dict) -> Survey:
             items=_flows(flows.get("items", {}), "flows.items"),
             fluids=_flows(flows.get("fluids", {}), "flows.fluids"),
             power=power,
-            area=(_pair(area[0], "area corner"), _pair(area[1], "area corner"))
-            if area else None,
+            area=area, bounds=bounds or area,
             blueprint=data.get("blueprint"),
             blueprint_origin=_pair(data.get("blueprint_origin", [0, 0]), "blueprint_origin"),
             game_version=data.get("game_version"),
             force=str(data.get("force", "player")),
+            labs=labs, research=data.get("research"), unmined=unmined,
         )
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         raise SurveyError(f"survey has a bad entry: {error}") from error
