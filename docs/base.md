@@ -30,7 +30,7 @@ once, at the item.
 ```
 2 recipe group(s) work well; 3 problem(s), the biggest: ...
 
-what holds the base back (most idle machine time first):
+what holds the base back (biggest loss first):
  1. target solar-panel: 0.5/s wanted, 0.112/s made, short 0.388/s
     -> solar-panel: 0.112/s solar-panel made of 0.45/s possible (6 x assembling-machine-2, working 25% of the time)
         -> solar-panel waits for steel-plate: short 1.57/s, 70% of the time (0.315/s of solar-panel lost)
@@ -90,7 +90,7 @@ cause of the line above it.
   is normal and the group is not a problem (it is listed under works well as
   "research"). Labs waiting for packs: the pack held back is not the one they
   lack; the packs whose makers are not held back by a full output are listed
-  under "labs wait for science packs" and traced like any other shortage (the
+  under "labs wait for science packs" and traced like any other shortage only when exactly one pack is a candidate, as an estimate no larger than double what the labs take now; with several, none is ordered (the
   survey does not say which pack a lab misses). No research in progress: said
   so. No labs in the survey (an older file): said so in the limits, no cause.
 - *nearest patch ... enemies* -- a resource that is mined but has no drill and
@@ -100,19 +100,29 @@ cause of the line above it.
   to be outside its search radius. Fields with enemies near them are listed in
   the limits.
 
-**Order.** Entries are ranked by the machine time they leave idle, in machines
-(not by units per second, so a fluid made in thousands per second does not
-outrank a missing ore): for each entry, the idle share of the machines of every
-group it shows or reaches below it, summed (idle for a full output is not
-counted: that idleness is caused further down). It is in each entry's
-`numbers` (`impact_idle_machines`, and `explains_idle_machines` on every line).
-A group that two entries reach counts in both.
+**Order.** Entries are ranked by the machine time they explain, in machines,
+not by units per second: a fluid made in thousands per second counts for
+what its machines leave idle, not for its rate. Each group's idle time for a
+shortage (idle for a full output is not counted: that is the symptom, the
+cause is further down) is credited once, in the chain that shows the group,
+and divided among the things it waited for in step with the output lost to
+each; only what ends in a fault (too few makers, no ore, no field, power, fuel,
+a switched-off machine) is credited, and the part for something shown in
+another chain goes to that chain. An entry that is only a full output, with no
+fault under it, comes after the ones that have one. The figure is in each
+entry's `numbers` (`impact_idle_machines`, and `explains_idle_machines` on
+every line) and in its text ("explains N machine(s) of idle time"). A user
+that does not take a full output is an entry of its own, not hidden under the
+maker whose output is full.
 
 **Machines that make buildings** are not demand. A machine whose product is
 a building (a foundry making foundries, a drill, a belt) waits and fills its
 output whenever the base has enough of it; that raises no shortfall and adds
 nothing to what its ingredients are wanted at. They are listed once in the
-limits. A building that is also an ingredient is still known as made by them.
+limits. A building that another machine, outside the buildings, takes as an
+ingredient (a belt into a science pack, a pipe into an engine) is not left
+out this way: its makers are ordinary producers and the chain goes on to what
+they lack.
 
 Problems already explained by a chain are not listed again as separate
 entries. With `--target item=rate`, a rate wanted (`=60/m` for per minute),

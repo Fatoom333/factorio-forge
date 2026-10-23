@@ -30,11 +30,14 @@ and `limits`.
   with "made elsewhere" means the item comes from outside: ask the player.
 - A chain line "already shown above" is not a loop and not a new cause: look
   where it was first shown. Only "the recipes feed each other" is a real loop.
-- Order: ranked by idle machine time, in machines: the idle share of the
-  machines of every group the cause shows or reaches, a full output not
-  counted (`impact_idle_machines` in the JSON, "explains N machine(s) of idle
-  time" on the line). Never by units per second: steam in thousands a second
-  is not bigger than a missing ore. A group two causes reach counts in both.
+- Order: ranked by the idle machine time a cause explains, in machines
+  (`impact_idle_machines` in the JSON, "explains N machine(s) of idle time"
+  on the line). A group's idle time for a shortage counts once, in the chain
+  that shows it, split among what it waited for, and only where the chain
+  ends in a fault (too few makers, no ore or field, power, fuel); a full
+  output is the symptom and counts nothing, so an entry with only a full
+  output comes after the ones with a fault. Never by units per second: steam
+  in thousands a second is not bigger than a missing ore.
 - "possible ... is a lower bound": the group made more than the possible rate
   because modules and researched productivity are not counted. Say that, not
   "it does more than it can".
@@ -45,6 +48,8 @@ and `limits`.
   survey (an older file) it is not a cause: say the labs were not surveyed.
 - Machines that make buildings (a mall) are not demand: their waiting adds no
   shortfall and no order. They are listed once in the limits; idle is normal.
+  A building that a non-mall machine takes as an ingredient (a belt into a
+  science pack) is not mall: its makers are ordinary producers.
 - A mined resource with no drill and no field: the line names the nearest
   patch, its distance, amount and the enemies near it. Spawners or worms
   counted: tell the player to clear them first, not to just connect a field.

@@ -156,6 +156,30 @@ class TestChains:
         assert root.numbers["impact_idle_machines"] == pytest.approx(0.5 + 2 * 0.5)
         assert find(root, "low_output").numbers["explains_idle_machines"] == pytest.approx(1.5)
 
+    def test_a_fluid_with_a_full_output_does_not_outrank_the_ore_its_user_misses(self) -> None:
+        recipes = {**RECIPES,
+                   "boil": {"ingredients": [{"name": "water", "amount": 1}],
+                            "results": [{"name": "steam", "amount": 600}], "energy_required": 1},
+                   "steamer": {"ingredients": [{"name": "steam", "amount": 10}, {"name": "tungsten", "amount": 1}],
+                               "results": [{"name": "motor", "amount": 1}], "energy_required": 1}}
+        machines = [machine(1, "boil", states={"working": 0.1, "output_full": 0.9}, speed=5.0)]
+        machines += [machine(10 + i, "steamer", 0.3, {"tungsten": 0.7}) for i in range(4)]
+        found = diagnose(survey(machines), book=RecipeBook(recipes, is_mined=lambda i: i == "tungsten"))
+        assert [c.recipe for c in found.causes] == ["steamer", "boil"]
+        steamer, boil = found.causes
+        assert find(steamer, "no_field").item == "tungsten"
+        assert steamer.numbers["impact_idle_machines"] == pytest.approx(2.8)
+        assert boil.numbers["impact_idle_machines"] == pytest.approx(0.0) and not boil.numbers["has_shortage"]
+        assert [s.item for s in found.shortfalls] == ["tungsten"]
+
+    def test_a_group_is_counted_once_not_in_every_cause_that_reaches_it(self) -> None:
+        # two full outputs both point at the same starving user: its idle time is credited to one cause only
+        machines = [machine(1, "smelt", states={"working": 0.1, "output_full": 0.9}),
+                    machine(2, "gear", states={"working": 0.1, "output_full": 0.9}),
+                    machine(3, "panel", 0.2, {"ore": 0.8})]
+        found = diagnose(survey(machines), book=BOOK)
+        assert sum(c.numbers["impact_idle_machines"] for c in found.causes) == pytest.approx(0.8)
+
     def test_a_full_output_is_not_idle_time_for_a_shortage(self) -> None:
         full = {"working": 0.2, "output_full": 0.8}
         found = diagnose(survey([machine(1, "gear", states=full), machine(2, "panel", 0.2, {"gear": 0.8})]),
@@ -268,8 +292,11 @@ class TestStops:
         machines = [machine(1, "gear", states={"working": 0.2, "output_full": 0.8}),
                     machine(2, "panel", 0.3, {"plate": 0.7})]
         found = diagnose(survey(machines), book=BOOK)
-        assert [c.recipe for c in found.causes] == ["gear"]  # panel is below it, not listed again
-        assert kinds(found.causes[0]) == ["low_output", "output_full", "low_output", "waiting", "nobody_makes"]
+        # the user that waits is the cause; the full output is its symptom, listed after and pointing at it
+        assert [c.recipe for c in found.causes] == ["panel", "gear"]
+        assert kinds(found.causes[0]) == ["low_output", "waiting", "nobody_makes"]
+        assert kinds(found.causes[1]) == ["low_output", "output_full", "seen_above"]
+        assert found.causes[1].numbers["impact_idle_machines"] == pytest.approx(0.0)
 
     def test_output_full_that_users_cannot_take_faster(self) -> None:
         machines = [machine(1, "gear", states={"working": 0.2, "output_full": 0.8}), machine(2, "panel", 1.0)]
@@ -551,9 +578,12 @@ class TestBuildings:
         assert found.causes == []
 
     def test_a_building_that_is_also_an_ingredient_still_has_its_makers(self) -> None:
-        machines = [machine(1, "needs-belt", 0.3, {"belt": 0.7}), machine(2, "make-belt", 0.5, {"plate": 0.5})]
+        machines = [machine(1, "needs-belt", 0.5, {"belt": 0.5}), machine(2, "make-belt", 0.5, {"plate": 0.5})]
         found = diagnose(survey(machines), book=mall_book())
-        assert not any(c.kind == "nobody_makes" for r in found.causes for c in r.walk())
+        leaves = [c for r in found.causes for c in r.walk() if c.kind == "nobody_makes"]
+        assert [c.item for c in leaves] == ["plate"]  # the chain goes on to what the belt maker lacks
+        assert not any(s.item == "belt" for s in found.shortfalls)  # and no order for more belt makers
+        assert [s.item for s in found.shortfalls] == ["plate"]
 
 
 def lab(unit, **states):
@@ -607,6 +637,44 @@ class TestLabs:
                                 labs=[lab(1, working=0.4, missing_science_packs=0.6)]), book=self.book())
         root = next(c for c in found.causes if c.numbers.get("consumer") == "labs")
         assert root.numbers["candidates"] == [] and "is the limit" in root.text
+
+
+    def test_labs_working_with_the_research_just_finished_are_still_fed(self) -> None:
+        found = diagnose(survey(self.red(), labs=[lab(1, working=0.9, missing_science_packs=0.05)]),
+                         book=self.book())  # research is empty at the end of the window only
+        assert found.causes == []
+        assert any(g["recipe"] == "research" for g in found.good)
+        assert any("No research was in progress" in limit for limit in found.limits)
+
+    def test_a_maker_whose_only_trouble_is_a_pack_the_labs_do_not_need_is_no_cause(self) -> None:
+        plates = [machine(30 + i, "smelt", states={"working": 0.2, "output_full": 0.8}) for i in range(2)]
+        found = diagnose(survey(plates + self.red(), research="logistics",
+                                labs=[lab(1, working=0.9), lab(2, working=0.8)]), book=self.book())
+        assert found.causes == []
+
+    def test_with_several_candidate_packs_none_is_ordered(self) -> None:
+        reds = [machine(i, "red", 0.4, {"plate": 0.6}) for i in range(1, 3)]
+        greens = [machine(20 + i, "green", 0.4, {"plate": 0.6}) for i in range(2)]
+        short = dict(working=0.05, missing_science_packs=0.9)
+        found = diagnose(survey(
+            reds + greens, labs=[lab(1, **short)], research="logistics",
+            items={"red-pack": {"made": 0.4, "used": 0.4}, "green-pack": {"made": 0.4, "used": 0.4}}),
+            book=self.book())
+        root = next(c for c in found.causes if c.numbers.get("consumer") == "labs")
+        assert root.numbers["candidates"] == ["green-pack", "red-pack"]
+        assert all(c.short_per_s == 0 and c.numbers["guess"] for c in root.children)
+        assert not any("labs" in s.consumers for s in found.shortfalls)
+
+    def test_a_single_candidate_is_an_estimate_that_stays_bounded(self) -> None:
+        greens = [machine(20 + i, "green", 0.4, {"plate": 0.6}) for i in range(2)]
+        short = dict(working=0.01, missing_science_packs=0.9)
+        found = diagnose(survey(
+            self.red() + greens, labs=[lab(1, **short)], research="logistics",
+            items={"red-pack": {"made": 0.6, "used": 0.6}, "green-pack": {"made": 1.0, "used": 1.0}}),
+            book=self.book())
+        root = next(c for c in found.causes if c.numbers.get("consumer") == "labs")
+        (child,) = root.children
+        assert "an estimate" in child.text and child.short_per_s <= 1.0 + 1e-9  # never more than doubling
 
 
 class TestWholeBase:

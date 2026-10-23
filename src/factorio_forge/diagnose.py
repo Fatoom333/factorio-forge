@@ -6,7 +6,7 @@ flows and the power networks. The answer is a ``Diagnosis``:
 
 * ``good`` -- recipe groups whose machines work at least 90% of the window;
 * ``causes`` -- the groups that make less than their machines could, ranked by
-  the machine time they leave idle (see ``IDLE_BASIS``), each a tree. A machine that waits for an ingredient points at
+  the machine time they explain (see ``IDLE_BASIS``), each a tree. A machine that waits for an ingredient points at
   whoever makes it; that group is looked at the same way, and so on until the
   first cause: nobody here makes it, its makers are too few (they work all the
   time yet the users starve), the drills hold their ore (the belt backs up),
@@ -55,9 +55,9 @@ NEAR_EMPTY_HOURS = 24.0  # a field with less than this much left at the current 
 LAB_FED = 0.5  # labs working at least this share of the window are fed
 LAB_STARVED = 0.1  # labs missing packs this share of the window are short of packs
 PACK_BACKED_UP = 0.3  # a pack whose makers wait with a full output this much of the time is not the short one
-IDLE_BASIS = ("machine time idle for a shortage (not for a full output), in machines: the groups the cause "
-              "shows and every group below them that they wait for or feed; a group shared by two causes "
-              "counts in both")
+IDLE_BASIS = ("machine time idle for a shortage (not for a full output), in machines, credited to the faults "
+              "it waits for: each group counts once, in the chain that shows it, divided among what it waited "
+              "for; groups that only hold a full output add nothing")
 OVER_SHARE = 0.02  # made above possible by more than this share: the possible rate is only a lower bound
 MAX_DEPTH = 90  # a guard only: the path and the once-only expansion already end every walk
 
@@ -373,12 +373,24 @@ class _Walk:
             self.groups[recipe] = _group(recipe, book.recipes[recipe], machines, book)
         for g in self.groups.values():
             g.building = bool(book.is_building(g.main))
+        # A building that a machine outside the mall takes as an ingredient (a belt into a science pack) is
+        # made for a use: its makers are ordinary producers, not part of the mall.
+        changed = True
+        while changed:
+            changed = False
+            for g in self.groups.values():
+                if g.building and any(h is not g and not h.building and set(g.full) & set(h.ingredient_full)
+                                      for h in self.groups.values()):
+                    g.building = False
+                    changed = True
         self._made_by: dict[str, list[_Group]] = defaultdict(list)
         for g in self.groups.values():
             for item in g.full:
                 self._made_by[item].append(g)
         # who waits for whom, kept across passes: it says which groups are explained by which
         self.edges: dict[str, set[str]] = defaultdict(set)
+        # who takes whose output: a full output is the maker's symptom, not what explains the user's idle time
+        self.out_edges: dict[str, set[str]] = defaultdict(set)
         self.science_seen = False
         self.reset()
 
@@ -561,7 +573,7 @@ class _Walk:
             f"its users {', '.join(sorted(u.recipe for u in users))} do not take it all",
             item=g.main, recipe=g.recipe, lost_per_s=lost, share=share, units=units, numbers=numbers)
         for user in low:
-            self.edges[g.recipe].add(user.recipe)
+            self.out_edges[g.recipe].add(user.recipe)
             if user.recipe in path:
                 node.children.append(self.ref_node(g.recipe, user.recipe))
             elif depth < MAX_DEPTH:
@@ -602,7 +614,7 @@ class _Walk:
         numbers = {**numbers, "labs_surveyed": True, "lab_working": stats["working"],
                    "lab_missing_packs": stats["missing"], "lab_no_research": stats["no_research"],
                    "benign": True}
-        if self.survey.research is None or stats["no_research"] >= LAB_FED:
+        if stats["no_research"] >= LAB_FED:
             return Cause("no_research",
                          head + f"; no research is in progress (the {stats['labs']} labs have none "
                          f"{stats['no_research']:.0%} of the time), so the packs pile up: queue a research",
@@ -629,7 +641,7 @@ class _Walk:
         if not labs:
             return []
         stats = self.lab_stats()
-        if stats["missing"] < LAB_STARVED or self.survey.research is None or stats["no_research"] >= LAB_FED:
+        if stats["missing"] < LAB_STARVED or stats["no_research"] >= LAB_FED:
             return []
         working = stats["working"]
         backed_up: list[str] = []
@@ -644,7 +656,10 @@ class _Walk:
                 backed_up.append(item)
                 continue
             wanted = max(flow.used, flow.made)
-            candidates.append((item, wanted * stats["missing"] / max(working, 0.05)))
+            # Labs would take more by about the share of time they wait, but never more than twice what they take now:
+            # with labs that hardly work at all the ratio says nothing.
+            candidates.append((item, wanted * min(stats["missing"] / max(working, 0.05), 1.0)))
+        sure = len(candidates) == 1
         node = Cause(
             "waiting",
             f"labs wait for science packs {stats['missing']:.0%} of the time ({stats['labs']} labs, working "
@@ -656,12 +671,20 @@ class _Walk:
                      "missing_packs": stats["missing"], "backed_up_packs": backed_up,
                      "candidates": [c for c, _ in candidates]})
         for item, short in candidates:
+            if not sure:
+                # The survey does not say which pack is missing: with several candidates none is ordered.
+                node.children.append(Cause(
+                    "waiting",
+                    f"labs may wait for {item} (its makers are not held back by a full output; the survey does not "
+                    "say which pack the labs miss, so nothing is counted as short)",
+                    item=item, numbers={"consumer": "labs", "guess": True}))
+                continue
             child = Cause("waiting",
-                          f"labs may wait for {item} (its makers are not held back by a full output; the survey "
-                          f"does not say which pack the labs miss): about {_n(short)}/s more would feed them"
+                          f"labs may wait for {item} (the only pack whose makers are not held back by a full output; "
+                          f"an estimate): about {_n(short)}/s more would feed them"
                           if short > EPS else
                           f"labs may wait for {item} (its makers are not held back by a full output)",
-                          item=item, short_per_s=short, numbers={"consumer": "labs"})
+                          item=item, short_per_s=short, numbers={"consumer": "labs", "guess": True})
             child.children = self.trace_item(item, short, "labs", frozenset(), 2)
             node.children.append(child)
         return [node]
@@ -1026,12 +1049,16 @@ def diagnose(survey: Survey, targets: Mapping[str, float] | Iterable[tuple[str, 
     walk.labs_nodes()
     for recipe in sorted(weak):
         walk.group_node(weak[recipe], frozenset(), 0)
-    below = {r: _reach(walk.edges, [r]) - {r} for r in weak}
-    covered = _reach(walk.edges, [f"target:{item}" for item, *_ in gaps] + ["labs"])
+    shown = _merge(walk.edges, walk.out_edges)
+    below = {r: _reach(shown, [r]) - {r} for r in weak}
+    # A full output does not explain the idle time of those who take it: only waiting does.
+    below_waiting = {r: _reach(walk.edges, [r]) - {r} for r in weak}
+    covered = _reach(shown, [f"target:{item}" for item, *_ in gaps] + ["labs"])
 
     candidates = []
     for recipe in weak:
-        explained = any(recipe in below[other] and other not in below[recipe] for other in weak if other != recipe)
+        explained = any(recipe in below_waiting[other] and other not in below_waiting[recipe]
+                        for other in weak if other != recipe)
         if not explained and recipe not in covered:
             candidates.append(recipe)
     candidates.sort(key=lambda r: (-weak[r].idle_machines, -weak[r].lost.get(weak[r].main, 0.0), r))
@@ -1047,19 +1074,28 @@ def diagnose(survey: Survey, targets: Mapping[str, float] | Iterable[tuple[str, 
     others = walk.labs_nodes()
     others += [walk.group_node(weak[r], frozenset(), 0) for r in chosen]
     walk.finalize()
-    # A group whose only trouble is a full output nobody has to empty (labs fed, a mall that stands) is no cause.
-    others = [c for c in others if not _benign_only(c)]
-    idle = {r: g.idle_machines for r, g in walk.groups.items() if not g.building}
-    reach = {r: _reach(walk.edges, [r]) | {r} for r in walk.groups}
+    # A group already shown inside an earlier chain is not a second entry.
+    others = [c for c in others if c.kind != "seen_above"]
+    # What is left with a full output that nobody has to empty (labs fed, a mall that stands) is no cause.
+    benign: set[str] = set()
+    found: dict[int, bool | None] = {}
+    while True:
+        before = len(benign)
+        for node in roots + others:
+            _settle(node, benign, found)
+        if len(benign) == before:
+            break
     for node in roots + others:
-        total = sum(idle.get(r, 0.0) for r in _explain(node, reach, idle))
-        node.numbers["impact_idle_machines"] = total
-        node.numbers["impact_basis"] = IDLE_BASIS
-        if total > EPS:
-            node.text += f"; explains {_n(total)} machine(s) of idle time"
+        _cut(node, found)
+    others = [c for c in others if found.get(id(c)) is not True]
+    present = {n.recipe for root in roots + others for n in root.walk() if n.kind not in ("seen_above", "cycle")}
+    for node in roots + others:
+        _drop_pointers(node, present)
+    _impact(walk, roots, others)
     roots.sort(key=lambda c: (-c.numbers["impact_idle_machines"],
                               -c.lost_per_s / (c.numbers.get("target_per_s") or 1.0), c.item or ""))
-    others.sort(key=lambda c: (-c.numbers["impact_idle_machines"], c.recipe or c.item or c.text))
+    others.sort(key=lambda c: (not c.numbers["has_shortage"], -c.numbers["impact_idle_machines"],
+                               c.recipe or c.item or c.text))
     result.causes = roots + others
     _lab_fact(walk, result)
 
@@ -1069,19 +1105,109 @@ def diagnose(survey: Survey, targets: Mapping[str, float] | Iterable[tuple[str, 
     return result
 
 
-def _benign_only(node: Cause) -> bool:
-    return node.kind == "low_output" and bool(node.children) and all(c.numbers.get("benign") for c in node.children)
+# What a leaf of a chain can be that is a fault to act on (the rest of a chain is groups waiting and full outputs).
+FAULT_KINDS = SHORT_KINDS | {"drills_blocked", "field_depleting", "power", "no_power", "no_fuel", "disabled", "other"}
 
 
-def _explain(node: Cause, reach: Mapping[str, set[str]], idle: Mapping[str, float]) -> set[str]:
-    """The recipes whose idle machine time (see ``IDLE_BASIS``) a cause accounts for; sets its number."""
+def _merge(*graphs: Mapping[str, set[str]]) -> dict[str, set[str]]:
+    merged: dict[str, set[str]] = defaultdict(set)
+    for graph in graphs:
+        for key, values in graph.items():
+            merged[key] |= values
+    return merged
+
+
+def _settle(node: Cause, benign: set[str], found: dict[int, bool | None]) -> bool | None:
+    """Whether nothing here needs fixing, bottom up (a pure reading: `_cut` removes what it finds).
+
+    True: no cause (a full output that science, a mall or the labs take care of, and every user of it
+    likewise). False: a cause. None: only a pointer to where something was shown. A pointer to a group that
+    is itself no cause is no cause either (`benign` holds those groups).
+    """
     if node.kind in ("seen_above", "cycle"):
-        return set()
-    recipes: set[str] = set(reach.get(node.recipe or "", ()))
+        found[id(node)] = True if node.recipe in benign else None
+        return found[id(node)]
+    verdicts = [_settle(c, benign, found) for c in node.children]
+    if node.kind in ("low_output", "output_full") and verdicts:
+        result: bool | None = False if any(v is False for v in verdicts) else any(v is True for v in verdicts)
+    else:
+        result = bool(node.numbers.get("benign")) and not node.children
+    if result and node.kind == "low_output" and node.recipe:
+        benign.add(node.recipe)
+    found[id(node)] = result
+    return result
+
+
+def _cut(node: Cause, found: Mapping[int, bool | None]) -> None:
+    node.children = [c for c in node.children if found.get(id(c)) is not True]
     for child in node.children:
-        recipes |= _explain(child, reach, idle)
-    node.numbers["explains_idle_machines"] = sum(idle.get(r, 0.0) for r in recipes)
-    return recipes
+        _cut(child, found)
+
+
+def _drop_pointers(node: Cause, present: set) -> None:
+    """A pointer "shown above" to a group that was cut out as no cause would point at nothing."""
+    node.children = [c for c in node.children
+                     if not (c.kind in ("seen_above", "cycle") and c.recipe and c.recipe not in present)]
+    for child in node.children:
+        _drop_pointers(child, present)
+
+
+def _has_fault(node: Cause) -> bool:
+    return any(n.kind in FAULT_KINDS for n in node.walk())
+
+
+def _credit(node: Cause, groups: Mapping[str, _Group], elsewhere: dict[str, float]) -> float:
+    """Idle machines (see ``IDLE_BASIS``) credited inside a node, each group once, at the faults it waits for.
+
+    A group's idle time for a shortage is divided among what it waited for, in step with the output lost
+    to each; the part for a thing that has no fault under it here is credited to the chain that shows that
+    thing (`elsewhere`, by item), or to nothing when the snapshot does not say what it waited for.
+    """
+    total = sum(_credit(child, groups, elsewhere) for child in node.children)
+    g = groups.get(node.recipe or "") if node.kind == "low_output" else None
+    if g is not None and not g.building and g.idle_machines > EPS:
+        parts = []
+        for child in node.children:
+            if child.kind == "waiting":
+                parts.append((child, child.lost_per_s))
+            elif child.kind in ("power", "no_power", "no_fuel", "disabled", "other"):
+                parts.append((child, float(child.numbers.get("lost_per_s", 0.0))))
+        weight = sum(max(lost, 0.0) for _c, lost in parts)
+        if weight > EPS:
+            for child, lost in parts:
+                part = g.idle_machines * max(lost, 0.0) / weight
+                if child.kind != "waiting" or _has_fault(child):
+                    total += part
+                    continue
+                pointer = next((c.item for c in child.children if c.kind == "seen_above" and c.item), None)
+                if pointer:
+                    elsewhere[pointer] = elsewhere.get(pointer, 0.0) + part
+    node.numbers["explains_idle_machines"] = total
+    return total
+
+
+def _impact(walk: _Walk, roots: list[Cause], others: list[Cause]) -> None:
+    """Put the machine-time impact of every cause in its numbers and in its text."""
+    elsewhere: dict[str, float] = {}
+    top = roots + others
+    for node in top:
+        node.numbers["impact_idle_machines"] = _credit(node, walk.groups, elsewhere)
+    owner: dict[int, Cause] = {id(n): root for root in top for n in root.walk()}
+    for item, amount in elsewhere.items():
+        children = walk.slots.get(item, ([], []))[0]
+        root = next((owner[id(c)] for c in children if id(c) in owner), None)
+        if root is not None:
+            root.numbers["impact_idle_machines"] += amount
+    for node in top:
+        total = node.numbers["impact_idle_machines"]
+        node.numbers["impact_basis"] = IDLE_BASIS
+        node.numbers["has_shortage"] = _has_fault(node)
+        if total > EPS:
+            node.text += f"; explains {_n(total)} machine(s) of idle time"
+        elif node.kind == "low_output" and not _has_fault(node):
+            node.text += ("; no fault of its own found: what it waits for is made enough here or explained in the "
+                          "chains above" if any(n.kind == "waiting" for n in node.children)
+                          else "; no shortage under it, only a full output")
 
 
 def _lab_fact(walk: _Walk, result: Diagnosis) -> None:
@@ -1089,7 +1215,7 @@ def _lab_fact(walk: _Walk, result: Diagnosis) -> None:
     if not walk.science_seen or not walk.survey.labs:
         return
     stats = walk.lab_stats()
-    if stats["working"] >= LAB_FED and stats["missing"] < LAB_STARVED and walk.survey.research is not None:
+    if stats["working"] >= LAB_FED and stats["missing"] < LAB_STARVED:
         labs = walk.survey.labs
         result.good.append({
             "recipe": "research", "machines": len(labs), "machine": labs[0].name, "working": stats["working"],
@@ -1149,7 +1275,7 @@ def _limits(walk: _Walk, result: Diagnosis) -> list[str]:
         "What is short of an item is summed over the machines that waited for it in the window, and what its "
         "makers could still add is taken off once; a machine count is therefore a first estimate, not a design.",
     ]
-    if not walk.survey.whole_base and walk.survey.area is not None:
+    if not walk.survey.whole_base:
         (x1, y1), (x2, y2) = walk.survey.area
         limits.append(f"Only the area ({x1:g}, {y1:g}) to ({x2:g}, {y2:g}) was surveyed: makers and users "
                       "outside it count as nobody, and the production flows are for the whole surface, so "
@@ -1165,7 +1291,9 @@ def _limits(walk: _Walk, result: Diagnosis) -> list[str]:
         limits.append("Labs were not surveyed (an older survey file): whether research takes the science packs "
                       "is not known, so packs held at a full output are not counted as a fault.")
     elif walk.survey.labs and walk.survey.research is None:
-        limits.append("No research is in progress at the end of the window: packs pile up until one is queued.")
+        stats = walk.lab_stats()
+        limits.append(f"No research was in progress at the end of the window (the labs worked {stats['working']:.0%} "
+                      "of it): packs pile up until one is queued.")
     danger = [f for f in walk.survey.fields if _enemy_count(f.enemies)]
     if danger:
         limits.append("Enemies near fields: " + "; ".join(
